@@ -117,7 +117,11 @@ fun HomeCompose() {
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = Color.Red),
                 onClick = {
-                    Shizuku.requestPermission(1)
+                    try {
+                        Shizuku.requestPermission(1)
+                    } catch (_: Exception) {
+                        //request permission failed
+                    }
                 }
             ) {
                 Row(

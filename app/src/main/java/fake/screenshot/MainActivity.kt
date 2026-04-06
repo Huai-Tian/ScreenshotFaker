@@ -33,7 +33,14 @@ import rikka.shizuku.Shizuku
 class MainActivity : ComponentActivity() {
     companion object {
         fun isModuleActivated() = false
-        var isShellActivated by mutableStateOf(try { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED } catch (_: Exception) { false })
+        var isShellActivated by mutableStateOf(
+            try {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            } catch (_: Exception) {
+                false
+            }
+        )
+
         fun isRootActivated() = false
         fun getVersionName(context: Context): String {
             return try {
@@ -56,14 +63,22 @@ class MainActivity : ComponentActivity() {
 
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
         if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
-            isShellActivated=true
+            isShellActivated = true
         }
+    }
+    val deadListener = Shizuku.OnBinderDeadListener {
+        isShellActivated = false
+    }
+    val receivedListener = Shizuku.OnBinderReceivedListener {
+        isShellActivated = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         Shizuku.addRequestPermissionResultListener(listener)
+        Shizuku.addBinderDeadListener(deadListener)
+        Shizuku.addBinderReceivedListener(receivedListener)
         setContent {
             val navController = rememberNavController()
             val navBackStackEntry by navController.currentBackStackEntryFlow.collectAsState(initial = null)
@@ -131,9 +146,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        isShellActivated = try {
+            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception) {
+            false
+        }
+    }
     override fun onDestroy() {
         super.onDestroy()
         Shizuku.removeRequestPermissionResultListener(listener)
+        Shizuku.removeBinderDeadListener(deadListener)
+        Shizuku.removeBinderReceivedListener(receivedListener)
     }
 }
 
