@@ -1,6 +1,7 @@
 package fake.screenshot
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,6 +17,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -25,11 +28,12 @@ import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.SettingsCompose
+import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
     companion object {
         fun isModuleActivated() = false
-        fun isShellActivated() = true
+        var isShellActivated by mutableStateOf(try { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED } catch (_: Exception) { false })
         fun isRootActivated() = false
         fun getVersionName(context: Context): String {
             return try {
@@ -50,9 +54,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
+        if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
+            isShellActivated=true
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        Shizuku.addRequestPermissionResultListener(listener)
         setContent {
             val navController = rememberNavController()
             val navBackStackEntry by navController.currentBackStackEntryFlow.collectAsState(initial = null)
@@ -62,7 +73,7 @@ class MainActivity : ComponentActivity() {
             val visibleDestinations = AppDestinations.entries.filter { destination ->
                 when (destination) {
                     AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated()
-                    AppDestinations.EXTENSION -> isShellActivated() || isRootActivated()
+                    AppDestinations.EXTENSION -> isShellActivated || isRootActivated()
                     else -> true
                 }
             }
@@ -118,6 +129,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Shizuku.removeRequestPermissionResultListener(listener)
     }
 }
 

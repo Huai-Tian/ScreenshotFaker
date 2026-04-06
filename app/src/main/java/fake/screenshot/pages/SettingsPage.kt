@@ -99,7 +99,7 @@ fun SettingsCompose() {
                     )
                 }
             }
-            if (MainActivity.isRootActivated() || MainActivity.isShellActivated()) {
+            if (MainActivity.isRootActivated() || MainActivity.isShellActivated) {
                 item {
                     CommonCard {
                         TwoStatePreference(

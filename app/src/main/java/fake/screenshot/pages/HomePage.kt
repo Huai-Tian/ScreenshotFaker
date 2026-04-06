@@ -35,13 +35,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.MainActivity
 import fake.screenshot.R
+import rikka.shizuku.Shizuku
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeCompose() {
     Column {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) })
-        if (MainActivity.isModuleActivated() || MainActivity.isRootActivated() || MainActivity.isShellActivated()) {
+        if (MainActivity.isModuleActivated() || MainActivity.isRootActivated() || MainActivity.isShellActivated) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -115,7 +116,9 @@ fun HomeCompose() {
                     .padding(vertical = 16.dp),
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = Color.Red),
-                onClick = {}
+                onClick = {
+                    Shizuku.requestPermission(1)
+                }
             ) {
                 Row(
                     modifier = Modifier
@@ -206,10 +209,10 @@ fun WorkingInfomation() {
                 InfoItem(
                     stringResource(R.string.privilege), when {
                         MainActivity.isModuleActivated() && MainActivity.isRootActivated() -> "LSPosed + Root"
-                        MainActivity.isModuleActivated() && MainActivity.isShellActivated() -> "LSPosed + Shell"
+                        MainActivity.isModuleActivated() && MainActivity.isShellActivated -> "LSPosed + Shell"
                         MainActivity.isModuleActivated() -> "LSPosed"
                         MainActivity.isRootActivated() -> "Root"
-                        MainActivity.isShellActivated() -> "Shell"
+                        MainActivity.isShellActivated -> "Shell"
                         else -> "None"
                     }
                 )
