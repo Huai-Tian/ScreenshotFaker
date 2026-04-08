@@ -16,7 +16,7 @@ class ScreenshotFaker : IXposedHookLoadPackage {
             this.javaClass.`package`?.name -> {
                 try {
                     XposedHelpers.findAndHookMethod(
-                        MainActivity.Companion::class.java.name,
+                        Auxiliary::class.java.name,
                         p0.classLoader,
                         "isModuleActivated",
                         XC_MethodReplacement.returnConstant(true)

@@ -33,7 +33,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import fake.screenshot.MainActivity
+import fake.screenshot.Auxiliary
 import fake.screenshot.R
 import rikka.shizuku.Shizuku
 
@@ -42,7 +42,7 @@ import rikka.shizuku.Shizuku
 fun HomeCompose() {
     Column {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) })
-        if (MainActivity.isModuleActivated() || MainActivity.isRootActivated() || MainActivity.isShellActivated) {
+        if (Auxiliary.isModuleActivated() || Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -98,10 +98,10 @@ fun HomeCompose() {
                         // 第二行：版本号
                         Text(
                             text = "${stringResource(R.string.version)} ${
-                                MainActivity.getVersionName(
+                                Auxiliary.getVersionName(
                                     LocalContext.current
                                 )
-                            }（${MainActivity.getVersionCode(LocalContext.current)}）",
+                            }（${Auxiliary.getVersionCode(LocalContext.current)}）",
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 14.sp
                         )
@@ -212,11 +212,11 @@ fun WorkingInformation() {
 
                 InfoItem(
                     stringResource(R.string.privilege), when {
-                        MainActivity.isModuleActivated() && MainActivity.isRootActivated() -> "LSPosed + Root"
-                        MainActivity.isModuleActivated() && MainActivity.isShellActivated -> "LSPosed + Shell"
-                        MainActivity.isModuleActivated() -> "LSPosed"
-                        MainActivity.isRootActivated() -> "Root"
-                        MainActivity.isShellActivated -> "Shell"
+                        Auxiliary.isModuleActivated() && Auxiliary.isRootActivated() -> "LSPosed + Root"
+                        Auxiliary.isModuleActivated() && Auxiliary.isShellActivated -> "LSPosed + Shell"
+                        Auxiliary.isModuleActivated() -> "LSPosed"
+                        Auxiliary.isRootActivated() -> "Root"
+                        Auxiliary.isShellActivated -> "Shell"
                         else -> "None"
                     }
                 )

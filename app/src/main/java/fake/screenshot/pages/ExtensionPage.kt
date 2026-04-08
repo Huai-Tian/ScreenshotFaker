@@ -11,7 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import fake.screenshot.MainActivity
+import fake.screenshot.Auxiliary
 import fake.screenshot.R
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,7 +48,7 @@ fun ExtensionCompose() {
                             )
                         },
                         onClick = {
-                            Toast.makeText(context, MainActivity.exec("whoami").second,Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, Auxiliary.exec("whoami").second,Toast.LENGTH_LONG).show()
                         }
                     )
                 }

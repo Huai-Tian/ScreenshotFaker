@@ -1,9 +1,7 @@
 package fake.screenshot
 
-import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -18,67 +16,21 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import fake.screenshot.Auxiliary.isModuleActivated
+import fake.screenshot.Auxiliary.isRootActivated
+import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.SettingsCompose
-import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
-    companion object {
-        fun isModuleActivated() = false
-        var isShellActivated by mutableStateOf(
-            try {
-                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-            } catch (_: Exception) {
-                false
-            }
-        )
-
-        fun isRootActivated() = false
-        fun getVersionName(context: Context): String {
-            return try {
-                context.packageManager.getPackageInfo(context.packageName, 0).versionName
-                    ?: context.getString(R.string.unknown)
-            } catch (_: Exception) {
-                context.getString(R.string.unknown)
-            }
-        }
-
-        fun getVersionCode(context: Context): Long {
-            return try {
-                val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-                packageInfo.longVersionCode
-            } catch (_: Exception) {
-                0L
-            }
-        }
-
-        fun exec(cmd: String) = runCatching {
-            IShizukuService.Stub.asInterface(Shizuku.getBinder())
-                .newProcess(arrayOf("sh"), null, null)
-                .run {
-                    ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
-                        .use { it.write(cmd.toByteArray()) }
-                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
-                }
-        }.getOrElse {
-            1 to it.stackTraceToString()
-        }
-
-        private val ParcelFileDescriptor.text
-            get() = ParcelFileDescriptor.AutoCloseInputStream(this)
-                .use { it.bufferedReader().readText() }
-    }
-
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
         if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
             isShellActivated = true

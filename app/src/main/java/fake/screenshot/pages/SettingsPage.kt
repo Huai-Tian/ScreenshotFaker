@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.ui.res.stringResource
-import fake.screenshot.MainActivity
+import fake.screenshot.Auxiliary
 import fake.screenshot.R
 
 // 颜色常量
@@ -76,7 +76,7 @@ fun SettingsCompose() {
                     )
                 }
             }
-            if (MainActivity.isModuleActivated()) {
+            if (Auxiliary.isModuleActivated()) {
                 item {
                     CommonCard {
                         TwoStatePreference(
@@ -100,7 +100,7 @@ fun SettingsCompose() {
                     )
                 }
             }
-            if (MainActivity.isRootActivated() || MainActivity.isShellActivated) {
+            if (Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
                 item {
                     CommonCard {
                         TwoStatePreference(
