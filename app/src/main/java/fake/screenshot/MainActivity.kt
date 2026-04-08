@@ -3,6 +3,7 @@ package fake.screenshot
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,6 +29,7 @@ import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.SettingsCompose
+import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
@@ -59,6 +61,22 @@ class MainActivity : ComponentActivity() {
                 0L
             }
         }
+
+        fun exec(cmd: String) = runCatching {
+            IShizukuService.Stub.asInterface(Shizuku.getBinder())
+                .newProcess(arrayOf("sh"), null, null)
+                .run {
+                    ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
+                        .use { it.write(cmd.toByteArray()) }
+                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
+                }
+        }.getOrElse {
+            1 to it.stackTraceToString()
+        }
+
+        private val ParcelFileDescriptor.text
+            get() = ParcelFileDescriptor.AutoCloseInputStream(this)
+                .use { it.bufferedReader().readText() }
     }
 
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
@@ -154,6 +172,7 @@ class MainActivity : ComponentActivity() {
             false
         }
     }
+
     override fun onDestroy() {
         super.onDestroy()
         Shizuku.removeRequestPermissionResultListener(listener)
