@@ -1,6 +1,7 @@
 package fake.screenshot.pages
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -130,35 +131,18 @@ fun SettingsCompose() {
             }
             item {
                 CommonCard {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(72.dp)
-                            .clickable {  /*TODO*/ }
-                            .padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Info,
-                            contentDescription = null,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.about_this_app),
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Medium
+                    PreferenceItem(
+                        icon = Icons.Default.Info,
+                        title = stringResource(R.string.about_this_app),
+                        subtitle = stringResource(R.string.to_know_about_ScreenshotFaker),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.Link,
+                                contentDescription = null
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = stringResource(R.string.to_know_about_ScreenshotFaker),
-                                fontSize = 13.sp,
-                                color = Color.Gray
-                            )
-                        }
-                        Icon(Icons.Default.Link, contentDescription = null)
-                    }
+                        },
+                        onClick = { /*TODO*/ }
+                    )
                 }
             }
         }
@@ -190,11 +174,16 @@ fun PreferenceItem(
     trailingContent: @Composable () -> Unit,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(72.dp)
-            .clickable { onClick() }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(),   // ← 关键：启用波纹
+                onClick = onClick
+            )
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -218,11 +207,16 @@ fun TwoStatePreference(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(72.dp)
-            .clickable { onCheckedChange(!checked) }
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(),
+                onClick = { onCheckedChange(!checked) }
+            )
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -235,7 +229,8 @@ fun TwoStatePreference(
         }
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
+            onCheckedChange = null,        // 禁用 Switch 自身的点击
+            enabled = true,               // 视觉上不可交互，避免叠加波纹
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = PrimaryColor,

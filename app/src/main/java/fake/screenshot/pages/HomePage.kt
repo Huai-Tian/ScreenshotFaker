@@ -176,12 +176,12 @@ fun HomeCompose() {
                 }
             }
         }
-        WorkingInfomation()
+        WorkingInformation()
     }
 }
 
 @Composable
-fun WorkingInfomation() {
+fun WorkingInformation() {
     val deviceInfo = "${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}"
     val systemVersion = "${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
     val fingerprint = Build.FINGERPRINT
