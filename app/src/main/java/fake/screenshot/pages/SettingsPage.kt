@@ -16,9 +16,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import fake.screenshot.Auxiliary
+import fake.screenshot.ConfigManager
 import fake.screenshot.R
+import kotlinx.coroutines.launch
 
 // 颜色常量
 private val PrimaryColor = Color(0xFF3B5998)
@@ -27,10 +30,12 @@ private val PrimaryColor = Color(0xFF3B5998)
 @Composable
 fun SettingsCompose() {
     // 状态管理
-    var checkUpdate by remember { mutableStateOf(true) }
-    var attemptFilter by remember { mutableStateOf(true) }
-    var hideIcon by remember { mutableStateOf(true) }
-    var hideToast by remember { mutableStateOf(true) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
+    val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
+    val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
+    val hideToast by ConfigManager.rememberValue(context, "hide_toast", false)
 
     Scaffold(
         topBar = {
@@ -56,7 +61,11 @@ fun SettingsCompose() {
                         title = stringResource(R.string.check_update),
                         subtitle = stringResource(R.string.auto_check_update),
                         checked = checkUpdate,
-                        onCheckedChange = { checkUpdate = it }
+                        onCheckedChange = {
+                            scope.launch {
+                                ConfigManager.saveData(context,"check_update",it)
+                            }
+                        }
                     )
                 }
             }
@@ -84,7 +93,9 @@ fun SettingsCompose() {
                             title = stringResource(R.string.aggressive_detection_filtering),
                             subtitle = stringResource(R.string.filter_content_observer),
                             checked = attemptFilter,
-                            onCheckedChange = { attemptFilter = it }
+                            onCheckedChange = { scope.launch {
+                                ConfigManager.saveData(context,"attempt_filter",it)
+                            } }
                         )
                     }
                 }
@@ -96,7 +107,9 @@ fun SettingsCompose() {
                         title = stringResource(R.string.hide_desktop_icon),
                         subtitle = stringResource(R.string.use_secret_code_to_open_application),
                         checked = hideIcon,
-                        onCheckedChange = { hideIcon = it }
+                        onCheckedChange = { scope.launch {
+                            ConfigManager.saveData(context,"hide_icon",it)
+                        } }
                     )
                 }
             }
@@ -108,7 +121,9 @@ fun SettingsCompose() {
                             title = stringResource(R.string.suppress_screenshot_alerts),
                             subtitle = stringResource(R.string.suppress_screenshot_toast_message),
                             checked = hideToast,
-                            onCheckedChange = { hideToast = it }
+                            onCheckedChange = { scope.launch {
+                                ConfigManager.saveData(context,"hide_toast",it)
+                            } }
                         )
                     }
                 }
