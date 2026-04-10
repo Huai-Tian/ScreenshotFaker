@@ -11,30 +11,14 @@ import java.io.File
 
 class ScreenshotTileService : TileService() {
     private var clicked = false
-    private var onScreen = false
     override fun onClick() {
         super.onClick()
         clicked = true
     }
 
-    override fun onTileRemoved() {
-        super.onTileRemoved()
-        onScreen = false
-    }
-
-    override fun onTileAdded() {
-        super.onTileAdded()
-        onScreen = true
-    }
-
-    override fun onStartListening() {
-        super.onStartListening()
-        onScreen = true
-    }
-
     override fun onStopListening() {
         super.onStopListening()
-        if (Auxiliary.isShellActivated && onScreen && clicked) {
+        if (Auxiliary.isShellActivated && clicked) {
             CoroutineScope(Dispatchers.IO).launch {
                 val savePath = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
