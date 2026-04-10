@@ -23,9 +23,6 @@ import fake.screenshot.ConfigManager
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 
-// 颜色常量
-private val PrimaryColor = Color(0xFF3B5998)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsCompose() {
@@ -35,7 +32,6 @@ fun SettingsCompose() {
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
-    val hideToast by ConfigManager.rememberValue(context, "hide_toast", false)
 
     Scaffold(
         topBar = {
@@ -111,21 +107,6 @@ fun SettingsCompose() {
                             ConfigManager.saveData(context,"hide_icon",it)
                         } }
                     )
-                }
-            }
-            if (Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
-                item {
-                    CommonCard {
-                        TwoStatePreference(
-                            icon = Icons.Default.Block,
-                            title = stringResource(R.string.suppress_screenshot_alerts),
-                            subtitle = stringResource(R.string.suppress_screenshot_toast_message),
-                            checked = hideToast,
-                            onCheckedChange = { scope.launch {
-                                ConfigManager.saveData(context,"hide_toast",it)
-                            } }
-                        )
-                    }
                 }
             }
             item {
@@ -248,7 +229,7 @@ fun TwoStatePreference(
             enabled = true,               // 视觉上不可交互，避免叠加波纹
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
-                checkedTrackColor = PrimaryColor,
+                checkedTrackColor = Color.Blue,
                 uncheckedThumbColor = Color.White,
                 uncheckedTrackColor = Color.Gray.copy(alpha = 0.5f)
             )

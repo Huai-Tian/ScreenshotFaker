@@ -23,7 +23,6 @@
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
     <string name="filter_content_observer">过滤目标应用的截屏文件监控</string>
     <string name="suppress_screenshot_alerts">隐藏截屏提示</string>
-    <string name="suppress_screenshot_toast_message">不显示截屏后的Toast消息</string>
     <string name="hide_desktop_icon">隐藏桌面图标</string>
     <string name="use_secret_code_to_open_application">你可以指定暗码打开此应用</string>
     <string name="hide_app_attributes">隐藏应用特征</string>
@@ -36,4 +35,8 @@
     <string name="stealth_screen_sharing">无痕屏幕共享</string>
     <string name="click_to_config_stealth_screen_sharing">点击以配置无痕屏幕共享</string>
     <string name="stealth_screen_recording">无痕屏幕录制</string>
+    <string name="config_stealth_screenshot">配置无痕截图</string>
+    <string name="stealth_screenshot_save_path">截图保存目录</string>
+    <string name="Confirm">确定</string>
+    <string name="Cancel">取消</string>
 </resources>

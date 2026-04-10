@@ -1,4 +1,5 @@
 <resources>
+    <!--HomePage-->
     <string name="app_name">ScreenshotFaker</string>
     <string name="xposed_description">Replace Screenshots with customized picture</string>
     <string name="settings">Settings</string>
@@ -15,6 +16,7 @@
     <string name="privilege">Privilege</string>
     <string name="device_info">DeviceInfo</string>
     <string name="system_version">SystemVersion</string>
+    <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
     <string name="receive_stealth_screen_casting">Receive stealth screen casting</string>
@@ -22,17 +24,22 @@
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
     <string name="filter_content_observer">Filter monitoring of screenshot files from the target app</string>
     <string name="suppress_screenshot_alerts">Suppress screenshot alerts</string>
-    <string name="suppress_screenshot_toast_message">Suppress the screenshot toast message</string>
     <string name="hide_desktop_icon">Hide desktop icon</string>
     <string name="use_secret_code_to_open_application">You can specify a secret code to open this application</string>
     <string name="hide_app_attributes">Hide app attributes</string>
     <string name="config_to_bypass_detection">Configure custom package name and app name to bypass detection</string>
     <string name="about_this_app">About this app</string>
     <string name="to_know_about_ScreenshotFaker">Learn about ScreenshotFaker features and usage</string>
+    <!--ExtensionPage-->
     <string name="stealth_screenshot">Stealth Screenshot</string>
     <string name="click_to_config_stealth_screenshot">Click to config stealth screenshot</string>
     <string name="stealth_screen_recording">Stealth screen recording</string>
     <string name="click_to_config_stealth_screen_recording">Click to config stealth screen recording</string>
     <string name="stealth_screen_sharing">Stealth screen sharing</string>
     <string name="click_to_config_stealth_screen_sharing">Click to config stealth screen sharing</string>
+    <string name="config_stealth_screenshot">Config stealth screenshot</string>
+    <string name="stealth_screenshot_save_path">Screenshot save path</string>
+    <!--Common-->
+    <string name="Confirm">Confirm</string>
+    <string name="Cancel">Cancel</string>
 </resources>

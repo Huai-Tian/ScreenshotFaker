@@ -1,6 +1,6 @@
 package fake.screenshot.pages
 
-import android.widget.Toast
+import android.os.Environment
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.*
@@ -9,15 +9,25 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import fake.screenshot.Auxiliary
+import fake.screenshot.ConfigManager
 import fake.screenshot.R
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExtensionCompose() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val screenshotSavePath by ConfigManager.rememberValue(
+        context,
+        "screenshot_save_path",
+        "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Screenshots"
+    )
+    var screenshotConfigDialog by remember { mutableStateOf(false) }
+    var screenshotConfigDialogInputText by remember { mutableStateOf(screenshotSavePath) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -48,7 +58,8 @@ fun ExtensionCompose() {
                             )
                         },
                         onClick = {
-                            Toast.makeText(context, Auxiliary.exec("whoami").second,Toast.LENGTH_LONG).show()
+                            screenshotConfigDialogInputText = screenshotSavePath
+                            screenshotConfigDialog = true
                         }
                     )
                 }
@@ -85,6 +96,42 @@ fun ExtensionCompose() {
                     )
                 }
             }
+        }
+        if (screenshotConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { screenshotConfigDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.config_stealth_screenshot)) // 标题 A
+                },
+                text = {
+                    OutlinedTextField(
+                        value = screenshotConfigDialogInputText,
+                        onValueChange = { screenshotConfigDialogInputText = it }, // 可编辑
+                        label = { Text(stringResource(R.string.stealth_screenshot_save_path)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            ConfigManager.saveData(
+                                context,
+                                "screenshot_save_path",
+                                screenshotConfigDialogInputText.removeSuffix("/")
+                            )
+                        }
+                        screenshotConfigDialog = false
+                    }) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { screenshotConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
         }
     }
 }
