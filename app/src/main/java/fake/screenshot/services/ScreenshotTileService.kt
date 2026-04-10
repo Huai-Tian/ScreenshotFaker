@@ -14,7 +14,7 @@ class ScreenshotTileService : TileService() {
     private var onScreen = false
     override fun onClick() {
         super.onClick()
-        clicked = !clicked
+        clicked = true
     }
 
     override fun onTileRemoved() {
@@ -34,26 +34,19 @@ class ScreenshotTileService : TileService() {
 
     override fun onStopListening() {
         super.onStopListening()
-        if (onScreen && clicked) {
-            clicked = false
-
-            if (Auxiliary.isShellActivated) {
-                CoroutineScope(Dispatchers.IO).launch {
-                    val savePath = ConfigManager.getDataOnce(
-                        context = this@ScreenshotTileService,
-                        key = "screenshot_save_path",
-                        defaultValue = "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Screenshots"
-                    )
-                    with(File(savePath)) {
-                        if (!(exists() && isDirectory))mkdirs()
-                    }
-                    Auxiliary.exec("screencap -p ${savePath}/shot.png")
+        if (Auxiliary.isShellActivated && onScreen && clicked) {
+            CoroutineScope(Dispatchers.IO).launch {
+                val savePath = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "screenshot_save_path",
+                    defaultValue = "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Screenshots"
+                )
+                with(File(savePath)) {
+                    if (!(exists() && isDirectory)) mkdirs()
                 }
-
-            } else {
-                Runtime.getRuntime()
-                    .exec("whoami > /sdcard/1.txt")
+                Auxiliary.exec("screencap -p ${savePath}/shot.png")
             }
         }
+        clicked = false
     }
 }
