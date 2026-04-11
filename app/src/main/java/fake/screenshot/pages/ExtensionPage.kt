@@ -21,13 +21,53 @@ import kotlinx.coroutines.launch
 fun ExtensionCompose() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    //Screenshot
     val screenshotSavePath by ConfigManager.rememberValue(
         context,
         "screenshot_save_path",
         "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Screenshots"
     )
+    val screenshotDisplayID by ConfigManager.rememberValue(
+        context,
+        "screenshot_display_id",
+        ""
+    )
     var screenshotConfigDialog by remember { mutableStateOf(false) }
-    var screenshotConfigDialogInputText by remember { mutableStateOf(screenshotSavePath) }
+    var screenshotConfigDialogSavaPathInputText by remember { mutableStateOf(screenshotSavePath) }
+    var screenshotConfigDialogDisplayIDInputText by remember { mutableStateOf(screenshotDisplayID) }
+    //ScreenRecord
+    val screenRecordSavePath by ConfigManager.rememberValue(
+        context,
+        "screenRecord_save_path",
+        "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Records"
+    )
+    val screenRecordDisplayID by ConfigManager.rememberValue(
+        context,
+        "screenRecord_display_id",
+        ""
+    )
+    val screenRecordDuration by ConfigManager.rememberValue(
+        context,
+        "screenRecord_duration",
+        "180"
+    )
+    val screenRecordBitRate by ConfigManager.rememberValue(
+        context,
+        "screenRecord_bitrate",
+        ""
+    )
+    val screenRecordResolution by ConfigManager.rememberValue(
+        context,
+        "screenRecord_resolution",
+        ""
+    )
+    var screenRecordConfigDialog by remember { mutableStateOf(false) }
+    var screenRecordConfigDialogSavaPathInputText by remember { mutableStateOf(screenRecordSavePath) }
+    var screenRecordConfigDialogDisplayIDInputText by remember { mutableStateOf(screenRecordDisplayID) }
+    var screenRecordConfigDialogDurationInputText by remember {mutableStateOf(screenRecordDuration)}
+    var screenRecordConfigDialogBitRateInputText by remember {mutableStateOf(screenRecordBitRate)}
+    var screenRecordConfigDialogResolutionInputText by remember {mutableStateOf(screenRecordResolution)}
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -58,7 +98,8 @@ fun ExtensionCompose() {
                             )
                         },
                         onClick = {
-                            screenshotConfigDialogInputText = screenshotSavePath
+                            screenshotConfigDialogSavaPathInputText = screenshotSavePath
+                            screenshotConfigDialogDisplayIDInputText = screenshotDisplayID
                             screenshotConfigDialog = true
                         }
                     )
@@ -76,7 +117,14 @@ fun ExtensionCompose() {
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = {
+                            screenRecordConfigDialogSavaPathInputText = screenRecordSavePath
+                            screenRecordConfigDialogDisplayIDInputText = screenRecordDisplayID
+                            screenRecordConfigDialogDurationInputText = screenRecordDuration
+                            screenRecordConfigDialogBitRateInputText = screenRecordBitRate
+                            screenRecordConfigDialogResolutionInputText = screenRecordResolution
+                            screenRecordConfigDialog = true
+                        }
                     )
                 }
             }
@@ -101,16 +149,27 @@ fun ExtensionCompose() {
             AlertDialog(
                 onDismissRequest = { screenshotConfigDialog = false },
                 title = {
-                    Text(text = stringResource(R.string.config_stealth_screenshot)) // 标题 A
+                    Text(text = stringResource(R.string.config_stealth_screenshot)) // 标题
                 },
                 text = {
-                    OutlinedTextField(
-                        value = screenshotConfigDialogInputText,
-                        onValueChange = { screenshotConfigDialogInputText = it }, // 可编辑
-                        label = { Text(stringResource(R.string.stealth_screenshot_save_path)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
+                    Column{
+                        OutlinedTextField(
+                            value = screenshotConfigDialogSavaPathInputText,
+                            onValueChange = { screenshotConfigDialogSavaPathInputText = it }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenshot_save_path)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenshotConfigDialogDisplayIDInputText,
+                            onValueChange = {
+                                screenshotConfigDialogDisplayIDInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.physical_display_id)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
                 },
                 confirmButton = {
                     TextButton(onClick = {
@@ -118,7 +177,12 @@ fun ExtensionCompose() {
                             ConfigManager.saveData(
                                 context,
                                 "screenshot_save_path",
-                                screenshotConfigDialogInputText.removeSuffix("/")
+                                screenshotConfigDialogSavaPathInputText.removeSuffix("/")
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenshot_display_id",
+                                screenshotConfigDialogDisplayIDInputText
                             )
                         }
                         screenshotConfigDialog = false
@@ -128,6 +192,102 @@ fun ExtensionCompose() {
                 },
                 dismissButton = {
                     TextButton(onClick = { screenshotConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (screenRecordConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { screenRecordConfigDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.config_stealth_screenRecord)) // 标题
+                },
+                text = {
+                    Column{
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogSavaPathInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogSavaPathInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenRecord_save_path)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogDisplayIDInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogDisplayIDInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.physical_display_id)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogDurationInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogDurationInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenRecord_duration)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogBitRateInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogBitRateInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenRecord_bitrate)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogResolutionInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogResolutionInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenRecord_size)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_save_path",
+                                screenRecordConfigDialogSavaPathInputText.removeSuffix("/")
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_display_id",
+                                screenRecordConfigDialogDisplayIDInputText
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_duration",
+                                screenRecordConfigDialogDurationInputText
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_bitrate",
+                                screenRecordConfigDialogBitRateInputText
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_resolution",
+                                screenRecordConfigDialogResolutionInputText
+                            )
+                        }
+                        screenRecordConfigDialog = false
+                    }) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { screenRecordConfigDialog = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }

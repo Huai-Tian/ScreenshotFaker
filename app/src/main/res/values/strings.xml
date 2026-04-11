@@ -39,6 +39,12 @@
     <string name="click_to_config_stealth_screen_sharing">Click to config stealth screen sharing</string>
     <string name="config_stealth_screenshot">Config stealth screenshot</string>
     <string name="stealth_screenshot_save_path">Screenshot save path</string>
+    <string name="physical_display_id">Physical display id (Default if empty)</string>
+    <string name="config_stealth_screenRecord">Config stealth screenRecord</string>
+    <string name="stealth_screenRecord_save_path">ScreenRecord save path</string>
+    <string name="stealth_screenRecord_duration">ScreenRecord duration (seconds)</string>
+    <string name="stealth_screenRecord_bitrate">Record bitrate (bps)(Default if empty)</string>
+    <string name="stealth_screenRecord_size">Record resolution (WIDTHxHEIGHT)(Default if empty)</string>
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
