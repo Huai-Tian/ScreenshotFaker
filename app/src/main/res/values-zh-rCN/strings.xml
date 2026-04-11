@@ -37,12 +37,12 @@
     <string name="stealth_screen_recording">无痕录屏</string>
     <string name="config_stealth_screenshot">配置无痕截图</string>
     <string name="stealth_screenshot_save_path">截图保存目录</string>
-    <string name="physical_display_id">物理屏幕 ID（留空为默认）</string>
+    <string name="physical_display_id">物理屏幕ID（留空为默认)</string>
     <string name="config_stealth_screenRecord">配置无痕录屏</string>
     <string name="stealth_screenRecord_save_path">录屏保存目录</string>
     <string name="stealth_screenRecord_duration">录屏时长（秒）</string>
-    <string name="stealth_screenRecord_bitrate">录屏比特率（bps)（留空为默认）</string>
-    <string name="stealth_screenRecord_size">录屏分辨率（宽x高)（留空为默认）</string>
+    <string name="stealth_screenRecord_bitrate">录屏比特率（bps)(留空为默认)</string>
+    <string name="stealth_screenRecord_size">录屏分辨率（宽x高)(留空为默认)</string>
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>
 </resources>

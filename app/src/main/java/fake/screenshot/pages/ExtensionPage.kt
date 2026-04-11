@@ -215,20 +215,20 @@ fun ExtensionCompose() {
                             singleLine = true
                         )
                         OutlinedTextField(
-                            value = screenRecordConfigDialogDisplayIDInputText,
-                            onValueChange = {
-                                screenRecordConfigDialogDisplayIDInputText = it
-                            }, // 可编辑
-                            label = { Text(stringResource(R.string.physical_display_id)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
                             value = screenRecordConfigDialogDurationInputText,
                             onValueChange = {
                                 screenRecordConfigDialogDurationInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_duration)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogDisplayIDInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogDisplayIDInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.physical_display_id)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
