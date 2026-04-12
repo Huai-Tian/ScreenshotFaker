@@ -43,8 +43,8 @@
     <string name="config_stealth_screenRecord">Config stealth screenRecord</string>
     <string name="stealth_screenRecord_save_path">ScreenRecord save path</string>
     <string name="stealth_screenRecord_duration">ScreenRecord duration (seconds)</string>
-    <string name="stealth_screenRecord_bitrate">Record bitrate (bps)(Default if empty)</string>
-    <string name="stealth_screenRecord_size">Record resolution (WIDTHxHEIGHT)(Default if empty)</string>
+    <string name="stealth_screenRecord_bitrate">Bitrate (bps)(Default if empty)</string>
+    <string name="stealth_screenRecord_size">Resolution (WIDTHxHEIGHT)(Default if empty)</string>
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>

@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
 object Auxiliary {
     var isShellActivated by mutableStateOf(
@@ -32,6 +34,13 @@ object Auxiliary {
         1 to it.stackTraceToString()
     }
 
+    fun getCurrentDateString(): String = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
+    fun getRandomString(length: Int): String {
+        val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
+        return (1..length)
+            .map { allowedChars.random() }
+            .joinToString("")
+    }
     fun getVersionName(context: Context): String {
         return try {
             context.packageManager.getPackageInfo(context.packageName, 0).versionName

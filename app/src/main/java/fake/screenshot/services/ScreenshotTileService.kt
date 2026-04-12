@@ -28,7 +28,13 @@ class ScreenshotTileService : TileService() {
                 with(File(savePath)) {
                     if (!(exists() && isDirectory)) mkdirs()
                 }
-                Auxiliary.exec("screencap -p ${savePath}/shot.png")
+                Auxiliary.exec(
+                    "screencap -p ${savePath}/${Auxiliary.getCurrentDateString()}_${
+                        Auxiliary.getRandomString(
+                            4
+                        )
+                    }.png"
+                )
             }
         }
         clicked = false

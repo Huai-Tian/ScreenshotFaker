@@ -50,7 +50,13 @@ class ScreenRecordTileService : TileService() {
                 with(File(savePath)) {
                     if (!(exists() && isDirectory)) mkdirs()
                 }
-                Auxiliary.exec("screenrecord --time-limit $duration $displayID $bitrate $resolution ${savePath}/record.mp4")
+                Auxiliary.exec(
+                    "screenrecord --time-limit $duration $displayID $bitrate $resolution ${savePath}/${Auxiliary.getCurrentDateString()}_${
+                        Auxiliary.getRandomString(
+                            4
+                        )
+                    }.mp4"
+                )
             }
         }
         clicked = false
