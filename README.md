@@ -31,11 +31,11 @@ This software is currently in the early stages of development. Many features are
 本软件尚在开发早期阶段，大量的功能还在实现中，已实现的功能可能存在各种问题和不足，如果你在使用过程中遇到任何错误，我深感抱歉。同时也欢迎您提交 Issue 和 Pull Request！
 
 **Contact**\
-Welcome to join us for communication and feedback: [QQ](https://qm.qq.com/q/j2NM49CD8c)\
+Welcome to join us for communication and feedback: [QQ](https://qm.qq.com/q/j2NM49cd8c)\
 Alternatively, you can directly submit issues and suggestions on the project's Issue page. I will actively respond and do my best to resolve them.
 
 **联系方式**\
-欢迎加入我们进行交流和反馈：[QQ](https://qm.qq.com/q/j2NM49CD8c)\
+欢迎加入我们进行交流和反馈：[QQ](https://qm.qq.com/q/j2NM49cd8c)\
 或者，你也可以直接在本项目的 Issue 页面提交问题和建议，我会积极回复并尽力解决。
 
 **Disclaimer**\
