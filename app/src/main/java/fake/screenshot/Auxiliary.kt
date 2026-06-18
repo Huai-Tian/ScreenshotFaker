@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import moe.shizuku.server.IShizukuService
@@ -19,7 +20,9 @@ object Auxiliary {
             false
         }
     )
-
+    var daemonState by mutableIntStateOf(
+        -1
+    )
     fun isModuleActivated() = false
     fun isRootActivated() = false
     fun exec(cmd: String) = runCatching {

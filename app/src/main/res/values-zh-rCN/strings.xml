@@ -18,8 +18,8 @@
     <string name="system_version">系统版本</string>
     <string name="check_update">检查更新</string>
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
-    <string name="receive_stealth_screen_casting">接收无痕屏幕共享</string>
-    <string name="receive_screen_casting_from_ScreenshotFaker">接收来自ScreenshotFaker的无痕屏幕共享</string>
+    <string name="receive_stealth_screen_casting">接收无痕屏幕投屏</string>
+    <string name="receive_screen_casting_from_ScreenshotFaker">接收来自ScreenshotFaker的无痕投屏</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
     <string name="filter_content_observer">过滤目标应用的截屏文件监控</string>
     <string name="suppress_screenshot_alerts">隐藏截屏提示</string>
@@ -32,8 +32,8 @@
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击以配置无痕截图</string>
     <string name="click_to_config_stealth_screen_recording">点此以配置无痕录屏</string>
-    <string name="stealth_screen_sharing">无痕屏幕共享</string>
-    <string name="click_to_config_stealth_screen_sharing">点击以配置无痕屏幕共享</string>
+    <string name="stealth_screen_sharing">无痕投屏</string>
+    <string name="click_to_config_stealth_screen_sharing">点击以配置无痕投屏</string>
     <string name="stealth_screen_recording">无痕录屏</string>
     <string name="config_stealth_screenshot">配置无痕截图</string>
     <string name="stealth_screenshot_save_path">截图保存目录</string>
@@ -45,4 +45,6 @@
     <string name="stealth_screenRecord_size">分辨率（宽x高)(留空为默认)</string>
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>
+    <string name="daemon">守护进程</string>
+    <string name="not_configured">未配置</string>
 </resources>

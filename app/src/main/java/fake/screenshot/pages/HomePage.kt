@@ -204,12 +204,9 @@ fun WorkingInformation() {
             // 外层 Column 放置所有条目
             Column(modifier = Modifier.padding(16.dp)) {
                 InfoItem(stringResource(R.string.device_info), deviceInfo)
-                // 分隔线或间距
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
-
                 InfoItem(stringResource(R.string.system_version), systemVersion)
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
-
                 InfoItem(
                     stringResource(R.string.privilege), when {
                         Auxiliary.isModuleActivated() && Auxiliary.isRootActivated() -> "LSPosed + Root"
@@ -221,9 +218,15 @@ fun WorkingInformation() {
                     }
                 )
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
-
+                InfoItem(
+                    stringResource(R.string.daemon), if (Auxiliary.daemonState == -1) {
+                        stringResource(R.string.not_configured)
+                    } else {
+                        Auxiliary.daemonState.toString()
+                    }
+                )
+                Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(stringResource(R.string.fingerprint), fingerprint)
-
             }
         }
     }

@@ -48,4 +48,6 @@
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
+    <string name="daemon">Daemon</string>
+    <string name="not_configured">Not configured</string>
 </resources>
