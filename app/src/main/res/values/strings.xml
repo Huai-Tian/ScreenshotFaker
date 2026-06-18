@@ -16,6 +16,7 @@
     <string name="privilege">Privilege</string>
     <string name="device_info">DeviceInfo</string>
     <string name="system_version">SystemVersion</string>
+    <string name="daemon">Daemon</string>
     <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
@@ -48,6 +49,5 @@
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
-    <string name="daemon">Daemon</string>
     <string name="not_configured">Not configured</string>
 </resources>
