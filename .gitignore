@@ -3,17 +3,21 @@ bin-debug/
 bin-release/
 [Oo]bj/
 [Bb]in/
+app/build/
 
 # Other files and folders
 .settings/
 .gradle/
 .idea/
 .cxx/
+
 # Executables
 *.swf
 *.air
 *.ipa
 *.apk
+
+local.properties
 
 
 # Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
