@@ -25,8 +25,6 @@
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
     <string name="filter_content_observer">Filter monitoring of screenshot files from the target app</string>
     <string name="suppress_screenshot_alerts">Suppress screenshot alerts</string>
-    <string name="hide_desktop_icon">Hide desktop icon</string>
-    <string name="use_secret_code_to_open_application">You can specify a secret code to open this application</string>
     <string name="hide_app_attributes">Hide app attributes</string>
     <string name="config_to_bypass_detection">Configure custom package name and app name to bypass detection</string>
     <string name="about_this_app">About this app</string>

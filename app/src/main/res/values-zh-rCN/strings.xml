@@ -23,8 +23,6 @@
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
     <string name="filter_content_observer">过滤目标应用的截屏文件监控</string>
     <string name="suppress_screenshot_alerts">隐藏截屏提示</string>
-    <string name="hide_desktop_icon">隐藏桌面图标</string>
-    <string name="use_secret_code_to_open_application">你可以指定暗码打开此应用</string>
     <string name="hide_app_attributes">隐藏应用特征</string>
     <string name="config_to_bypass_detection">配置自定义包名和名称以防止检测</string>
     <string name="about_this_app">关于本应用</string>

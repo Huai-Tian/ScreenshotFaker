@@ -31,7 +31,6 @@ fun SettingsCompose() {
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
-    val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
 
     Scaffold(
         topBar = {
@@ -94,19 +93,6 @@ fun SettingsCompose() {
                             } }
                         )
                     }
-                }
-            }
-            item {
-                CommonCard {
-                    TwoStatePreference(
-                        icon = Icons.Default.ImageNotSupported,
-                        title = stringResource(R.string.hide_desktop_icon),
-                        subtitle = stringResource(R.string.use_secret_code_to_open_application),
-                        checked = hideIcon,
-                        onCheckedChange = { scope.launch {
-                            ConfigManager.saveData(context,"hide_icon",it)
-                        } }
-                    )
                 }
             }
             item {
