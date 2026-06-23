@@ -10,7 +10,7 @@ cmake_minimum_required(VERSION 3.22.1)
 # Since this is the top level CMakeLists.txt, the project name is also accessible
 # with ${CMAKE_PROJECT_NAME} (both CMake variables are in-sync within the top level
 # build script scope).
-project("screenshot")
+project("ScreenshotFakerNative")
 
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
@@ -25,11 +25,11 @@ project("screenshot")
 # System.loadLibrary() and pass the name of the library defined here;
 # for GameActivity/NativeActivity derived applications, the same library name must be
 # used in the AndroidManifest.xml file.
-add_executable(${CMAKE_PROJECT_NAME} screenshot.cpp)
+add_executable(daemon daemon.cpp)
 # List C/C++ source files with relative paths to this CMakeLists.txt.
-set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES SUFFIX ".so")
+set_target_properties(daemon PROPERTIES SUFFIX ".so")
 # Specifies libraries CMake should link to your target library. You
 # can link libraries from various origins, such as libraries defined in this
 # build script, prebuilt third-party libraries, or Android system libraries.
-target_link_libraries(${CMAKE_PROJECT_NAME} android log)
+#target_link_libraries(daemon android log)
 # List libraries link to the target library

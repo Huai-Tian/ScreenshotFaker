@@ -20,6 +20,8 @@
     <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
+    <string name="enable_daemon">Enable daemon</string>
+    <string name="enable_daemon_to_work_background">Enable daemon to work background</string>
     <string name="receive_stealth_screen_casting">Receive stealth screen casting</string>
     <string name="receive_screen_casting_from_ScreenshotFaker">Receive stealth screencasting from ScreenshotFaker</string>
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
@@ -47,5 +49,5 @@
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
-    <string name="not_configured">Not configured</string>
+    <string name="not_enabled">Not enabled</string>
 </resources>

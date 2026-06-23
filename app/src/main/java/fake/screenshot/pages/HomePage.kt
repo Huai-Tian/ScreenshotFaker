@@ -24,6 +24,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.Auxiliary
+import fake.screenshot.ConfigManager
 import fake.screenshot.R
 import rikka.shizuku.Shizuku
 
@@ -182,9 +184,11 @@ fun HomeCompose() {
 
 @Composable
 fun WorkingInformation() {
+    val context = LocalContext.current
     val deviceInfo = "${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}"
     val systemVersion = "${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
     val fingerprint = Build.FINGERPRINT
+    val enableDaemon by ConfigManager.rememberValue(context, "enable_daemon", false)
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -219,11 +223,8 @@ fun WorkingInformation() {
                 )
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(
-                    stringResource(R.string.daemon), if (Auxiliary.daemonState == -1) {
-                        stringResource(R.string.not_configured)
-                    } else {
-                        Auxiliary.daemonState.toString()
-                    }
+                    stringResource(R.string.daemon),
+                    if (enableDaemon) "enabled" else stringResource(R.string.not_enabled)
                 )
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(stringResource(R.string.fingerprint), fingerprint)

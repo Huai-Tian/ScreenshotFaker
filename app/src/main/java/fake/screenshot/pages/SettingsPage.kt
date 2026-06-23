@@ -31,6 +31,7 @@ fun SettingsCompose() {
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
+    val enableDaemon by ConfigManager.rememberValue(context, "enable_daemon", false)
 
     Scaffold(
         topBar = {
@@ -59,6 +60,21 @@ fun SettingsCompose() {
                         onCheckedChange = {
                             scope.launch {
                                 ConfigManager.saveData(context,"check_update",it)
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.Shield,
+                        title = stringResource(R.string.enable_daemon),
+                        subtitle = stringResource(R.string.enable_daemon_to_work_background),
+                        checked = enableDaemon,
+                        onCheckedChange = {
+                            scope.launch {
+                                ConfigManager.saveData(context,"enable_daemon",it)
                             }
                         }
                     )

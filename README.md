@@ -17,8 +17,8 @@ This is a module that is currently under active development, supporting user cus
 * **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
 
 **核心功能（开发中）**
-* **替换截屏获取到的内容:** 需要Xposed框架支持，将屏幕截图的内容替换为用户指定的图片
-* **使软件的截屏检测无效:** 需要Xposed框架支持，让用户的截图事件跳过应用的截图检测
+* **替换截屏获取到的内容:** 需要LSPosed框架支持，将屏幕截图的内容替换为用户指定的图片
+* **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的截图检测
 * **无痕的截屏录屏以及屏幕共享:** 需要Shell/Root特权，通过系统底层的直接调用绕过应用层的检测
 * **自定义操作手势:** 需要Shell/Root特权，支持通过特定按键组合实现截录屏以及屏幕共享
 * **使用自定义包名和软件特征:** 无需特权，支持自定义包名，选择是否隐藏Shizuku特征和Xposed特征
