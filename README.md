@@ -13,7 +13,7 @@ This is a module that is currently under active development, supporting user cus
 * **Render the software's screenshot detection ineffective:** Neutralizes the app's screenshot detection (Requires LSPosed framework).
 * **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer detection via direct system-level calls (Requires Shell/Root privileges).
 * **Custom gesture actions:** Triggers screen capture, recording, and sharing via custom key combinations (Requires Shell/Root privileges).
-* **Use custom package name and software characteristics:** Supports custom package names and selecting whether to hide Shizuku and Xposed features (No privileges required).
+* **Extreme stealth support:** Retains screen capture, recording, and sharing capabilities even after the software is uninstalled (Requires Shell/Root privileges).
 * **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
 
 **核心功能（开发中）**
@@ -21,7 +21,7 @@ This is a module that is currently under active development, supporting user cus
 * **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的截图检测
 * **无痕的截屏录屏以及屏幕共享:** 需要Shell/Root特权，通过系统底层的直接调用绕过应用层的检测
 * **自定义操作手势:** 需要Shell/Root特权，支持通过特定按键组合实现截录屏以及屏幕共享
-* **使用自定义包名和软件特征:** 无需特权，支持自定义包名，选择是否隐藏Shizuku特征和Xposed特征
+* **极致的隐藏支持:** 需要Shell/Root特权，支持在卸载此软件后，依然可以完成截录屏以及屏幕共享功能
 * **接收来自此应用的屏幕共享:** 无需特权，接收局域网中来自此应用的投屏
 
 **Important Notice**\
