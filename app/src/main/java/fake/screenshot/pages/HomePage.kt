@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircleOutline
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,16 +66,16 @@ fun HomeCompose() {
 
                     Box(
                         modifier = Modifier
-                            .size(24.dp) // 设置图标容器的大小
+                            .size(36.dp) // 设置图标容器的大小
                             .clip(CircleShape) // 将容器裁剪为圆形
                             .background(Color.Blue), // 设置背景色为卡片背景色
                         contentAlignment = Alignment.Center // 让图标在容器中居中
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CheckCircleOutline,
+                            imageVector = Icons.Default.DoneAll,
                             contentDescription = null,
                             tint = Color.Black, // 设置对勾的颜色，这里用黑色
-                            modifier = Modifier.size(36.dp) // 设置对勾图标的大小
+                            modifier = Modifier.size(48.dp) // 设置对勾图标的大小
                         )
                     }
 
@@ -117,7 +117,7 @@ fun HomeCompose() {
                     .padding(horizontal = 16.dp)
                     .padding(vertical = 16.dp),
                 shape = MaterialTheme.shapes.medium,
-                colors = CardDefaults.cardColors(containerColor = Color.Red),
+                colors = CardDefaults.cardColors(containerColor = Color.LightGray),
                 onClick = {
                     try {
                         Shizuku.requestPermission(1)
@@ -138,16 +138,16 @@ fun HomeCompose() {
 
                     Box(
                         modifier = Modifier
-                            .size(24.dp) // 设置图标容器的大小
+                            .size(36.dp) // 设置图标容器的大小
                             .clip(CircleShape) // 将容器裁剪为圆形
-                            .background(Color.Red), // 设置背景色为卡片背景色
+                            .background(Color.LightGray), // 设置背景色为卡片背景色
                         contentAlignment = Alignment.Center // 让图标在容器中居中
                     ) {
                         Icon(
                             imageVector = Icons.Default.ErrorOutline,
                             contentDescription = null,
                             tint = Color.Black, // 设置对勾的颜色，这里用黑色
-                            modifier = Modifier.size(36.dp) // 设置对勾图标的大小
+                            modifier = Modifier.size(48.dp) // 设置对勾图标的大小
                         )
                     }
 

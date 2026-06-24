@@ -87,7 +87,7 @@ fun ExtensionCompose() {
         ) {
             item {
                 CommonCard {
-                    PreferenceItem(
+                    PreferenceItemEx(
                         icon = Icons.Default.Screenshot,
                         title = stringResource(R.string.stealth_screenshot),
                         subtitle = stringResource(R.string.click_to_config_stealth_screenshot),
@@ -107,7 +107,7 @@ fun ExtensionCompose() {
             }
             item {
                 CommonCard {
-                    PreferenceItem(
+                    PreferenceItemEx(
                         icon = Icons.Default.Videocam,
                         title = stringResource(R.string.stealth_screen_recording),
                         subtitle = stringResource(R.string.click_to_config_stealth_screen_recording),
@@ -130,7 +130,7 @@ fun ExtensionCompose() {
             }
             item {
                 CommonCard {
-                    PreferenceItem(
+                    PreferenceItemEx(
                         icon = Icons.Default.Cast,
                         title = stringResource(R.string.stealth_screen_sharing),
                         subtitle = stringResource(R.string.click_to_config_stealth_screen_sharing),

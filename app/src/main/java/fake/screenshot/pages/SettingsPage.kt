@@ -92,8 +92,8 @@ fun SettingsCompose() {
             if (enableDaemon && (Auxiliary.isShellActivated || Auxiliary.isRootActivated())) {
                 item {
                     CommonCard {
-                        PreferenceItem(
-                            icon = Icons.Default.DataArray,
+                        PreferenceItemEx(
+                            icon = Icons.Default.DataObject,
                             title = stringResource(R.string.config_daemon),
                             subtitle = stringResource(R.string.config_daemon_working_options),
                             trailingContent = {
@@ -112,7 +112,7 @@ fun SettingsCompose() {
             }
             item {
                 CommonCard {
-                    PreferenceItem(
+                    PreferenceItemEx(
                         icon = Icons.Default.CastConnected,
                         title = stringResource(R.string.receive_stealth_screen_casting),
                         subtitle = stringResource(R.string.receive_screen_casting_from_ScreenshotFaker),
@@ -146,9 +146,8 @@ fun SettingsCompose() {
             item {
                 CommonCard {
                     PreferenceItem(
-                        icon = Icons.Default.SearchOff,
-                        title = stringResource(R.string.hide_app_attributes),
-                        subtitle = stringResource(R.string.config_to_bypass_detection),
+                        icon = Icons.Default.CloudUpload,
+                        title = stringResource(R.string.backup_config),
                         trailingContent = {
                             Icon(
                                 Icons.Default.ChevronRight,
@@ -162,12 +161,26 @@ fun SettingsCompose() {
             item {
                 CommonCard {
                     PreferenceItem(
-                        icon = Icons.Default.Info,
-                        title = stringResource(R.string.about_this_app),
-                        subtitle = stringResource(R.string.to_know_about_ScreenshotFaker),
+                        icon = Icons.Default.Restore,
+                        title = stringResource(R.string.restore_config),
                         trailingContent = {
                             Icon(
-                                Icons.Default.Link,
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = { /*TODO*/ }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItem(
+                        icon = Icons.Default.ContactPage,
+                        title = stringResource(R.string.about),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
                                 contentDescription = null
                             )
                         },
@@ -235,7 +248,7 @@ fun CommonCard(content: @Composable () -> Unit) {
 
 // 列表项（带箭头或文本尾部）
 @Composable
-fun PreferenceItem(
+fun PreferenceItemEx(
     icon: ImageVector,
     title: String,
     subtitle: String,
@@ -261,6 +274,34 @@ fun PreferenceItem(
             Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             Spacer(modifier = Modifier.height(4.dp))
             Text(text = subtitle, fontSize = 13.sp, color = Color.Gray)
+        }
+        trailingContent()
+    }
+}
+@Composable
+fun PreferenceItem(
+    icon: ImageVector,
+    title: String,
+    trailingContent: @Composable () -> Unit,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(),   // ← 关键：启用波纹
+                onClick = onClick
+            )
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(24.dp))
+        Spacer(modifier = Modifier.width(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
         }
         trailingContent()
     }
