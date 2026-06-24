@@ -39,7 +39,7 @@ Alternatively, you can directly submit issues and suggestions on the project's I
 或者，你也可以直接在本项目的 Issue 页面提交问题和建议，我会积极回复并尽力解决。
 
 **Disclaimer**\
-This project is intended for **security research, software testing, and educational purposes only**.
+This project is intended for **security research**, **software testing**, and **educational purposes** only.
 Please do not use this project for any illegal purposes (including but not limited to cheating in exams and data falsification).
 Users must assume all legal responsibilities arising from the use of this project.
 

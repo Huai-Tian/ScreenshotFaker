@@ -221,11 +221,13 @@ fun WorkingInformation() {
                         else -> "None"
                     }
                 )
-                Spacer(modifier = Modifier.padding(vertical = 8.dp))
-                InfoItem(
-                    stringResource(R.string.daemon),
-                    if (enableDaemon) "enabled" else stringResource(R.string.not_enabled)
-                )
+                if (Auxiliary.isShellActivated || Auxiliary.isRootActivated()) {
+                    Spacer(modifier = Modifier.padding(vertical = 8.dp))
+                    InfoItem(
+                        stringResource(R.string.daemon),
+                        if (enableDaemon) stringResource(R.string.enabled) else stringResource(R.string.not_enabled)
+                    )
+                }
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(stringResource(R.string.fingerprint), fingerprint)
             }

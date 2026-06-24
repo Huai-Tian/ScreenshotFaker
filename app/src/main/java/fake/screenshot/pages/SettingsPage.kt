@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import fake.screenshot.Auxiliary
@@ -32,7 +33,13 @@ fun SettingsCompose() {
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val enableDaemon by ConfigManager.rememberValue(context, "enable_daemon", false)
-
+    val daemonAbstractName by ConfigManager.rememberValue(
+        context,
+        "daemon_abstract_name",
+        "fake.screenshot.daemon"
+    )
+    var daemonAbstractNameInputText by remember { mutableStateOf(daemonAbstractName) }
+    var daemonConfigDialog by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -59,25 +66,48 @@ fun SettingsCompose() {
                         checked = checkUpdate,
                         onCheckedChange = {
                             scope.launch {
-                                ConfigManager.saveData(context,"check_update",it)
+                                ConfigManager.saveData(context, "check_update", it)
                             }
                         }
                     )
                 }
             }
-            item {
-                CommonCard {
-                    TwoStatePreference(
-                        icon = Icons.Default.Shield,
-                        title = stringResource(R.string.enable_daemon),
-                        subtitle = stringResource(R.string.enable_daemon_to_work_background),
-                        checked = enableDaemon,
-                        onCheckedChange = {
-                            scope.launch {
-                                ConfigManager.saveData(context,"enable_daemon",it)
+            if (Auxiliary.isShellActivated || Auxiliary.isRootActivated()) {
+                item {
+                    CommonCard {
+                        TwoStatePreference(
+                            icon = Icons.Default.Shield,
+                            title = stringResource(R.string.enable_daemon),
+                            subtitle = stringResource(R.string.enable_daemon_to_work_background),
+                            checked = enableDaemon,
+                            onCheckedChange = {
+                                scope.launch {
+                                    ConfigManager.saveData(context, "enable_daemon", it)
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
+                }
+            }
+            if (enableDaemon && (Auxiliary.isShellActivated || Auxiliary.isRootActivated())) {
+                item {
+                    CommonCard {
+                        PreferenceItem(
+                            icon = Icons.Default.DataArray,
+                            title = stringResource(R.string.config_daemon),
+                            subtitle = stringResource(R.string.config_daemon_working_options),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                daemonAbstractNameInputText = daemonAbstractName
+                                daemonConfigDialog = true
+                            }
+                        )
+                    }
                 }
             }
             item {
@@ -104,9 +134,11 @@ fun SettingsCompose() {
                             title = stringResource(R.string.aggressive_detection_filtering),
                             subtitle = stringResource(R.string.filter_content_observer),
                             checked = attemptFilter,
-                            onCheckedChange = { scope.launch {
-                                ConfigManager.saveData(context,"attempt_filter",it)
-                            } }
+                            onCheckedChange = {
+                                scope.launch {
+                                    ConfigManager.saveData(context, "attempt_filter", it)
+                                }
+                            }
                         )
                     }
                 }
@@ -143,6 +175,44 @@ fun SettingsCompose() {
                     )
                 }
             }
+        }
+        if (daemonConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { daemonConfigDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.config_daemon)) // 标题
+                },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = daemonAbstractNameInputText,
+                            onValueChange = { daemonAbstractNameInputText = it }, // 可编辑
+                            label = { Text(stringResource(R.string.abstract_namespace)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            ConfigManager.saveData(
+                                context,
+                                "daemon_abstract_name",
+                                daemonAbstractNameInputText
+                            )
+                        }
+                        daemonConfigDialog = false
+                    }) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { daemonConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
         }
     }
 }

@@ -22,6 +22,9 @@
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
     <string name="enable_daemon">Enable daemon</string>
     <string name="enable_daemon_to_work_background">Enable daemon to work background</string>
+    <string name="config_daemon">Config daemon</string>
+    <string name="config_daemon_working_options">Config daemon working options</string>
+    <string name="abstract_namespace">Abstract namespace</string>
     <string name="receive_stealth_screen_casting">Receive stealth screen casting</string>
     <string name="receive_screen_casting_from_ScreenshotFaker">Receive stealth screencasting from ScreenshotFaker</string>
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
@@ -50,4 +53,5 @@
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
     <string name="not_enabled">Not enabled</string>
+    <string name="enabled">Enabled</string>
 </resources>

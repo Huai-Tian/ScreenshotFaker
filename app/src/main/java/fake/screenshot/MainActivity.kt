@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
         Shizuku.addRequestPermissionResultListener(listener)
         Shizuku.addBinderDeadListener(deadListener)
         Shizuku.addBinderReceivedListener(receivedListener)
+        DaemonManager.init(applicationContext)
         setContent {
             val navController = rememberNavController()
             val navBackStackEntry by navController.currentBackStackEntryFlow.collectAsState(initial = null)
