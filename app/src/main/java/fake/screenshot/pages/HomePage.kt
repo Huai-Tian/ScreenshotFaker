@@ -24,7 +24,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
+import fake.screenshot.DaemonManager
 import fake.screenshot.R
 import rikka.shizuku.Shizuku
 
@@ -188,7 +193,15 @@ fun WorkingInformation() {
     val deviceInfo = "${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}"
     val systemVersion = "${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
     val fingerprint = Build.FINGERPRINT
-    val enableDaemon by ConfigManager.rememberValue(context, "enable_daemon", false)
+    val daemonAbstractName by ConfigManager.rememberValue(
+        context,
+        "daemon_abstract_name",
+        "fake.screenshot.daemon"
+    )
+    var isDaemonRunning by remember { mutableStateOf(false) }
+    LaunchedEffect(daemonAbstractName) {
+        isDaemonRunning = DaemonManager.isDaemonRunning(daemonAbstractName)
+    }
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -225,7 +238,7 @@ fun WorkingInformation() {
                     Spacer(modifier = Modifier.padding(vertical = 8.dp))
                     InfoItem(
                         stringResource(R.string.daemon),
-                        if (enableDaemon) stringResource(R.string.enabled) else stringResource(R.string.not_enabled)
+                        if (isDaemonRunning) stringResource(R.string.enabled) else stringResource(R.string.not_enabled)
                     )
                 }
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))

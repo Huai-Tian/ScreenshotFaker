@@ -20,8 +20,10 @@
     <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
-    <string name="enable_daemon">Enable daemon</string>
-    <string name="enable_daemon_to_work_background">Enable daemon to work background</string>
+    <string name="start_daemon">Start daemon</string>
+    <string name="start_daemon_to_work_background">Start a daemon to work background</string>
+    <string name="view_daemon_status">View daemon working status</string>
+    <string name="click_to_view_daemon_status">Click to view daemon working status</string>
     <string name="config_daemon">Config daemon</string>
     <string name="config_daemon_working_options">Config daemon working options</string>
     <string name="abstract_namespace">Abstract namespace</string>

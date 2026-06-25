@@ -18,7 +18,7 @@
     <string name="system_version">系统版本</string>
     <string name="check_update">检查更新</string>
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
-    <string name="enable_daemon_to_work_background">启用守护进程以支持后台运行</string>
+    <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
     <string name="abstract_namespace">抽象命名空间</string>
     <string name="receive_stealth_screen_casting">接收屏幕共享</string>
@@ -47,8 +47,10 @@
     <string name="Cancel">取消</string>
     <string name="daemon">守护进程</string>
     <string name="not_enabled">未启用</string>
-    <string name="enable_daemon">启用守护进程</string>
+    <string name="start_daemon">运行守护进程</string>
     <string name="enabled">已启用</string>
+    <string name="click_to_view_daemon_status">点击查看守护进程状态</string>
     <string name="config_daemon">配置守护进程</string>
     <string name="backup">备份</string>
+    <string name="view_daemon_status">查看守护进程状态</string>
 </resources>

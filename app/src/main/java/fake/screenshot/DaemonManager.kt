@@ -1,25 +1,53 @@
 package fake.screenshot
 
 import android.content.Context
-import kotlinx.coroutines.CompletableDeferred
+import androidx.core.text.isDigitsOnly
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 object DaemonManager {
-    private val nameDeferred = CompletableDeferred<String>()
+    private lateinit var appContext: Context
+    private val _abstractName = MutableStateFlow("fake.screenshot.daemon")
 
-    suspend fun getAbstractNamespace(): String = nameDeferred.await()
-
+    // 初始化：保存 Context 并加载配置
     fun init(context: Context) {
+        appContext = context.applicationContext
         CoroutineScope(Dispatchers.IO).launch {
-            val name = ConfigManager.getDataOnce(
-                context.applicationContext,
-                "daemon_abstract_name",
-                "fake.screenshot.daemon"
-            )
-            nameDeferred.complete(name)
+            refreshConfig() // 首次加载
         }
     }
 
+    suspend fun refreshConfig() {
+            val name = ConfigManager.getDataOnce(
+                appContext,
+                "daemon_abstract_name",
+                "fake.screenshot.daemon"
+            )
+            _abstractName.value = name
+    }
+    suspend fun startDaemon(): Boolean {
+        refreshConfig()
+        withContext(Dispatchers.IO) {
+
+        }
+        //假设判断了
+        return true
+    }
+    suspend fun stopDaemon(): Boolean {
+        withContext(Dispatchers.IO) {
+            // 发送 stop 命令或 kill 进程
+        }
+        //假设判断了
+        return true
+    }
+    suspend fun isDaemonRunning(abstractNamespace:String): Boolean {
+        withContext(Dispatchers.IO){
+
+        }
+        //假设判断了
+        return abstractNamespace.isDigitsOnly()
+    }
 }

@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
+import fake.screenshot.DaemonManager
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 
@@ -32,7 +33,6 @@ fun SettingsCompose() {
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
-    val enableDaemon by ConfigManager.rememberValue(context, "enable_daemon", false)
     val daemonAbstractName by ConfigManager.rememberValue(
         context,
         "daemon_abstract_name",
@@ -40,6 +40,10 @@ fun SettingsCompose() {
     )
     var daemonAbstractNameInputText by remember { mutableStateOf(daemonAbstractName) }
     var daemonConfigDialog by remember { mutableStateOf(false) }
+    var isDaemonRunning by remember { mutableStateOf(false) }
+    LaunchedEffect(daemonAbstractName) {
+        isDaemonRunning = DaemonManager.isDaemonRunning(daemonAbstractName)
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -72,42 +76,64 @@ fun SettingsCompose() {
                     )
                 }
             }
-            if (Auxiliary.isShellActivated || Auxiliary.isRootActivated()) {
-                item {
-                    CommonCard {
-                        TwoStatePreference(
-                            icon = Icons.Default.Shield,
-                            title = stringResource(R.string.enable_daemon),
-                            subtitle = stringResource(R.string.enable_daemon_to_work_background),
-                            checked = enableDaemon,
-                            onCheckedChange = {
-                                scope.launch {
-                                    ConfigManager.saveData(context, "enable_daemon", it)
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.Shield,
+                        title = stringResource(R.string.start_daemon),
+                        subtitle = stringResource(R.string.start_daemon_to_work_background),
+                        checked = isDaemonRunning,
+                        onCheckedChange = { newValue ->
+                            if (newValue && !(Auxiliary.isShellActivated || Auxiliary.isRootActivated())) {
+                                //权限不足
+                                return@TwoStatePreference
+                            }
+                            scope.launch {
+                                isDaemonRunning = if (newValue) {
+                                    DaemonManager.startDaemon()
+                                } else {
+                                    !DaemonManager.stopDaemon()
                                 }
                             }
-                        )
-                    }
+                        }
+                    )
                 }
             }
-            if (enableDaemon && (Auxiliary.isShellActivated || Auxiliary.isRootActivated())) {
+            if (isDaemonRunning) {
                 item {
                     CommonCard {
                         PreferenceItemEx(
-                            icon = Icons.Default.DataObject,
-                            title = stringResource(R.string.config_daemon),
-                            subtitle = stringResource(R.string.config_daemon_working_options),
+                            icon = Icons.Default.Dashboard,
+                            title = stringResource(R.string.view_daemon_status),
+                            subtitle = stringResource(R.string.click_to_view_daemon_status),
                             trailingContent = {
                                 Icon(
                                     Icons.Default.ChevronRight,
                                     contentDescription = null
                                 )
                             },
-                            onClick = {
-                                daemonAbstractNameInputText = daemonAbstractName
-                                daemonConfigDialog = true
-                            }
+                            onClick = { /*TODO*/ }
                         )
                     }
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.DataObject,
+                        title = stringResource(R.string.config_daemon),
+                        subtitle = stringResource(R.string.config_daemon_working_options),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            daemonAbstractNameInputText = daemonAbstractName
+                            daemonConfigDialog = true
+                        }
+                    )
                 }
             }
             item {
@@ -278,6 +304,7 @@ fun PreferenceItemEx(
         trailingContent()
     }
 }
+
 @Composable
 fun PreferenceItem(
     icon: ImageVector,
