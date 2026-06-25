@@ -38,7 +38,6 @@ object DaemonManager {
     }
     suspend fun stopDaemon(): Boolean {
         withContext(Dispatchers.IO) {
-            // 发送 stop 命令或 kill 进程
         }
         //假设判断了
         return true
