@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
@@ -33,16 +34,16 @@ fun SettingsCompose() {
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
-    val daemonAbstractName by ConfigManager.rememberValue(
+    val daemonSocketPort by ConfigManager.rememberValue(
         context,
-        "daemon_abstract_name",
-        "fake.screenshot.daemon"
+        "daemon_socket_port",
+        1234
     )
-    var daemonAbstractNameInputText by remember { mutableStateOf(daemonAbstractName) }
+    var daemonSocketPortInputText by remember { mutableStateOf(daemonSocketPort.toString()) }
     var daemonConfigDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
-    LaunchedEffect(daemonAbstractName) {
-        isDaemonRunning = DaemonManager.isDaemonRunning(daemonAbstractName)
+    LaunchedEffect(daemonSocketPort) {
+        isDaemonRunning = DaemonManager.isDaemonRunning()
     }
     Scaffold(
         topBar = {
@@ -130,7 +131,7 @@ fun SettingsCompose() {
                             )
                         },
                         onClick = {
-                            daemonAbstractNameInputText = daemonAbstractName
+                            daemonSocketPortInputText = daemonSocketPort.toString()
                             daemonConfigDialog = true
                         }
                     )
@@ -224,9 +225,9 @@ fun SettingsCompose() {
                 text = {
                     Column {
                         OutlinedTextField(
-                            value = daemonAbstractNameInputText,
-                            onValueChange = { daemonAbstractNameInputText = it }, // 可编辑
-                            label = { Text(stringResource(R.string.abstract_namespace)) },
+                            value = daemonSocketPortInputText,
+                            onValueChange = { daemonSocketPortInputText = it }, // 可编辑
+                            label = { Text(stringResource(R.string.socket_port)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -235,11 +236,17 @@ fun SettingsCompose() {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch {
-                            ConfigManager.saveData(
-                                context,
-                                "daemon_abstract_name",
-                                daemonAbstractNameInputText
-                            )
+                            if (daemonSocketPortInputText.isDigitsOnly() && daemonSocketPort.toString() != daemonSocketPortInputText) {
+                                if (DaemonManager.isDaemonRunning()) {
+                                    DaemonManager.stopDaemon()
+                                }
+                                ConfigManager.saveData(
+                                    context,
+                                    "daemon_socket_port",
+                                    daemonSocketPortInputText.toInt()
+                                )
+                                DaemonManager.startDaemon()
+                            }
                         }
                         daemonConfigDialog = false
                     }) {

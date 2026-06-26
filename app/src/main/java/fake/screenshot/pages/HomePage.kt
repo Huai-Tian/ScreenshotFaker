@@ -193,14 +193,14 @@ fun WorkingInformation() {
     val deviceInfo = "${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}"
     val systemVersion = "${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
     val fingerprint = Build.FINGERPRINT
-    val daemonAbstractName by ConfigManager.rememberValue(
+    val daemonSocketPort by ConfigManager.rememberValue(
         context,
-        "daemon_abstract_name",
-        "fake.screenshot.daemon"
+        "daemon_socket_port",
+        1234
     )
     var isDaemonRunning by remember { mutableStateOf(false) }
-    LaunchedEffect(daemonAbstractName) {
-        isDaemonRunning = DaemonManager.isDaemonRunning(daemonAbstractName)
+    LaunchedEffect(daemonSocketPort) {
+        isDaemonRunning = DaemonManager.isDaemonRunning()
     }
 
     Surface(

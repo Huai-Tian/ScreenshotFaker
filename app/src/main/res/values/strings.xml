@@ -26,7 +26,7 @@
     <string name="click_to_view_daemon_status">Click to view daemon working status</string>
     <string name="config_daemon">Config daemon</string>
     <string name="config_daemon_working_options">Config daemon working options</string>
-    <string name="abstract_namespace">Abstract namespace</string>
+    <string name="socket_port">Socket port</string>
     <string name="receive_stealth_screen_casting">Receive stealth screen casting</string>
     <string name="receive_screen_casting_from_ScreenshotFaker">Receive stealth screencasting from ScreenshotFaker</string>
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>

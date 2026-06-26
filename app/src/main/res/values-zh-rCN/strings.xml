@@ -20,7 +20,7 @@
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
-    <string name="abstract_namespace">抽象命名空间</string>
+    <string name="socket_port">TCP 通信端口</string>
     <string name="receive_stealth_screen_casting">接收屏幕共享</string>
     <string name="receive_screen_casting_from_ScreenshotFaker">接收来自ScreenshotFaker的屏幕共享</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>

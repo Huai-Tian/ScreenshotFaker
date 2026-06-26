@@ -1,52 +1,86 @@
 package fake.screenshot
 
 import android.content.Context
-import androidx.core.text.isDigitsOnly
-import kotlinx.coroutines.CoroutineScope
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.net.Socket
+import kotlin.time.Duration.Companion.milliseconds
 
 object DaemonManager {
     private lateinit var appContext: Context
-    private val _abstractName = MutableStateFlow("fake.screenshot.daemon")
+    private val mutex = Mutex()
 
-    // 初始化：保存 Context 并加载配置
+    // 初始化：保存 Context
     fun init(context: Context) {
         appContext = context.applicationContext
-        CoroutineScope(Dispatchers.IO).launch {
-            refreshConfig() // 首次加载
-        }
     }
 
-    suspend fun refreshConfig() {
-            val name = ConfigManager.getDataOnce(
-                appContext,
-                "daemon_abstract_name",
-                "fake.screenshot.daemon"
-            )
-            _abstractName.value = name
-    }
-    suspend fun startDaemon(): Boolean {
-        refreshConfig()
+    suspend fun startDaemon(): Boolean = mutex.withLock {
+        if (isDaemonRunning()) return true
+        val port = ConfigManager.getDataOnce(
+            appContext,
+            "daemon_socket_port",
+            1234
+        )
+        try {
+            Socket("127.0.0.1", port).use {
+                return false
+            }
+        } catch (_: Exception) {
+            // 连接失败，端口空闲，继续启动
+        }
         withContext(Dispatchers.IO) {
+            Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/daemon.so $port")
+        }
 
+        // 等待守护进程启动，最多重试20次（每次间隔100ms，共2秒）
+        repeat(20) {
+            if (isDaemonRunning()) return true
+            delay(100.milliseconds)  // 单位毫秒，可直接写数字
         }
-        //假设判断了
-        return true
+        return false
     }
-    suspend fun stopDaemon(): Boolean {
-        withContext(Dispatchers.IO) {
-        }
-        //假设判断了
-        return true
-    }
-    suspend fun isDaemonRunning(abstractNamespace:String): Boolean {
-        withContext(Dispatchers.IO){
 
+    suspend fun stopDaemon(): Boolean = mutex.withLock {
+        sendCommand("stop")  // sendCommand 已经是挂起函数，内部处理IO
+
+        // 等待守护进程退出，最多重试20次
+        repeat(20) {
+            if (!isDaemonRunning()) return true
+            delay(100.milliseconds)
         }
-        //假设判断了
-        return abstractNamespace.isDigitsOnly()
+        return false
+    }
+
+    suspend fun isDaemonRunning() = sendCommand("status")?.startsWith("Working") ?: false
+
+    suspend fun sendCommand(command: String): String? {
+        return withContext(Dispatchers.IO) {
+            try {
+                Socket(
+                    "127.0.0.1", ConfigManager.getDataOnce(
+                        appContext,
+                        "daemon_socket_port",
+                        1234
+                    )
+                ).use { socket ->
+                    val writer = PrintWriter(socket.getOutputStream(), true)
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    writer.println(command)
+                    writer.flush()
+                    reader.readLine()
+                }
+            } catch (e: Exception) {
+                Log.e("DaemonManager", "sendCommand error", e)
+                null
+            }
+        }
     }
 }
