@@ -21,6 +21,7 @@
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
     <string name="socket_port">TCP通信端口（1024…65535）</string>
+    <string name="verification_password">认证密码</string>
     <string name="receive_stealth_screen_sharing">接收屏幕共享</string>
     <string name="receive_screen_sharing_from_ScreenshotFaker">接收来自ScreenshotFaker的屏幕共享</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>

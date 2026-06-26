@@ -29,6 +29,11 @@ object DaemonManager {
             "daemon_socket_port",
             1234
         )
+        val password = ConfigManager.getDataOnce(
+            appContext,
+            "daemon_socket_port",
+            1234
+        )
         try {
             Socket("127.0.0.1", port).use {
                 return false
@@ -37,7 +42,7 @@ object DaemonManager {
             // 连接失败，端口空闲，继续启动
         }
         withContext(Dispatchers.IO) {
-            Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/daemon.so $port")
+            Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/daemon.so $port $password")
         }
 
         // 等待守护进程启动，最多重试20次（每次间隔100ms，共2秒）
@@ -60,7 +65,7 @@ object DaemonManager {
 
     suspend fun isDaemonRunning() = sendCommand("status")?.startsWith("Working") ?: false
 
-    suspend fun sendCommand(command: String): String? {
+    suspend fun sendCommand(command: String): String? {//TODO发出的消息需要通过password加密
         return withContext(Dispatchers.IO) {
             try {
                 Socket(

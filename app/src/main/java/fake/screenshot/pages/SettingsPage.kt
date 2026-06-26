@@ -19,7 +19,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.core.text.isDigitsOnly
 import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
@@ -40,7 +39,19 @@ fun SettingsCompose(navController: NavController) {
         "daemon_socket_port",
         1234
     )
+    val daemonVerificationPassword by ConfigManager.rememberValue(
+        context,
+        "daemon_verification_password",
+        "ScreenshotFaker"
+    )
+    var daemonVerificationPasswordInputText by remember { mutableStateOf(daemonVerificationPassword) }
     var daemonSocketPortInputText by remember { mutableStateOf(daemonSocketPort.toString()) }
+    val isPortValid by remember {
+        derivedStateOf {
+            val port = daemonSocketPortInputText.toIntOrNull()
+            port != null && port in 1024..65535
+        }
+    }
     var daemonConfigDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
     LaunchedEffect(daemonSocketPort) {
@@ -132,6 +143,7 @@ fun SettingsCompose(navController: NavController) {
                             )
                         },
                         onClick = {
+                            daemonVerificationPasswordInputText = daemonVerificationPassword
                             daemonSocketPortInputText = daemonSocketPort.toString()
                             daemonConfigDialog = true
                         }
@@ -232,32 +244,47 @@ fun SettingsCompose(navController: NavController) {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        OutlinedTextField(
+                            value = daemonVerificationPasswordInputText,
+                            onValueChange = { daemonVerificationPasswordInputText = it }, // 可编辑
+                            label = { Text(stringResource(R.string.verification_password)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        scope.launch {
-                            if (daemonSocketPortInputText.isDigitsOnly() && daemonSocketPort.toString() != daemonSocketPortInputText && daemonSocketPortInputText.toInt() in 1024..65535) {
-                                if (isDaemonRunning) {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                val newPort = daemonSocketPortInputText.toInt()
+                                val portChanged = daemonSocketPort != newPort
+                                val passwordChanged =
+                                    daemonVerificationPassword != daemonVerificationPasswordInputText
+                                if (portChanged || passwordChanged) {
+                                    val wasRunning = isDaemonRunning
                                     isDaemonRunning = !DaemonManager.stopDaemon()
-                                    ConfigManager.saveData(
-                                        context,
-                                        "daemon_socket_port",
-                                        daemonSocketPortInputText.toInt()
-                                    )
-                                    isDaemonRunning = DaemonManager.startDaemon()
-                                } else {
-                                    ConfigManager.saveData(
-                                        context,
-                                        "daemon_socket_port",
-                                        daemonSocketPortInputText.toInt()
-                                    )
-                                    isDaemonRunning = DaemonManager.isDaemonRunning()
+                                    if (portChanged) {
+                                        ConfigManager.saveData(
+                                            context,
+                                            "daemon_socket_port",
+                                            newPort
+                                        )
+                                    }
+                                    if (passwordChanged) {
+                                        ConfigManager.saveData(
+                                            context,
+                                            "daemon_verification_password",
+                                            daemonVerificationPasswordInputText
+                                        )
+                                    }
+                                    if (wasRunning) isDaemonRunning = DaemonManager.startDaemon()
                                 }
                             }
-                        }
-                        daemonConfigDialog = false
-                    }) {
+                            daemonConfigDialog = false
+                        },
+                        enabled = isPortValid
+                    ) {
                         Text(stringResource(R.string.Confirm))
                     }
                 },
