@@ -13,9 +13,7 @@
 #include <fstream>
 #include <csignal>
 
-
 using namespace std;
-
 void log(const string &text) {
     ofstream ofs("/data/local/tmp/log.txt", ios::app);
     ofs << text << " errno=" << errno << " (" << strerror(errno) << ")" << endl;
@@ -70,7 +68,7 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
 
     // 1. 将 argv[1] 解析为端口号
-    int port = atoi(argv[1]);
+    int port = stoi(argv[1]);
     if (port < 1024 || port > 65535) {
         log("Invalid port number");
         return 1;

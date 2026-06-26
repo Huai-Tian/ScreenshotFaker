@@ -24,6 +24,7 @@ import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isRootActivated
 import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.pages.ApplicationCompose
+import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
@@ -63,7 +64,6 @@ class MainActivity : ComponentActivity() {
                     else -> true
                 }
             }
-
             NavigationSuiteScaffold(
                 navigationSuiteItems = {
                     visibleDestinations.forEach { destination ->
@@ -107,11 +107,11 @@ class MainActivity : ComponentActivity() {
                     startDestination = AppDestinations.HOME.route
                 ) {
                     composable(AppDestinations.HOME.route) { HomeCompose() }
-                    composable(AppDestinations.SETTINGS.route) { SettingsCompose() }
+                    composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController = navController) }
                     composable(AppDestinations.GALLERY.route) { GalleryCompose() }
                     composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
                     composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
-
+                    composable("daemon_status"){ DaemonStatusCompose() }
                 }
             }
         }

@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.core.text.isDigitsOnly
+import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
@@ -28,7 +29,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsCompose() {
+fun SettingsCompose(navController: NavController) {
     // 状态管理
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -113,7 +114,7 @@ fun SettingsCompose() {
                                     contentDescription = null
                                 )
                             },
-                            onClick = { /*TODO*/ }
+                            onClick = { navController.navigate("daemon_status") }
                         )
                     }
                 }
@@ -251,6 +252,7 @@ fun SettingsCompose() {
                                         "daemon_socket_port",
                                         daemonSocketPortInputText.toInt()
                                     )
+                                    isDaemonRunning= DaemonManager.isDaemonRunning()
                                 }
                             }
                         }
