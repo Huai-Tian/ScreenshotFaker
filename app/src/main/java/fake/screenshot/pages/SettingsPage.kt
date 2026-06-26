@@ -142,15 +142,15 @@ fun SettingsCompose(navController: NavController) {
                 CommonCard {
                     PreferenceItemEx(
                         icon = Icons.Default.CastConnected,
-                        title = stringResource(R.string.receive_stealth_screen_casting),
-                        subtitle = stringResource(R.string.receive_screen_casting_from_ScreenshotFaker),
+                        title = stringResource(R.string.receive_stealth_screen_sharing),
+                        subtitle = stringResource(R.string.receive_screen_sharing_from_ScreenshotFaker),
                         trailingContent = {
                             Icon(
                                 Icons.Default.ChevronRight,
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = { navController.navigate("receive_screen_sharing") }
                     )
                 }
             }
@@ -212,7 +212,7 @@ fun SettingsCompose(navController: NavController) {
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = { navController.navigate("about") }
                     )
                 }
             }
@@ -252,7 +252,7 @@ fun SettingsCompose(navController: NavController) {
                                         "daemon_socket_port",
                                         daemonSocketPortInputText.toInt()
                                     )
-                                    isDaemonRunning= DaemonManager.isDaemonRunning()
+                                    isDaemonRunning = DaemonManager.isDaemonRunning()
                                 }
                             }
                         }

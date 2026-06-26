@@ -1,5 +1,6 @@
 package fake.screenshot
 
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,22 +13,27 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isRootActivated
 import fake.screenshot.Auxiliary.isShellActivated
+import fake.screenshot.pages.AboutCompose
 import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
+import fake.screenshot.pages.ReceiveScreenSharingCompose
 import fake.screenshot.pages.SettingsCompose
 import rikka.shizuku.Shizuku
 
@@ -44,6 +50,7 @@ class MainActivity : ComponentActivity() {
         isShellActivated = true
     }
 
+    @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -53,10 +60,10 @@ class MainActivity : ComponentActivity() {
         DaemonManager.init(applicationContext)
         setContent {
             val navController = rememberNavController()
-            val navBackStackEntry by navController.currentBackStackEntryFlow.collectAsState(initial = null)
-            val currentDestination = navBackStackEntry?.destination?.route?.let { route ->
-                AppDestinations.entries.find { it.route == route } ?: AppDestinations.HOME
-            } ?: AppDestinations.HOME
+            val currentDestination by navController.currentBackStackEntryAsState()
+            val currentRoute = currentDestination?.destination?.route ?: ""
+
+            // 动态过滤需要显示在底部导航栏的目标
             val visibleDestinations = AppDestinations.entries.filter { destination ->
                 when (destination) {
                     AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated()
@@ -64,54 +71,55 @@ class MainActivity : ComponentActivity() {
                     else -> true
                 }
             }
-            NavigationSuiteScaffold(
-                navigationSuiteItems = {
-                    visibleDestinations.forEach { destination ->
-                        item(
-                            icon = {
-                                Icon(
-                                    destination.icon,
-                                    contentDescription = destination.label
-                                )
-                            },
-                            label = {
-                                if (currentDestination == destination) {
-                                    Text(
-                                        when (destination.label) {
-                                            "Home" -> getString(R.string.home)
-                                            "Settings" -> getString(R.string.settings)
-                                            "Gallery" -> getString(R.string.gallery)
-                                            "Application" -> getString(R.string.application)
-                                            "Extension" -> getString(R.string.extension)
-                                            else -> getString(R.string.unknown)
+            val visibleBottomBarRoutes = visibleDestinations.map { it.route }.toSet()
+
+            Scaffold(
+                bottomBar = {
+                    if (currentRoute in visibleBottomBarRoutes) {
+                        NavigationBar {
+                            visibleDestinations.forEach { destination ->
+                                NavigationBarItem(
+                                    icon = { Icon(destination.icon, contentDescription = null) },
+                                    label = {
+                                        Text(
+                                            when (destination.label) {
+                                                "Home" -> stringResource(R.string.home)
+                                                "Settings" -> stringResource(R.string.settings)
+                                                "Gallery" -> stringResource(R.string.gallery)
+                                                "Application" -> stringResource(R.string.application)
+                                                "Extension" -> stringResource(R.string.extension)
+                                                else -> stringResource(R.string.unknown)
+                                            }
+                                        )
+                                    },
+                                    selected = currentRoute == destination.route,
+                                    onClick = {
+                                        navController.navigate(destination.route) {
+                                            popUpTo(navController.graph.startDestinationId) {
+                                                saveState = true
+                                            }
+                                            launchSingleTop = true
+                                            restoreState = true
                                         }
-                                    )
-                                }
-                            },
-                            selected = currentDestination == destination,
-                            onClick = {
-                                navController.navigate(destination.route) {
-                                    popUpTo(navController.graph.startDestinationId) {
-                                        saveState = true
                                     }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
+                                )
                             }
-                        )
+                        }
                     }
                 }
             ) {
                 NavHost(
                     navController = navController,
-                    startDestination = AppDestinations.HOME.route
+                    startDestination = AppDestinations.HOME.route,
                 ) {
                     composable(AppDestinations.HOME.route) { HomeCompose() }
-                    composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController = navController) }
+                    composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
                     composable(AppDestinations.GALLERY.route) { GalleryCompose() }
                     composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
                     composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
-                    composable("daemon_status"){ DaemonStatusCompose() }
+                    composable("daemon_status") { DaemonStatusCompose() }
+                    composable("about") { AboutCompose() }
+                    composable("receive_screen_sharing") { ReceiveScreenSharingCompose() }
                 }
             }
         }
