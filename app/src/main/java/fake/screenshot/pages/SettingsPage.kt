@@ -236,16 +236,22 @@ fun SettingsCompose() {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch {
-                            if (daemonSocketPortInputText.isDigitsOnly() && daemonSocketPort.toString() != daemonSocketPortInputText) {
-                                if (DaemonManager.isDaemonRunning()) {
-                                    DaemonManager.stopDaemon()
+                            if (daemonSocketPortInputText.isDigitsOnly() && daemonSocketPort.toString() != daemonSocketPortInputText && daemonSocketPortInputText.toInt() in 1024..65535) {
+                                if (isDaemonRunning) {
+                                    isDaemonRunning = !DaemonManager.stopDaemon()
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_socket_port",
+                                        daemonSocketPortInputText.toInt()
+                                    )
+                                    isDaemonRunning = DaemonManager.startDaemon()
+                                } else {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_socket_port",
+                                        daemonSocketPortInputText.toInt()
+                                    )
                                 }
-                                ConfigManager.saveData(
-                                    context,
-                                    "daemon_socket_port",
-                                    daemonSocketPortInputText.toInt()
-                                )
-                                DaemonManager.startDaemon()
                             }
                         }
                         daemonConfigDialog = false

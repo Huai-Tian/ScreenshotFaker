@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
 
     // 1. 将 argv[1] 解析为端口号
     int port = atoi(argv[1]);
-    if (port <= 0 || port > 65535) {
+    if (port < 1024 || port > 65535) {
         log("Invalid port number");
         return 1;
     }
@@ -90,7 +90,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 4. 绑定到 127.0.0.1:port
-    struct sockaddr_in addr;
+    struct sockaddr_in addr{};
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);

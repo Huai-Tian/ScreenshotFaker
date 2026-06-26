@@ -50,7 +50,6 @@ object DaemonManager {
 
     suspend fun stopDaemon(): Boolean = mutex.withLock {
         sendCommand("stop")  // sendCommand 已经是挂起函数，内部处理IO
-
         // 等待守护进程退出，最多重试20次
         repeat(20) {
             if (!isDaemonRunning()) return true
