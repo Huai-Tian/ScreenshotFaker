@@ -39,7 +39,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
 import fake.screenshot.R
 import rikka.shizuku.Shizuku
@@ -202,18 +201,12 @@ fun HomeCompose() {
 
 @Composable
 fun WorkingInformation() {
-    val context = LocalContext.current
     val deviceInfo = "${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}"
     val systemVersion = "${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）"
     val fingerprint = Build.FINGERPRINT
-    val daemonSocketPort by ConfigManager.rememberValue(
-        context,
-        "daemon_socket_port",
-        1234
-    )
     var isDaemonRunning by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
-    LaunchedEffect(daemonSocketPort) {
+    LaunchedEffect(Unit) {
         isLoading = true
         isDaemonRunning = DaemonManager.isDaemonRunning()
         isLoading = false
