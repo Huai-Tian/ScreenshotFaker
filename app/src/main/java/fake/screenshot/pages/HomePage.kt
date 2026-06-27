@@ -243,17 +243,17 @@ fun WorkingInformation() {
                         else -> "None"
                     }
                 )
-                if (Auxiliary.isShellActivated || Auxiliary.isRootActivated()) {
-                    Spacer(modifier = Modifier.padding(vertical = 8.dp))
-                    InfoItem(
-                        stringResource(R.string.daemon),
-                        when {
-                            isLoading -> stringResource(R.string.loading)
-                            isDaemonRunning -> stringResource(R.string.enabled)
-                            else -> stringResource(R.string.not_enabled)
-                        }
-                    )
-                }
+
+                Spacer(modifier = Modifier.padding(vertical = 8.dp))
+                InfoItem(
+                    stringResource(R.string.daemon),
+                    when {
+                        isLoading -> stringResource(R.string.loading)
+                        isDaemonRunning -> stringResource(R.string.running)
+                        else -> stringResource(R.string.not_running)
+                    }
+                )
+
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(stringResource(R.string.fingerprint), fingerprint)
             }

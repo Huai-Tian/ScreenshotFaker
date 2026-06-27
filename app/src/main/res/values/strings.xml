@@ -56,6 +56,7 @@
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
-    <string name="not_enabled">Not enabled</string>
-    <string name="enabled">Enabled</string>
+    <string name="not_running">Not running</string>
+    <string name="running">Running</string>
+    <string name="permission_denied">Permission denied</string>
 </resources>

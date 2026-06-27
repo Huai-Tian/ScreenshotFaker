@@ -69,7 +69,10 @@ object DaemonManager {
         }
 
         withContext(Dispatchers.IO) {
-            Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/daemon.so $port $password")
+            val (exitCode, _) = Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/daemon.so $port $password")
+            if (exitCode != 0) {
+                return@withContext false
+            }
         }
 
         // 等待守护进程启动，最多重试20次（每次间隔100ms，共2秒）

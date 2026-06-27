@@ -48,11 +48,12 @@
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>
     <string name="daemon">守护进程</string>
-    <string name="not_enabled">未启用</string>
+    <string name="not_running">未运行</string>
     <string name="start_daemon">运行守护进程</string>
-    <string name="enabled">已启用</string>
+    <string name="running">运行中</string>
     <string name="click_to_view_daemon_status">点击查看守护进程状态</string>
     <string name="config_daemon">配置守护进程</string>
     <string name="backup">备份</string>
     <string name="view_daemon_status">查看守护进程状态</string>
+    <string name="permission_denied">没有权限</string>
 </resources>
