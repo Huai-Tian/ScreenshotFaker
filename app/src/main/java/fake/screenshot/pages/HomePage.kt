@@ -47,6 +47,17 @@ import rikka.shizuku.Shizuku
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeCompose() {
+    val context = LocalContext.current
+    val packageInfo = remember {
+        try {
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                0
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
     Column {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) })
         if (Auxiliary.isModuleActivated() || Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
@@ -105,10 +116,12 @@ fun HomeCompose() {
                         // 第二行：版本号
                         Text(
                             text = "${stringResource(R.string.version)} ${
-                                Auxiliary.getVersionName(
-                                    LocalContext.current
-                                )
-                            }（${Auxiliary.getVersionCode(LocalContext.current)}）",
+                                packageInfo?.versionName
+                                    ?: stringResource(R.string.unknown)
+
+                            }（${
+                                packageInfo?.longVersionCode?.toString() ?: stringResource(R.string.unknown)
+                            }）",
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 14.sp
                         )
@@ -199,8 +212,11 @@ fun WorkingInformation() {
         1234
     )
     var isDaemonRunning by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(true) }
     LaunchedEffect(daemonSocketPort) {
+        isLoading = true
         isDaemonRunning = DaemonManager.isDaemonRunning()
+        isLoading = false
     }
 
     Surface(
@@ -238,7 +254,11 @@ fun WorkingInformation() {
                     Spacer(modifier = Modifier.padding(vertical = 8.dp))
                     InfoItem(
                         stringResource(R.string.daemon),
-                        if (isDaemonRunning) stringResource(R.string.enabled) else stringResource(R.string.not_enabled)
+                        when {
+                            isLoading -> stringResource(R.string.loading)
+                            isDaemonRunning -> stringResource(R.string.enabled)
+                            else -> stringResource(R.string.not_enabled)
+                        }
                     )
                 }
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))

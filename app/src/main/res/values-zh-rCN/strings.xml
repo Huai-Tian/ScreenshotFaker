@@ -16,6 +16,7 @@
     <string name="privilege">特权状态</string>
     <string name="device_info">设备信息</string>
     <string name="system_version">系统版本</string>
+    <string name="loading">获取中</string>
     <string name="check_update">检查更新</string>
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
