@@ -23,12 +23,17 @@ class ScreenRecordTileService : TileService() {
                 val savePath = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
                     key = "screenRecord_save_path",
-                    defaultValue = "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Records"
+                    defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
                 )
                 val duration = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
                     key = "screenRecord_duration",
                     defaultValue = "180"
+                )
+                val suffix = ConfigManager.getDataOnce(
+                    context = this@ScreenRecordTileService,
+                    key = "screenRecord_suffix",
+                    defaultValue = ".mp4"
                 )
                 val displayID = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
@@ -45,18 +50,24 @@ class ScreenRecordTileService : TileService() {
                     key = "screenRecord_resolution",
                     defaultValue = ""
                 ).let { if (it.isEmpty()) "" else "--size $it" }
-
-
+                val bugreport = ConfigManager.getDataOnce(
+                    context = this@ScreenRecordTileService,
+                    key = "screenRecord_bugreport",
+                    defaultValue = false
+                ).let { if (it) "--bugreport" else "" }
                 with(File(savePath)) {
                     if (!(exists() && isDirectory)) mkdirs()
                 }
-                Auxiliary.exec(
-                    "screenrecord --time-limit $duration $displayID $bitrate $resolution ${savePath}/${Auxiliary.getCurrentDateString()}_${
-                        Auxiliary.getRandomString(
-                            4
-                        )
-                    }.mp4"
-                )
+                val args = listOf(
+                    "screenrecord",
+                    "--time-limit", duration,
+                    displayID,
+                    bitrate,
+                    resolution,
+                    bugreport,
+                    "${savePath}/${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
+                ).filter { it.isNotEmpty() }
+                Auxiliary.exec(args.joinToString(" "))
             }
         }
         clicked = false

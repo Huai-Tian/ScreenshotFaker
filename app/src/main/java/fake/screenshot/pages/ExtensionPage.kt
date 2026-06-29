@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import fake.screenshot.ConfigManager
@@ -25,7 +26,12 @@ fun ExtensionCompose() {
     val screenshotSavePath by ConfigManager.rememberValue(
         context,
         "screenshot_save_path",
-        "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Screenshots"
+        "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
+    )
+    val screenshotSuffix by ConfigManager.rememberValue(
+        context,
+        "screenshot_suffix",
+        ".png"
     )
     val screenshotDisplayID by ConfigManager.rememberValue(
         context,
@@ -34,12 +40,18 @@ fun ExtensionCompose() {
     )
     var screenshotConfigDialog by remember { mutableStateOf(false) }
     var screenshotConfigDialogSavaPathInputText by remember { mutableStateOf(screenshotSavePath) }
+    var screenshotConfigDialogSuffixInputText by remember { mutableStateOf(screenshotSuffix) }
     var screenshotConfigDialogDisplayIDInputText by remember { mutableStateOf(screenshotDisplayID) }
     //ScreenRecord
     val screenRecordSavePath by ConfigManager.rememberValue(
         context,
         "screenRecord_save_path",
-        "${Environment.getExternalStorageDirectory().path}/DCIM/ScreenshotFaker/Records"
+        "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
+    )
+    val screenRecordSuffix by ConfigManager.rememberValue(
+        context,
+        "screenRecord_suffix",
+        ".mp4"
     )
     val screenRecordDisplayID by ConfigManager.rememberValue(
         context,
@@ -61,12 +73,27 @@ fun ExtensionCompose() {
         "screenRecord_resolution",
         ""
     )
+    val screenRecordBugreport by ConfigManager.rememberValue(
+        context,
+        "screenRecord_bugreport",
+        false
+    )
     var screenRecordConfigDialog by remember { mutableStateOf(false) }
     var screenRecordConfigDialogSavaPathInputText by remember { mutableStateOf(screenRecordSavePath) }
-    var screenRecordConfigDialogDisplayIDInputText by remember { mutableStateOf(screenRecordDisplayID) }
-    var screenRecordConfigDialogDurationInputText by remember {mutableStateOf(screenRecordDuration)}
-    var screenRecordConfigDialogBitRateInputText by remember {mutableStateOf(screenRecordBitRate)}
-    var screenRecordConfigDialogResolutionInputText by remember {mutableStateOf(screenRecordResolution)}
+    var screenRecordConfigDialogSuffixInputText by remember { mutableStateOf(screenRecordSuffix) }
+    var screenRecordConfigDialogDisplayIDInputText by remember {
+        mutableStateOf(
+            screenRecordDisplayID
+        )
+    }
+    var screenRecordConfigDialogDurationInputText by remember { mutableStateOf(screenRecordDuration) }
+    var screenRecordConfigDialogBitRateInputText by remember { mutableStateOf(screenRecordBitRate) }
+    var screenRecordConfigDialogResolutionInputText by remember {
+        mutableStateOf(
+            screenRecordResolution
+        )
+    }
+    var screenRecordConfigDialogEnableBugreport by remember { mutableStateOf(screenRecordBugreport) }
 
     Scaffold(
         topBar = {
@@ -100,6 +127,7 @@ fun ExtensionCompose() {
                         onClick = {
                             screenshotConfigDialogSavaPathInputText = screenshotSavePath
                             screenshotConfigDialogDisplayIDInputText = screenshotDisplayID
+                            screenshotConfigDialogSuffixInputText = screenshotSuffix
                             screenshotConfigDialog = true
                         }
                     )
@@ -119,10 +147,12 @@ fun ExtensionCompose() {
                         },
                         onClick = {
                             screenRecordConfigDialogSavaPathInputText = screenRecordSavePath
+                            screenRecordConfigDialogSuffixInputText = screenRecordSuffix
                             screenRecordConfigDialogDisplayIDInputText = screenRecordDisplayID
                             screenRecordConfigDialogDurationInputText = screenRecordDuration
                             screenRecordConfigDialogBitRateInputText = screenRecordBitRate
                             screenRecordConfigDialogResolutionInputText = screenRecordResolution
+                            screenRecordConfigDialogEnableBugreport = screenRecordBugreport
                             screenRecordConfigDialog = true
                         }
                     )
@@ -152,11 +182,18 @@ fun ExtensionCompose() {
                     Text(text = stringResource(R.string.config_stealth_screenshot)) // 标题
                 },
                 text = {
-                    Column{
+                    Column {
                         OutlinedTextField(
                             value = screenshotConfigDialogSavaPathInputText,
                             onValueChange = { screenshotConfigDialogSavaPathInputText = it }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenshot_save_path)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenshotConfigDialogSuffixInputText,
+                            onValueChange = { screenshotConfigDialogSuffixInputText = it },
+                            label = { Text(stringResource(R.string.stealth_file_suffix)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -178,6 +215,11 @@ fun ExtensionCompose() {
                                 context,
                                 "screenshot_save_path",
                                 screenshotConfigDialogSavaPathInputText.removeSuffix("/")
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenshot_suffix",
+                                screenshotConfigDialogSuffixInputText
                             )
                             ConfigManager.saveData(
                                 context,
@@ -204,7 +246,7 @@ fun ExtensionCompose() {
                     Text(text = stringResource(R.string.config_stealth_screenRecord)) // 标题
                 },
                 text = {
-                    Column{
+                    Column {
                         OutlinedTextField(
                             value = screenRecordConfigDialogSavaPathInputText,
                             onValueChange = {
@@ -220,6 +262,15 @@ fun ExtensionCompose() {
                                 screenRecordConfigDialogDurationInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_duration)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = screenRecordConfigDialogSuffixInputText,
+                            onValueChange = {
+                                screenRecordConfigDialogSuffixInputText = it
+                            }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_file_suffix)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -250,6 +301,18 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.stealth_screenRecord_bugreport))
+                            Switch(
+                                checked = screenRecordConfigDialogEnableBugreport,
+                                onCheckedChange = { screenRecordConfigDialogEnableBugreport = it }
+                            )
+                        }
+
                     }
                 },
                 confirmButton = {
@@ -262,8 +325,18 @@ fun ExtensionCompose() {
                             )
                             ConfigManager.saveData(
                                 context,
+                                "screenRecord_suffix",
+                                screenRecordConfigDialogSuffixInputText
+                            )
+                            ConfigManager.saveData(
+                                context,
                                 "screenRecord_display_id",
                                 screenRecordConfigDialogDisplayIDInputText
+                            )
+                            ConfigManager.saveData(
+                                context,
+                                "screenRecord_bugreport",
+                                screenRecordConfigDialogEnableBugreport
                             )
                             ConfigManager.saveData(
                                 context,
