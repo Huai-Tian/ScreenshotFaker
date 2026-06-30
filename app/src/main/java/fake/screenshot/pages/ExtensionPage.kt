@@ -112,6 +112,7 @@ fun ExtensionCompose() {
                 screenRecordConfigDialogResolutionInputText
             ) && screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
                     && screenRecordConfigDialogDurationInputText.isDigitsOnly()
+                    && screenRecordConfigDialogDurationInputText.isNotEmpty()
                     && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
         }
     }
