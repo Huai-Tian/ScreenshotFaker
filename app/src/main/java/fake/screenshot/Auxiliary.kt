@@ -44,6 +44,17 @@ object Auxiliary {
         1 to it.stackTraceToString()
     }
 
+    fun isConfigValid(vararg config: String) = config.all {
+        it.isEmpty() || it.all { char ->
+            char.isLetterOrDigit() || char in setOf(
+                '_',
+                '-',
+                '/',
+                '.'
+            )
+        }
+    }
+
     fun getCurrentTimestampSeconds(): Long = System.currentTimeMillis() / 1000
 
     fun isTimestampValid(timestamp: Long, allowedSkewSeconds: Long = 10): Boolean {

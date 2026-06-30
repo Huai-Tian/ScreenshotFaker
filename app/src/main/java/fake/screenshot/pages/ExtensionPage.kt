@@ -13,6 +13,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.core.text.isDigitsOnly
+import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.R
 import kotlinx.coroutines.launch
@@ -42,6 +44,14 @@ fun ExtensionCompose() {
     var screenshotConfigDialogSavaPathInputText by remember { mutableStateOf(screenshotSavePath) }
     var screenshotConfigDialogSuffixInputText by remember { mutableStateOf(screenshotSuffix) }
     var screenshotConfigDialogDisplayIDInputText by remember { mutableStateOf(screenshotDisplayID) }
+    val isScreenshotConfigValid by remember {
+        derivedStateOf {
+            Auxiliary.isConfigValid(
+                screenshotConfigDialogSuffixInputText,
+                screenshotConfigDialogSavaPathInputText
+            ) && screenshotConfigDialogDisplayIDInputText.isDigitsOnly()
+        }
+    }
     //ScreenRecord
     val screenRecordSavePath by ConfigManager.rememberValue(
         context,
@@ -79,7 +89,7 @@ fun ExtensionCompose() {
         false
     )
     var screenRecordConfigDialog by remember { mutableStateOf(false) }
-    var screenRecordConfigDialogSavaPathInputText by remember { mutableStateOf(screenRecordSavePath) }
+    var screenRecordConfigDialogSavePathInputText by remember { mutableStateOf(screenRecordSavePath) }
     var screenRecordConfigDialogSuffixInputText by remember { mutableStateOf(screenRecordSuffix) }
     var screenRecordConfigDialogDisplayIDInputText by remember {
         mutableStateOf(
@@ -94,7 +104,17 @@ fun ExtensionCompose() {
         )
     }
     var screenRecordConfigDialogEnableBugreport by remember { mutableStateOf(screenRecordBugreport) }
-
+    val isScreenRecordConfigValid by remember {
+        derivedStateOf {
+            Auxiliary.isConfigValid(
+                screenRecordConfigDialogSavePathInputText,
+                screenRecordConfigDialogSuffixInputText,
+                screenRecordConfigDialogResolutionInputText
+            ) && screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
+                    && screenRecordConfigDialogDurationInputText.isDigitsOnly()
+                    && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -146,7 +166,7 @@ fun ExtensionCompose() {
                             )
                         },
                         onClick = {
-                            screenRecordConfigDialogSavaPathInputText = screenRecordSavePath
+                            screenRecordConfigDialogSavePathInputText = screenRecordSavePath
                             screenRecordConfigDialogSuffixInputText = screenRecordSuffix
                             screenRecordConfigDialogDisplayIDInputText = screenRecordDisplayID
                             screenRecordConfigDialogDurationInputText = screenRecordDuration
@@ -209,26 +229,38 @@ fun ExtensionCompose() {
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = {
-                        scope.launch {
-                            ConfigManager.saveData(
-                                context,
-                                "screenshot_save_path",
-                                screenshotConfigDialogSavaPathInputText.removeSuffix("/")
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenshot_suffix",
-                                screenshotConfigDialogSuffixInputText
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenshot_display_id",
-                                screenshotConfigDialogDisplayIDInputText
-                            )
-                        }
-                        screenshotConfigDialog = false
-                    }) {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                if (screenshotSavePath != screenshotConfigDialogSavaPathInputText.removeSuffix(
+                                        "/"
+                                    )
+                                ) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "screenshot_save_path",
+                                        screenshotConfigDialogSavaPathInputText.removeSuffix("/")
+                                    )
+                                }
+                                if (screenshotSuffix != screenshotConfigDialogSuffixInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "screenshot_suffix",
+                                        screenshotConfigDialogSuffixInputText
+                                    )
+                                }
+                                if (screenshotDisplayID != screenshotConfigDialogDisplayIDInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "screenshot_display_id",
+                                        screenshotConfigDialogDisplayIDInputText
+                                    )
+                                }
+                            }
+                            screenshotConfigDialog = false
+                        },
+                        enabled = isScreenshotConfigValid
+                    ) {
                         Text(stringResource(R.string.Confirm))
                     }
                 },
@@ -248,9 +280,9 @@ fun ExtensionCompose() {
                 text = {
                     Column {
                         OutlinedTextField(
-                            value = screenRecordConfigDialogSavaPathInputText,
+                            value = screenRecordConfigDialogSavePathInputText,
                             onValueChange = {
-                                screenRecordConfigDialogSavaPathInputText = it
+                                screenRecordConfigDialogSavePathInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_save_path)) },
                             modifier = Modifier.fillMaxWidth(),
@@ -318,44 +350,58 @@ fun ExtensionCompose() {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch {
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_save_path",
-                                screenRecordConfigDialogSavaPathInputText.removeSuffix("/")
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_suffix",
-                                screenRecordConfigDialogSuffixInputText
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_display_id",
-                                screenRecordConfigDialogDisplayIDInputText
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_bugreport",
-                                screenRecordConfigDialogEnableBugreport
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_duration",
-                                screenRecordConfigDialogDurationInputText
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_bitrate",
-                                screenRecordConfigDialogBitRateInputText
-                            )
-                            ConfigManager.saveData(
-                                context,
-                                "screenRecord_resolution",
-                                screenRecordConfigDialogResolutionInputText
-                            )
+                            if (screenRecordSavePath != screenRecordConfigDialogSavePathInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_save_path",
+                                    screenRecordConfigDialogSavePathInputText.removeSuffix("/")
+                                )
+                            }
+                            if (screenRecordSuffix != screenRecordConfigDialogSuffixInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_suffix",
+                                    screenRecordConfigDialogSuffixInputText
+                                )
+                            }
+                            if (screenRecordDisplayID != screenRecordConfigDialogDisplayIDInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_display_id",
+                                    screenRecordConfigDialogDisplayIDInputText
+                                )
+                            }
+                            if (screenRecordBugreport != screenRecordConfigDialogEnableBugreport) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_bugreport",
+                                    screenRecordConfigDialogEnableBugreport
+                                )
+                            }
+                            if (screenRecordDuration != screenRecordConfigDialogDurationInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_duration",
+                                    screenRecordConfigDialogDurationInputText
+                                )
+                            }
+                            if (screenRecordBitRate != screenRecordConfigDialogBitRateInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_bitrate",
+                                    screenRecordConfigDialogBitRateInputText
+                                )
+                            }
+                            if (screenRecordResolution != screenRecordConfigDialogResolutionInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_resolution",
+                                    screenRecordConfigDialogResolutionInputText
+                                )
+                            }
                         }
                         screenRecordConfigDialog = false
-                    }) {
+                    }, enabled = isScreenRecordConfigValid) {
                         Text(stringResource(R.string.Confirm))
                     }
                 },
