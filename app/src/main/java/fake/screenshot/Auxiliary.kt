@@ -45,13 +45,20 @@ object Auxiliary {
     }
 
     fun isConfigValid(vararg config: String) = config.all {
+        val special = setOf(
+            '_',
+            '-',
+            '/',
+            '.',
+            '+',
+            '@',
+            ':',
+            '=',
+            '%',
+            ','
+        )
         it.isEmpty() || it.all { char ->
-            char.isLetterOrDigit() || char in setOf(
-                '_',
-                '-',
-                '/',
-                '.'
-            )
+            char.isLetterOrDigit() || char in special
         }
     }
 
