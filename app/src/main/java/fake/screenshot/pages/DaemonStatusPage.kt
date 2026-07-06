@@ -128,7 +128,7 @@ fun DaemonStatusCompose() {
                                 if (line.isNotEmpty()) {
                                     Text(
                                         text = line,
-                                        fontSize = 14.sp,
+                                        fontSize = 10.sp,
                                         fontFamily = FontFamily.Monospace,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )

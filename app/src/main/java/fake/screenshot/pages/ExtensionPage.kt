@@ -16,6 +16,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
+import fake.screenshot.DaemonManager
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 
@@ -224,6 +225,7 @@ fun ExtensionCompose() {
                                 screenshotConfigDialogDisplayIDInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.physical_display_id)) },
+                            placeholder = { Text(stringResource(R.string.default_if_empty)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -233,6 +235,7 @@ fun ExtensionCompose() {
                     TextButton(
                         onClick = {
                             scope.launch {
+                                var configChanged = false
                                 if (screenshotSavePath != screenshotConfigDialogSavaPathInputText.removeSuffix(
                                         "/"
                                     )
@@ -242,6 +245,7 @@ fun ExtensionCompose() {
                                         "screenshot_save_path",
                                         screenshotConfigDialogSavaPathInputText.removeSuffix("/")
                                     )
+                                    configChanged = true
                                 }
                                 if (screenshotSuffix != screenshotConfigDialogSuffixInputText) {
                                     ConfigManager.saveData(
@@ -249,6 +253,7 @@ fun ExtensionCompose() {
                                         "screenshot_suffix",
                                         screenshotConfigDialogSuffixInputText
                                     )
+                                    configChanged = true
                                 }
                                 if (screenshotDisplayID != screenshotConfigDialogDisplayIDInputText) {
                                     ConfigManager.saveData(
@@ -256,6 +261,10 @@ fun ExtensionCompose() {
                                         "screenshot_display_id",
                                         screenshotConfigDialogDisplayIDInputText
                                     )
+                                    configChanged = true
+                                }
+                                if (configChanged) {
+                                    DaemonManager.syncConfig()
                                 }
                             }
                             screenshotConfigDialog = false
@@ -313,6 +322,7 @@ fun ExtensionCompose() {
                                 screenRecordConfigDialogDisplayIDInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.physical_display_id)) },
+                            placeholder = { Text(stringResource(R.string.default_if_empty)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -322,6 +332,7 @@ fun ExtensionCompose() {
                                 screenRecordConfigDialogBitRateInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_bitrate)) },
+                            placeholder = { Text(stringResource(R.string.default_if_empty)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -331,6 +342,7 @@ fun ExtensionCompose() {
                                 screenRecordConfigDialogResolutionInputText = it
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_size)) },
+                            placeholder = { Text(stringResource(R.string.default_if_empty)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -351,12 +363,14 @@ fun ExtensionCompose() {
                 confirmButton = {
                     TextButton(onClick = {
                         scope.launch {
+                            var configChanged = false
                             if (screenRecordSavePath != screenRecordConfigDialogSavePathInputText) {
                                 ConfigManager.saveData(
                                     context,
                                     "screenRecord_save_path",
                                     screenRecordConfigDialogSavePathInputText.removeSuffix("/")
                                 )
+                                configChanged = true
                             }
                             if (screenRecordSuffix != screenRecordConfigDialogSuffixInputText) {
                                 ConfigManager.saveData(
@@ -364,6 +378,7 @@ fun ExtensionCompose() {
                                     "screenRecord_suffix",
                                     screenRecordConfigDialogSuffixInputText
                                 )
+                                configChanged = true
                             }
                             if (screenRecordDisplayID != screenRecordConfigDialogDisplayIDInputText) {
                                 ConfigManager.saveData(
@@ -371,6 +386,7 @@ fun ExtensionCompose() {
                                     "screenRecord_display_id",
                                     screenRecordConfigDialogDisplayIDInputText
                                 )
+                                configChanged = true
                             }
                             if (screenRecordBugreport != screenRecordConfigDialogEnableBugreport) {
                                 ConfigManager.saveData(
@@ -378,6 +394,7 @@ fun ExtensionCompose() {
                                     "screenRecord_bugreport",
                                     screenRecordConfigDialogEnableBugreport
                                 )
+                                configChanged = true
                             }
                             if (screenRecordDuration != screenRecordConfigDialogDurationInputText) {
                                 ConfigManager.saveData(
@@ -385,6 +402,7 @@ fun ExtensionCompose() {
                                     "screenRecord_duration",
                                     screenRecordConfigDialogDurationInputText
                                 )
+                                configChanged = true
                             }
                             if (screenRecordBitRate != screenRecordConfigDialogBitRateInputText) {
                                 ConfigManager.saveData(
@@ -392,6 +410,7 @@ fun ExtensionCompose() {
                                     "screenRecord_bitrate",
                                     screenRecordConfigDialogBitRateInputText
                                 )
+                                configChanged = true
                             }
                             if (screenRecordResolution != screenRecordConfigDialogResolutionInputText) {
                                 ConfigManager.saveData(
@@ -399,6 +418,10 @@ fun ExtensionCompose() {
                                     "screenRecord_resolution",
                                     screenRecordConfigDialogResolutionInputText
                                 )
+                                configChanged = true
+                            }
+                            if (configChanged) {
+                                DaemonManager.syncConfig()
                             }
                         }
                         screenRecordConfigDialog = false

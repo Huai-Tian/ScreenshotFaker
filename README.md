@@ -12,15 +12,15 @@ This is a module that is currently under active development, supporting user cus
 * **Replace the content obtained from the screenshot:** Replaces screenshot content with a custom image (Requires LSPosed framework).
 * **Render the software's screenshot detection ineffective:** Neutralizes the app's screenshot detection (Requires LSPosed framework).
 * **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer detection via direct system-level calls (Requires Shell/Root privileges).
-* **Custom gesture actions:** Triggers screen capture, recording, and sharing via custom key combinations (Requires Shell/Root privileges).
+* **Custom operation mode:** Triggers screen capture, recording, and sharing via designated system logs (Requires Shell/Root privileges).
 * **Extreme stealth support:** Retains screen capture, recording, and sharing capabilities even after the software is uninstalled (Requires Shell/Root privileges).
 * **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
 
 **核心功能（开发中）**
 * **替换截屏获取到的内容:** 需要LSPosed框架支持，将屏幕截图的内容替换为用户指定的图片
 * **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的截图检测
-* **无痕的截屏录屏以及屏幕共享:** 需要Shell/Root特权，通过系统底层的直接调用绕过应用层的检测
-* **自定义操作手势:** 需要Shell/Root特权，支持通过特定按键组合实现截录屏以及屏幕共享
+* **无痕的截录屏以及屏幕共享:** 需要Shell/Root特权，通过系统底层的直接调用绕过应用层的检测
+* **自定义操作方式:** 需要Shell/Root特权，通过指定系统日志触发截录屏以及屏幕共享
 * **极致的隐藏支持:** 需要Shell/Root特权，支持在卸载此软件后，依然可以完成截录屏以及屏幕共享功能
 * **接收来自此应用的屏幕共享:** 无需特权，接收局域网中来自此应用的投屏
 
