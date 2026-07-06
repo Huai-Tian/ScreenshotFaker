@@ -46,10 +46,48 @@ fun SettingsCompose(navController: NavController) {
     )
     var daemonVerificationPasswordInputText by remember { mutableStateOf(daemonVerificationPassword) }
     var daemonSocketPortInputText by remember { mutableStateOf(daemonSocketPort.toString()) }
-    val isPortValid by remember {
+    val daemonConfigSeparator by ConfigManager.rememberValue(
+        context,
+        "daemon_config_separator",
+        "#"
+    )
+    val daemonScreenshotConfig by ConfigManager.rememberValue(
+        context,
+        "daemon_screenshot_config",
+        ""
+    )
+    val daemonScreenRecordConfig by ConfigManager.rememberValue(
+        context,
+        "daemon_screenRecord_config",
+        ""
+    )
+    val daemonScreenShareConfig by ConfigManager.rememberValue(
+        context,
+        "daemon_screenshare_config",
+        ""
+    )
+    var daemonConfigSeparatorInputText by remember { mutableStateOf(daemonConfigSeparator) }
+    var daemonScreenshotConfigInputText by remember { mutableStateOf(daemonScreenshotConfig) }
+    var daemonScreenRecordConfigInputText by remember { mutableStateOf(daemonScreenRecordConfig) }
+    var daemonScreenShareConfigInputText by remember { mutableStateOf(daemonScreenShareConfig) }
+    val isDaemonConfigValid by remember {
         derivedStateOf {
-            val port = daemonSocketPortInputText.toIntOrNull()
-            port != null && port in 1024..65535
+            val portValid =
+                daemonSocketPortInputText.toIntOrNull() != null && daemonSocketPortInputText.toIntOrNull() in 1024..65535
+            val separatorValid = daemonConfigSeparatorInputText.isNotEmpty()
+            val screenshotConfigValid =
+                daemonScreenshotConfigInputText.isEmpty() || daemonScreenshotConfigInputText.split(
+                    daemonConfigSeparatorInputText
+                ).size == 3
+            val screenRecordConfigValid =
+                daemonScreenRecordConfigInputText.isEmpty() || daemonScreenRecordConfigInputText.split(
+                    daemonConfigSeparatorInputText
+                ).size == 3
+            val screenShareConfigValid =
+                daemonScreenShareConfigInputText.isEmpty() || daemonScreenShareConfigInputText.split(
+                    daemonConfigSeparatorInputText
+                ).size == 3
+            portValid && separatorValid && screenshotConfigValid && screenRecordConfigValid && screenShareConfigValid
         }
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
@@ -145,6 +183,10 @@ fun SettingsCompose(navController: NavController) {
                         onClick = {
                             daemonVerificationPasswordInputText = daemonVerificationPassword
                             daemonSocketPortInputText = daemonSocketPort.toString()
+                            daemonConfigSeparatorInputText = daemonConfigSeparator
+                            daemonScreenshotConfigInputText = daemonScreenshotConfig
+                            daemonScreenRecordConfigInputText = daemonScreenRecordConfig
+                            daemonScreenShareConfigInputText = daemonScreenShareConfig
                             daemonConfigDialog = true
                         }
                     )
@@ -251,12 +293,90 @@ fun SettingsCompose(navController: NavController) {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        OutlinedTextField(
+                            value = daemonConfigSeparatorInputText,
+                            onValueChange = { daemonConfigSeparatorInputText = it },
+                            label = { Text(stringResource(R.string.config_separator)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = daemonScreenshotConfigInputText,
+                            onValueChange = { daemonScreenshotConfigInputText = it },
+                            label = {
+                                Text(
+                                    stringResource(R.string.screenshot_condition)
+                                            + "(Priority" + daemonConfigSeparatorInputText
+                                            + "TAG" + daemonConfigSeparatorInputText + "MSG)"
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = daemonScreenRecordConfigInputText,
+                            onValueChange = { daemonScreenRecordConfigInputText = it },
+                            label = { Text(
+                                stringResource(R.string.screenRecord_condition)
+                                        + "(Priority" + daemonConfigSeparatorInputText
+                                        + "TAG" + daemonConfigSeparatorInputText + "MSG)"
+                            ) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = daemonScreenShareConfigInputText,
+                            onValueChange = { daemonScreenShareConfigInputText = it },
+                            label = { Text(
+                                stringResource(R.string.screenShare_condition)
+                                        + "(Priority" + daemonConfigSeparatorInputText
+                                        + "TAG" + daemonConfigSeparatorInputText + "MSG)"
+                            ) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
                     }
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
                             scope.launch {
+                                var configChanged = false
+                                if (daemonConfigSeparator != daemonConfigSeparatorInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_config_separator",
+                                        daemonConfigSeparatorInputText
+                                    )
+                                    configChanged = true
+                                }
+                                if (daemonScreenshotConfig != daemonScreenshotConfigInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_screenshot_config",
+                                        daemonScreenshotConfigInputText
+                                    )
+                                    configChanged = true
+                                }
+                                if (daemonScreenRecordConfig != daemonScreenRecordConfigInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_screenRecord_config",
+                                        daemonScreenRecordConfigInputText
+                                    )
+                                    configChanged = true
+                                }
+                                if (daemonScreenShareConfig != daemonScreenShareConfigInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_screenshare_config",
+                                        daemonScreenShareConfigInputText
+                                    )
+                                    configChanged = true
+                                }
+                                if (configChanged) {
+                                    DaemonManager.syncConfig()
+                                }
                                 val newPort = daemonSocketPortInputText.toInt()
                                 val portChanged = daemonSocketPort != newPort
                                 val passwordChanged =
@@ -283,7 +403,7 @@ fun SettingsCompose(navController: NavController) {
                             }
                             daemonConfigDialog = false
                         },
-                        enabled = isPortValid
+                        enabled = isDaemonConfigValid
                     ) {
                         Text(stringResource(R.string.Confirm))
                     }

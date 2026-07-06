@@ -1,6 +1,7 @@
 package fake.screenshot
 
 import android.content.Context
+import android.os.Environment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -106,7 +107,7 @@ object DaemonManager {
                         socket.soTimeout = 3000
                         // 1. 构造并发送加密命令
                         val timestamp = Auxiliary.getCurrentTimestampSeconds()
-                        val plaintext = "$command|$timestamp"
+                        val plaintext = "$command\u001C$timestamp"
                         val (nonce, ciphertext) = Auxiliary.encryptData(key, plaintext)
 
                         val out = DataOutputStream(socket.getOutputStream())
@@ -133,7 +134,7 @@ object DaemonManager {
                         }
 
                         // 5. 验证格式和时间戳
-                        val parts = plainResponse.split('|')
+                        val parts = plainResponse.split('\u001C')
                         if (parts.size != 2) return@context null
                         val responseCommand = parts[0]
                         val responseTimestamp = parts[1].toLongOrNull()
@@ -159,5 +160,95 @@ object DaemonManager {
             }
         }
         return null
+    }
+
+    suspend fun syncConfig(): Boolean {
+        val separator = ConfigManager.getDataOnce(appContext, "daemon_config_separator", "#")
+        val screenshot =
+            ConfigManager.getDataOnce(appContext, "daemon_screenshot_config", "").split(separator)
+                .joinToString("\u001F")
+        val screenRecord =
+            ConfigManager.getDataOnce(appContext, "daemon_screenRecord_config", "").split(separator)
+                .joinToString("\u001F")
+        val screenShare =
+            ConfigManager.getDataOnce(appContext, "daemon_screenshare_config", "").split(separator)
+                .joinToString("\u001F")
+        val screenshotCommand = suspend {
+            val savePath = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenshot_save_path",
+                defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
+            )
+            val suffix = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenshot_suffix",
+                defaultValue = ".png"
+            )
+            val displayID = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenshot_display_id",
+                defaultValue = ""
+            ).let { if (it.isEmpty()) "" else "-d $it" }
+            listOf(
+                "screencap",
+                "-p",
+                displayID,
+                savePath,
+                suffix
+            ).filter { it.isNotEmpty() }.joinToString("\u001F")
+        }
+        val screenRecordCommand = suspend {
+            val savePath = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_save_path",
+                defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
+            )
+            val duration = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_duration",
+                defaultValue = "180"
+            )
+            val suffix = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_suffix",
+                defaultValue = ".mp4"
+            )
+            val displayID = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_display_id",
+                defaultValue = ""
+            ).let { if (it.isEmpty()) "" else "--display-id $it" }
+            val bitrate = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_bitrate",
+                defaultValue = ""
+            ).let { if (it.isEmpty()) "" else "--bit-rate $it" }
+            val resolution = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_resolution",
+                defaultValue = ""
+            ).let { if (it.isEmpty()) "" else "--size $it" }
+            val bugreport = ConfigManager.getDataOnce(
+                context = appContext,
+                key = "screenRecord_bugreport",
+                defaultValue = false
+            ).let { if (it) "--bugreport" else "" }
+            listOf(
+                "screenrecord",
+                "--time-limit", duration,
+                displayID,
+                bitrate,
+                resolution,
+                bugreport,
+                savePath,
+                suffix
+            ).filter { it.isNotEmpty() }.joinToString("\u001F")
+        }
+        val screenShareCommand = suspend {
+            ""
+        }
+        val command =
+            "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}"
+        return sendCommand(command) == "fine"
     }
 }

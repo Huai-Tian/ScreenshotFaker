@@ -23,6 +23,8 @@
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
     <string name="socket_port">TCP通信端口（1024…65535）</string>
     <string name="verification_password">认证密码</string>
+    <string name="config_separator">配置分隔符</string>
+    <string name="screenShare_condition">屏幕共享条件</string>
     <string name="receive_stealth_screen_sharing">接收屏幕共享</string>
     <string name="receive_screen_sharing_from_ScreenshotFaker">接收来自ScreenshotFaker的屏幕共享</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
@@ -58,4 +60,6 @@
     <string name="backup">备份</string>
     <string name="view_daemon_status">查看守护进程状态</string>
     <string name="permission_denied">没有权限</string>
+    <string name="screenshot_condition">截屏条件</string>
+    <string name="screenRecord_condition">录屏条件</string>
 </resources>

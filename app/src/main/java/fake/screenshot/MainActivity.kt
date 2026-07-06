@@ -25,7 +25,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import fake.screenshot.Auxiliary.isModuleActivated
-import fake.screenshot.Auxiliary.isRootActivated
 import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.pages.AboutCompose
 import fake.screenshot.pages.ApplicationCompose
@@ -67,7 +66,6 @@ class MainActivity : ComponentActivity() {
             val visibleDestinations = AppDestinations.entries.filter { destination ->
                 when (destination) {
                     AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated()
-                    AppDestinations.EXTENSION -> isShellActivated || isRootActivated()
                     else -> true
                 }
             }
