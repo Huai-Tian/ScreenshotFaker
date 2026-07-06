@@ -62,6 +62,16 @@ object Auxiliary {
         }
     }
 
+    fun isRegexValid(vararg patterns: String) = patterns.all { pattern ->
+        if (pattern.isEmpty()) return@all true
+        try {
+            Regex(pattern)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun getCurrentTimestampSeconds(): Long = System.currentTimeMillis() / 1000
 
     fun isTimestampValid(timestamp: Long, allowedSkewSeconds: Long = 10): Boolean {

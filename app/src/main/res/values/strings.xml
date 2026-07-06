@@ -27,7 +27,7 @@
     <string name="click_to_view_daemon_status">Click to view daemon working status</string>
     <string name="config_daemon">Config daemon</string>
     <string name="config_daemon_working_options">Config daemon working options</string>
-    <string name="socket_port">Socket port (1024…65535)</string>
+    <string name="socket_port">Socket port</string>
     <string name="verification_password">Verification password</string>
     <string name="config_separator">Config separator</string>
     <string name="screenshot_condition">Screenshot condition</string>

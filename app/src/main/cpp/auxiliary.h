@@ -15,6 +15,7 @@
 #include <chrono>
 #include <vector>
 #include <sstream>
+#include <regex>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
@@ -56,7 +57,15 @@ void log(const string &text) {
     ofs.flush();
     ofs.close();
 }
-
+bool isValidRegex(const string& pattern) {
+    if (pattern.empty()) return true;
+    try {
+        regex re(pattern);
+        return true;
+    } catch (const regex_error&) {
+        return false;
+    }
+}
 void daemonize() {
     pid_t pid = fork();
     if (pid < 0) _exit(EXIT_FAILURE);

@@ -72,22 +72,24 @@ fun SettingsCompose(navController: NavController) {
     var daemonScreenShareConfigInputText by remember { mutableStateOf(daemonScreenShareConfig) }
     val isDaemonConfigValid by remember {
         derivedStateOf {
-            val portValid =
-                daemonSocketPortInputText.toIntOrNull() != null && daemonSocketPortInputText.toIntOrNull() in 1024..65535
+            val validPriorityLetters = setOf('V', 'D', 'I', 'W', 'E', 'F', 'S')
+            val port = daemonSocketPortInputText.toIntOrNull()
+            fun checkConfig(vararg inputs: String): Boolean = inputs.all { input ->
+                val parts = input.split(daemonConfigSeparatorInputText)
+                input.isEmpty() || (parts.size == 3 && parts[0].length == 1 && parts[0][0] in validPriorityLetters && Auxiliary.isRegexValid(
+                    parts[1],
+                    parts[2]
+                ))
+            }
+
+            val portValid = port != null && port in 1024..65535
             val separatorValid = daemonConfigSeparatorInputText.isNotEmpty()
-            val screenshotConfigValid =
-                daemonScreenshotConfigInputText.isEmpty() || daemonScreenshotConfigInputText.split(
-                    daemonConfigSeparatorInputText
-                ).size == 3
-            val screenRecordConfigValid =
-                daemonScreenRecordConfigInputText.isEmpty() || daemonScreenRecordConfigInputText.split(
-                    daemonConfigSeparatorInputText
-                ).size == 3
-            val screenShareConfigValid =
-                daemonScreenShareConfigInputText.isEmpty() || daemonScreenShareConfigInputText.split(
-                    daemonConfigSeparatorInputText
-                ).size == 3
-            portValid && separatorValid && screenshotConfigValid && screenRecordConfigValid && screenShareConfigValid
+            portValid && separatorValid && checkConfig(
+                daemonScreenshotConfigInputText,
+                daemonScreenRecordConfigInputText,
+                daemonScreenShareConfigInputText
+            )
+
         }
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
@@ -283,6 +285,11 @@ fun SettingsCompose(navController: NavController) {
                             value = daemonSocketPortInputText,
                             onValueChange = { daemonSocketPortInputText = it }, // 可编辑
                             label = { Text(stringResource(R.string.socket_port)) },
+                            placeholder = {
+                                Text(
+                                    "1024…65535"
+                                )
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -334,6 +341,13 @@ fun SettingsCompose(navController: NavController) {
                                 Text(
                                     "LV" + daemonConfigSeparatorInputText
                                             + "TAG" + daemonConfigSeparatorInputText + "MSG"
+                                )
+                            },
+                            supportingText = {
+                                Text(
+                                    text = "LV->(V/D/I/W/E/F/S)",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             },
                             modifier = Modifier.fillMaxWidth(),

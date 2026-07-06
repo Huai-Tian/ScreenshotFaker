@@ -21,7 +21,7 @@
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
-    <string name="socket_port">TCP通信端口（1024…65535）</string>
+    <string name="socket_port">通信端口</string>
     <string name="verification_password">认证密码</string>
     <string name="config_separator">配置分隔符</string>
     <string name="screenShare_condition">投屏条件</string>
