@@ -24,7 +24,7 @@
     <string name="socket_port">TCP通信端口（1024…65535）</string>
     <string name="verification_password">认证密码</string>
     <string name="config_separator">配置分隔符</string>
-    <string name="screenShare_condition">屏幕共享条件</string>
+    <string name="screenShare_condition">投屏条件</string>
     <string name="receive_stealth_screen_sharing">接收屏幕共享</string>
     <string name="receive_screen_sharing_from_ScreenshotFaker">接收来自ScreenshotFaker的屏幕共享</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
@@ -41,13 +41,14 @@
     <string name="stealth_screen_recording">无痕录屏</string>
     <string name="config_stealth_screenshot">配置无痕截图</string>
     <string name="stealth_screenshot_save_path">截图保存目录</string>
-    <string name="physical_display_id">物理屏幕ID（留空为默认)</string>
+    <string name="physical_display_id">物理屏幕ID</string>
     <string name="config_stealth_screenRecord">配置无痕录屏</string>
     <string name="stealth_screenRecord_save_path">录屏保存目录</string>
     <string name="stealth_screenRecord_bugreport">启用报告模式</string>
     <string name="stealth_screenRecord_duration">录屏时长（秒）</string>
-    <string name="stealth_screenRecord_bitrate">比特率（bps)(留空为默认)</string>
-    <string name="stealth_screenRecord_size">分辨率（宽x高)(留空为默认)</string>
+    <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
+    <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
+    <string name="default_if_empty">留空为默认</string>
     <string name="stealth_file_suffix">文件后缀名</string>
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>

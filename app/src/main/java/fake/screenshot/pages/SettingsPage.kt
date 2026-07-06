@@ -303,11 +303,11 @@ fun SettingsCompose(navController: NavController) {
                         OutlinedTextField(
                             value = daemonScreenshotConfigInputText,
                             onValueChange = { daemonScreenshotConfigInputText = it },
-                            label = {
+                            label = { Text(stringResource(R.string.screenshot_condition)) },
+                            placeholder = {
                                 Text(
-                                    stringResource(R.string.screenshot_condition)
-                                            + "(Priority" + daemonConfigSeparatorInputText
-                                            + "TAG" + daemonConfigSeparatorInputText + "MSG)"
+                                    "LV" + daemonConfigSeparatorInputText
+                                            + "TAG" + daemonConfigSeparatorInputText + "MSG"
                                 )
                             },
                             modifier = Modifier.fillMaxWidth(),
@@ -316,22 +316,26 @@ fun SettingsCompose(navController: NavController) {
                         OutlinedTextField(
                             value = daemonScreenRecordConfigInputText,
                             onValueChange = { daemonScreenRecordConfigInputText = it },
-                            label = { Text(
-                                stringResource(R.string.screenRecord_condition)
-                                        + "(Priority" + daemonConfigSeparatorInputText
-                                        + "TAG" + daemonConfigSeparatorInputText + "MSG)"
-                            ) },
+                            label = { Text(stringResource(R.string.screenRecord_condition)) },
+                            placeholder = {
+                                Text(
+                                    "LV" + daemonConfigSeparatorInputText
+                                            + "TAG" + daemonConfigSeparatorInputText + "MSG"
+                                )
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
                         OutlinedTextField(
                             value = daemonScreenShareConfigInputText,
                             onValueChange = { daemonScreenShareConfigInputText = it },
-                            label = { Text(
-                                stringResource(R.string.screenShare_condition)
-                                        + "(Priority" + daemonConfigSeparatorInputText
-                                        + "TAG" + daemonConfigSeparatorInputText + "MSG)"
-                            ) },
+                            label = { Text(stringResource(R.string.screenShare_condition)) },
+                            placeholder = {
+                                Text(
+                                    "LV" + daemonConfigSeparatorInputText
+                                            + "TAG" + daemonConfigSeparatorInputText + "MSG"
+                                )
+                            },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

@@ -84,6 +84,7 @@ int main(int argc, char *argv[]) {
             string capture_gs_display = []() -> string {
                 string result;
                 vector<string> i = split(capture_gesture, '\x1F');
+                while (i.size() < 3) i.emplace_back("");
                 result += "Priority=[" + i[0] + "]:";
                 result += "TAG=[" + i[1] + "]:";
                 result += "MSG=[" + i[2] + "]";
@@ -92,6 +93,7 @@ int main(int argc, char *argv[]) {
             string record_gs_display = []() -> string {
                 string result;
                 vector<string> i = split(record_gesture, '\x1F');
+                while (i.size() < 3) i.emplace_back("");
                 result += "Priority=[" + i[0] + "]:";
                 result += "TAG=[" + i[1] + "]:";
                 result += "MSG=[" + i[2] + "]";
@@ -100,6 +102,7 @@ int main(int argc, char *argv[]) {
             string share_gs_display = []() -> string {
                 string result;
                 vector<string> i = split(share_gesture, '\x1F');
+                while (i.size() < 3) i.emplace_back("");
                 result += "Priority=[" + i[0] + "]:";
                 result += "TAG=[" + i[1] + "]:";
                 result += "MSG=[" + i[2] + "]";
@@ -127,12 +130,12 @@ int main(int argc, char *argv[]) {
             reply_plain.append(
                     "uid=" + to_string(getuid()) + ", pid=" + to_string(getpid()) + ", ppid=" +
                     to_string(getppid()) + "\n");
-            reply_plain.append("capture_gesture=" + capture_gs_display + "\n");
-            reply_plain.append("capture_commands=" + capture_cmd_display + "\n");
-            reply_plain.append("record_gesture=" + record_gs_display + "\n");
-            reply_plain.append("record_commands=" + record_cmd_display + "\n");
-            reply_plain.append("share_gesture=" + share_gs_display + "\n");
-            reply_plain.append("share_commands=" + share_cmd_display + "\n");
+            reply_plain.append("capture_gesture:\n" + capture_gs_display + "\n");
+            reply_plain.append("capture_commands:\n" + capture_cmd_display + "\n");
+            reply_plain.append("record_gesture:\n" + record_gs_display + "\n");
+            reply_plain.append("record_commands:\n" + record_cmd_display + "\n");
+            reply_plain.append("share_gesture:\n" + share_gs_display + "\n");
+            reply_plain.append("share_commands:\n" + share_cmd_display + "\n");
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());

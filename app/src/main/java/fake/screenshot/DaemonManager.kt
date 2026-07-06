@@ -78,7 +78,10 @@ object DaemonManager {
 
         // 等待守护进程启动，最多重试20次（每次间隔100ms，共2秒）
         repeat(20) {
-            if (isDaemonRunning()) return true
+            if (isDaemonRunning()) {
+                syncConfig()
+                return true
+            }
             delay(100.milliseconds)
         }
         return false
