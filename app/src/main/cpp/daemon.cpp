@@ -267,14 +267,6 @@ string decrypt_data(const vector<unsigned char> &key, const vector<unsigned char
 
 bool send_encrypted(int fd, const vector<unsigned char> &key, const string &plaintext) {
     vector<unsigned char> encrypted = encrypt_data(key, plaintext);
-
-    // 打印加密后的数据长度和十六进制
-    string hex_str;
-    for (unsigned char c: encrypted) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", c);
-        hex_str += buf;
-    }
     uint32_t len = htonl(encrypted.size());
     if (write(fd, &len, 4) != 4) return false;
     if (write(fd, encrypted.data(), encrypted.size()) != (ssize_t) encrypted.size()) return false;
@@ -309,14 +301,6 @@ string recv_encrypted(int fd, const vector<unsigned char> &key) {
             return "";
         }
         bytes_read += r;
-    }
-
-    // 打印接收到的数据十六进制（前64字节）
-    string hex_str;
-    for (size_t i = 0; i < len && i < 64; i++) {
-        char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", encrypted[i]);
-        hex_str += buf;
     }
     return decrypt_data(key, encrypted);
 }
