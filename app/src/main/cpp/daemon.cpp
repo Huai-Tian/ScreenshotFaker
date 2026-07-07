@@ -81,61 +81,32 @@ int main(int argc, char *argv[]) {
         if (command == "status") {
             reply_plain = "Working\x1C" + to_string(get_current_timestamp_seconds());
         } else if (command == "detail") {
-            string capture_gs_display = []() -> string {
+            auto processGestureDisplay = [](const string &gesture) -> string {
                 string result;
-                vector<string> i = split(capture_gesture, '\x1F');
-                while (i.size() < 3) i.emplace_back("");
-                result += "Priority=[" + i[0] + "]:";
+                auto i = split(gesture, '\x1F');
+                result += "LV=[" + i[0] + "]:";
                 result += "TAG=[" + i[1] + "]:";
                 result += "MSG=[" + i[2] + "]";
                 return result;
-            }();
-            string record_gs_display = []() -> string {
-                string result;
-                vector<string> i = split(record_gesture, '\x1F');
-                while (i.size() < 3) i.emplace_back("");
-                result += "Priority=[" + i[0] + "]:";
-                result += "TAG=[" + i[1] + "]:";
-                result += "MSG=[" + i[2] + "]";
-                return result;
-            }();
-            string share_gs_display = []() -> string {
-                string result;
-                vector<string> i = split(share_gesture, '\x1F');
-                while (i.size() < 3) i.emplace_back("");
-                result += "Priority=[" + i[0] + "]:";
-                result += "TAG=[" + i[1] + "]:";
-                result += "MSG=[" + i[2] + "]";
-                return result;
-            }();
-            string capture_cmd_display = []() -> string {
+            };
+            auto processCommandDisplay = [](const string &command) -> string {
                 string result = "[";
-                result += replace_all(capture_command, "\x01F", "] [");
+                result += replace_all(command, "\x1F", "] [");
                 result += ']';
                 return result;
-            }();
-            string record_cmd_display = []() -> string {
-                string result = "[";
-                result += replace_all(record_command, "\x01F", "] [");
-                result += ']';
-                return result;
-            }();
-            string share_cmd_display = []() -> string {
-                string result = "[";
-                result += replace_all(share_command, "\x01F", "] [");
-                result += ']';
-                return result;
-            }();
+            };
             reply_plain = "ScreenshotFakerDaemon:\n";
             reply_plain.append(
                     "uid=" + to_string(getuid()) + ", pid=" + to_string(getpid()) + ", ppid=" +
                     to_string(getppid()) + "\n");
-            reply_plain.append("capture_gesture:\n" + capture_gs_display + "\n");
-            reply_plain.append("capture_commands:\n" + capture_cmd_display + "\n");
-            reply_plain.append("record_gesture:\n" + record_gs_display + "\n");
-            reply_plain.append("record_commands:\n" + record_cmd_display + "\n");
-            reply_plain.append("share_gesture:\n" + share_gs_display + "\n");
-            reply_plain.append("share_commands:\n" + share_cmd_display + "\n");
+            reply_plain.append(
+                    "capture_gesture:\n" + processGestureDisplay(capture_gesture) + "\n");
+            reply_plain.append(
+                    "capture_commands:\n" + processCommandDisplay(capture_command) + "\n");
+            reply_plain.append("record_gesture:\n" + processGestureDisplay(record_gesture) + "\n");
+            reply_plain.append("record_commands:\n" + processCommandDisplay(record_command) + "\n");
+            reply_plain.append("share_gesture:\n" + processGestureDisplay(share_gesture) + "\n");
+            reply_plain.append("share_commands:\n" + processCommandDisplay(share_command) + "\n");
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
@@ -155,13 +126,22 @@ int main(int argc, char *argv[]) {
             if (!data.empty()) {
                 size_t pos1D = data.find('\x1D');
                 if (pos1D != string::npos) {
+                    auto processGesture = [](const string &gesture) -> string {
+                        auto patterns = split(gesture, '\x1F');
+                        while (patterns.size() < 3)patterns.emplace_back("");
+                        auto result = patterns[0] + "\x1F";
+                        result += isRegexValid(patterns[1]) ? patterns[1] : "";
+                        result += '\x1F';
+                        result += isRegexValid(patterns[2]) ? patterns[2] : "";
+                        return result;
+                    };
                     string filterPart = data.substr(0, pos1D);
                     string argumentPart = data.substr(pos1D + 1);
                     vector<string> filters = split(filterPart, '\x1E');
                     vector<string> arguments = split(argumentPart, '\x1E');
-                    capture_gesture = filters[0];
-                    record_gesture = filters[1];
-                    share_gesture = filters[2];
+                    capture_gesture = processGesture(filters[0]);
+                    record_gesture = processGesture(filters[1]);
+                    share_gesture = processGesture(filters[2]);
                     capture_command = arguments[0];
                     record_command = arguments[1];
                     share_command = arguments[2];

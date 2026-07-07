@@ -66,10 +66,18 @@ object Auxiliary {
         if (pattern.isEmpty()) return@all true
         try {
             Regex(pattern)
-            true
         } catch (_: Exception) {
-            false
+            return@all false
         }
+        val cppIncompatible = pattern.contains("(?<=") ||          // 后顾断言
+                pattern.contains("(?<!") ||                        // 负后顾断言
+                pattern.contains("++") ||                           // 所有格量词（如 a++）
+                Regex("\\\\p\\{").containsMatchIn(pattern) ||       // Unicode 属性（如 \p{L}）
+                pattern.contains("\\A") ||                          // 输入开头锚点
+                pattern.contains("\\z") ||                          // 输入结尾锚点
+                pattern.contains("\\G") ||                          // 上次匹配结尾锚点
+                Regex("\\\\[hRv]").containsMatchIn(pattern)
+        return@all !cppIncompatible
     }
 
     fun getCurrentTimestampSeconds(): Long = System.currentTimeMillis() / 1000

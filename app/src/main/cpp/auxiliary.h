@@ -28,6 +28,7 @@ const int KEY_LEN = 32;          // 256 bits
 const int TAG_LEN = 16;          // 128 bits
 const int NONCE_LEN = 12;
 const long long TIME_SKEW_SECONDS = 10;
+
 // ===================== 辅助函数 =====================
 inline vector<string> split(const string &s, char sep) {
     vector<string> parts;
@@ -41,31 +42,34 @@ inline vector<string> split(const string &s, char sep) {
 
     return parts;
 }
-string replace_all(const string& str, const string& from, const string& to) {
-    if (from.empty()) return str;                      // 空子串直接返回原串副本
-    string result = str;                          // 拷贝一份
+
+string replace_all(string str, const string &from, const string &to) {
+    if (from.empty()) return str;
     size_t pos = 0;
-    while ((pos = result.find(from, pos)) != string::npos) {
-        result.replace(pos, from.length(), to);
+    while ((pos = str.find(from, pos)) != string::npos) {
+        str.replace(pos, from.length(), to);
         pos += to.length();
     }
-    return result;
+    return str;
 }
+
 void log(const string &text) {
     ofstream ofs("/data/local/tmp/log.txt", ios::app);
     ofs << text << " errno=" << errno << " (" << strerror(errno) << ")" << endl;
     ofs.flush();
     ofs.close();
 }
-bool isValidRegex(const string& pattern) {
+
+bool isRegexValid(const string &pattern) {
     if (pattern.empty()) return true;
     try {
         regex re(pattern);
         return true;
-    } catch (const regex_error&) {
+    } catch (const regex_error &) {
         return false;
     }
 }
+
 void daemonize() {
     pid_t pid = fork();
     if (pid < 0) _exit(EXIT_FAILURE);
