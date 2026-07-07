@@ -76,7 +76,7 @@ fun SettingsCompose(navController: NavController) {
             val port = daemonSocketPortInputText.toIntOrNull()
             fun checkConfig(vararg inputs: String): Boolean = inputs.all { input ->
                 val parts = input.split(daemonConfigSeparatorInputText)
-                input.isEmpty() || (parts.size == 3 && parts[0].length == 1 && parts[0][0] in validPriorityLetters && Auxiliary.isRegexValid(
+                input.isEmpty() || (parts.size == 3 && ((parts[0].length == 1 && parts[0][0] in validPriorityLetters) || parts[0].isEmpty()) && Auxiliary.isRegexValid(
                     parts[1],
                     parts[2]
                 ))
@@ -345,8 +345,9 @@ fun SettingsCompose(navController: NavController) {
                             },
                             supportingText = {
                                 Text(
-                                    text = "LV->(V/D/I/W/E/F/S)",
-                                    fontSize = 12.sp,
+                                    text = "LV <- (V/D/I/W/E/F/S)\n" +
+                                            "Part blank= All, Whole blank= Disable",
+                                    fontSize = 9.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             },

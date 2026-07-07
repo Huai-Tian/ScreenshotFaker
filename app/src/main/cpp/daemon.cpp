@@ -1,12 +1,5 @@
 #include "auxiliary.h"
 
-string capture_gesture;
-string capture_command;
-string record_gesture;
-string record_command;
-string share_gesture;
-string share_command;
-
 int main(int argc, char *argv[]) {
     if (argc < 3) {
         return 1;
@@ -22,6 +15,7 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     vector<unsigned char> key = derive_key(password);
     __builtin_memset(argv[2], 0, strlen(argv[2]));
+    __builtin_memset(argv[1], 0, strlen(argv[1]));
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return 2;
@@ -82,6 +76,7 @@ int main(int argc, char *argv[]) {
             reply_plain = "Working\x1C" + to_string(get_current_timestamp_seconds());
         } else if (command == "detail") {
             auto processGestureDisplay = [](const string &gesture) -> string {
+                if (gesture.empty())return "Disabled";
                 string result;
                 auto i = split(gesture, '\x1F');
                 result += "LV=[" + i[0] + "]:";
@@ -100,12 +95,12 @@ int main(int argc, char *argv[]) {
                     "uid=" + to_string(getuid()) + ", pid=" + to_string(getpid()) + ", ppid=" +
                     to_string(getppid()) + "\n");
             reply_plain.append(
-                    "capture_gesture:\n" + processGestureDisplay(capture_gesture) + "\n");
+                    "capture_gesture: " + processGestureDisplay(capture_gesture) + "\n");
             reply_plain.append(
                     "capture_commands:\n" + processCommandDisplay(capture_command) + "\n");
-            reply_plain.append("record_gesture:\n" + processGestureDisplay(record_gesture) + "\n");
+            reply_plain.append("record_gesture: " + processGestureDisplay(record_gesture) + "\n");
             reply_plain.append("record_commands:\n" + processCommandDisplay(record_command) + "\n");
-            reply_plain.append("share_gesture:\n" + processGestureDisplay(share_gesture) + "\n");
+            reply_plain.append("share_gesture: " + processGestureDisplay(share_gesture) + "\n");
             reply_plain.append("share_commands:\n" + processCommandDisplay(share_command) + "\n");
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
@@ -127,8 +122,8 @@ int main(int argc, char *argv[]) {
                 size_t pos1D = data.find('\x1D');
                 if (pos1D != string::npos) {
                     auto processGesture = [](const string &gesture) -> string {
+                        if (gesture.empty())return "";
                         auto patterns = split(gesture, '\x1F');
-                        while (patterns.size() < 3)patterns.emplace_back("");
                         auto result = patterns[0] + "\x1F";
                         result += isRegexValid(patterns[1]) ? patterns[1] : "";
                         result += '\x1F';

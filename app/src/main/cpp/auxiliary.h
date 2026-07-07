@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstdio>
 #include <cstdlib>
 #include <unistd.h>
@@ -19,6 +21,7 @@
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
+#include <thread>
 
 using namespace std;
 // ===================== 加密常量 =====================
@@ -28,6 +31,14 @@ const int KEY_LEN = 32;          // 256 bits
 const int TAG_LEN = 16;          // 128 bits
 const int NONCE_LEN = 12;
 const long long TIME_SKEW_SECONDS = 10;
+
+// ===================== 全局数据 =====================
+string capture_gesture;
+string capture_command;
+string record_gesture;
+string record_command;
+string share_gesture;
+string share_command;
 
 // ===================== 辅助函数 =====================
 inline vector<string> split(const string &s, char sep) {
@@ -53,7 +64,7 @@ string replace_all(string str, const string &from, const string &to) {
     return str;
 }
 
-void log(const string &text) {
+[[maybe_unused]] void log(const string &text) {
     ofstream ofs("/data/local/tmp/log.txt", ios::app);
     ofs << text << " errno=" << errno << " (" << strerror(errno) << ")" << endl;
     ofs.flush();
