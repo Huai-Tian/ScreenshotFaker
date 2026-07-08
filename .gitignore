@@ -4,6 +4,7 @@ bin-release/
 [Oo]bj/
 [Bb]in/
 app/build/
+/build/
 
 # Other files and folders
 .settings/
