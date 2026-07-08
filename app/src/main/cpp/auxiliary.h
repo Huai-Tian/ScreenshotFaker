@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string>
 #include <cstring>
+#include <map>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -18,10 +19,13 @@
 #include <vector>
 #include <sstream>
 #include <regex>
+#include <thread>
+#include <random>
+#include <poll.h>
+#include <spawn.h>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
-#include <thread>
 
 using namespace std;
 // ===================== 加密常量 =====================
@@ -79,6 +83,30 @@ inline bool isRegexValid(const string &pattern) {
     } catch (const regex_error &) {
         return false;
     }
+}
+
+inline string getCurrentDateString() {
+    auto now = chrono::system_clock::now();
+    time_t t = chrono::system_clock::to_time_t(now);
+    tm tm = *localtime(&t);
+    ostringstream oss;
+    oss << put_time(&tm, "%Y%m%d");
+    return oss.str();
+}
+
+inline string getRandomString(int length) {
+    static const string chars =
+            "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789";
+    static random_device rd;
+    static mt19937 gen(rd());
+    static uniform_int_distribution<size_t> dist(0, chars.size() - 1);
+
+    string result;
+    result.reserve(length);
+    for (int i = 0; i < length; ++i) {
+        result.push_back(chars[dist(gen)]);
+    }
+    return result;
 }
 
 // ===================== 时间戳工具 =====================

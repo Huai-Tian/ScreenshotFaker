@@ -72,14 +72,15 @@ fun SettingsCompose(navController: NavController) {
     var daemonScreenShareConfigInputText by remember { mutableStateOf(daemonScreenShareConfig) }
     val isDaemonConfigValid by remember {
         derivedStateOf {
-            val validPriorityLetters = setOf('V', 'D', 'I', 'W', 'E', 'F', 'S')
+            val validPriorityLetters = setOf('V', 'D', 'I', 'W', 'E', 'F')
             val port = daemonSocketPortInputText.toIntOrNull()
             fun checkConfig(vararg inputs: String): Boolean = inputs.all { input ->
                 val parts = input.split(daemonConfigSeparatorInputText)
-                input.isEmpty() || (parts.size == 3 && ((parts[0].length == 1 && parts[0][0] in validPriorityLetters) || parts[0].isEmpty()) && Auxiliary.isRegexValid(
-                    parts[1],
-                    parts[2]
-                ))
+                input.isEmpty() || (
+                        parts.size == 3
+                                && ((parts[0].length == 1 && parts[0][0] in validPriorityLetters) || parts[0].isEmpty())
+                                && parts[1].isNotEmpty()
+                                && Auxiliary.isRegexValid(parts[2]))
             }
 
             val portValid = port != null && port in 1024..65535
