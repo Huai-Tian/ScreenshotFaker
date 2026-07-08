@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,7 +25,8 @@ fun DaemonStatusCompose() {
     var isLoading by remember { mutableStateOf(true) }
     var statusText by remember { mutableStateOf("") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-
+    var detachWarning by remember { mutableStateOf(false) }
+    val errorText = stringResource(R.string.daemon_connect_failed)
     // 加载数据
     LaunchedEffect(Unit) {
         isLoading = true
@@ -32,7 +34,7 @@ fun DaemonStatusCompose() {
         val response = DaemonManager.sendCommand("detail")
         isLoading = false
         if (response == null) {
-            errorMessage = "守护进程未运行或无法连接"
+            errorMessage = errorText
         } else {
             statusText = response
         }
@@ -43,7 +45,14 @@ fun DaemonStatusCompose() {
             TopAppBar(
                 title = { Text(stringResource(R.string.daemon)) },
                 actions = {
-                    // 刷新按钮
+                    IconButton(onClick = {
+                        detachWarning = true
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.SearchOff,
+                            contentDescription = stringResource(R.string.detach)
+                        )
+                    }
                     IconButton(
                         onClick = {
                             scope.launch {
@@ -52,7 +61,7 @@ fun DaemonStatusCompose() {
                                 val response = DaemonManager.sendCommand("detail")
                                 isLoading = false
                                 if (response == null) {
-                                    errorMessage = "守护进程未运行或无法连接"
+                                    errorMessage = errorText
                                 } else {
                                     statusText = response
                                 }
@@ -61,7 +70,7 @@ fun DaemonStatusCompose() {
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "刷新"
+                            contentDescription = stringResource(R.string.refresh)
                         )
                     }
                 }
@@ -80,6 +89,7 @@ fun DaemonStatusCompose() {
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
+
                 errorMessage != null -> {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -99,17 +109,18 @@ fun DaemonStatusCompose() {
                                     val response = DaemonManager.sendCommand("detail")
                                     isLoading = false
                                     if (response == null) {
-                                        errorMessage = "守护进程未运行或无法连接"
+                                        errorMessage = errorText
                                     } else {
                                         statusText = response
                                     }
                                 }
                             }
                         ) {
-                            Text("重试")
+                            Text(stringResource(R.string.refresh))
                         }
                     }
                 }
+
                 else -> {
                     Card(
                         modifier = Modifier.fillMaxSize(),
@@ -121,7 +132,6 @@ fun DaemonStatusCompose() {
                             modifier = Modifier.padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            // 将返回的文本按行拆分并显示
                             val lines = statusText.split("\n")
                             items(lines.size) { index ->
                                 val line = lines[index]
@@ -138,6 +148,34 @@ fun DaemonStatusCompose() {
                     }
                 }
             }
+        }
+        if (detachWarning) {
+            AlertDialog(
+                onDismissRequest = { detachWarning = false },
+                title = {
+                    Text(text = stringResource(R.string.warning)) // 标题
+                },
+                text = {
+                    Text(stringResource(R.string.detach_description))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                DaemonManager.detachDaemon()
+                                detachWarning = false
+                            }
+                        },
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { detachWarning = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
         }
     }
 }

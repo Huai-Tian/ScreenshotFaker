@@ -97,6 +97,16 @@ object DaemonManager {
         return false
     }
 
+    suspend fun detachDaemon(): Boolean = mutex.withLock {
+        sendCommand("detach") ?: return !isDaemonRunning()
+        // 发送成功，等待进程退出
+        repeat(20) {
+            if (!isDaemonRunning()) return true
+            delay(100.milliseconds)
+        }
+        return false
+    }
+
     suspend fun isDaemonRunning() = sendCommand("status")?.startsWith("Working") ?: false
 
     suspend fun sendCommand(command: String, retries: Int = 3): String? {

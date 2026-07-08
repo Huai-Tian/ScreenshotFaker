@@ -18,6 +18,8 @@
     <string name="system_version">SystemVersion</string>
     <string name="daemon">Daemon</string>
     <string name="loading">Loading</string>
+    <string name="detach_description">This operation will cause the daemon to close its communication port, making it impossible to determine whether the process is alive by checking if the port is open. This may aid in hiding the process, but you will no longer be able to communicate with it or view its status.</string>
+    <string name="warning">Warning</string>
     <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
@@ -42,6 +44,9 @@
     <string name="restore">Restore</string>
     <string name="restore_config">Restore Config</string>
     <string name="about">About</string>
+    <string name="refresh">Refresh</string>
+    <string name="detach">Detach</string>
+    <string name="daemon_connect_failed">Daemon not running or can not connect</string>
     <!--ExtensionPage-->
     <string name="stealth_screenshot">Stealth Screenshot</string>
     <string name="click_to_config_stealth_screenshot">Click to config stealth screenshot</string>
