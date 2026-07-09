@@ -80,6 +80,8 @@ fun SettingsCompose(navController: NavController) {
                         parts.size == 3
                                 && ((parts[0].length == 1 && parts[0][0] in validPriorityLetters) || parts[0].isEmpty())
                                 && parts[1].isNotEmpty()
+                                && parts[2].isNotEmpty()
+                                && Auxiliary.isConfigValid(parts[1])
                                 && Auxiliary.isRegexValid(parts[2]))
             }
 

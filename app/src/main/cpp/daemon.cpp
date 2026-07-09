@@ -29,105 +29,289 @@ void daemonize() {
 }
 
 void filter_thread_main() {
-    string filter_capture_gesture;
-    string filter_capture_command;
-    string filter_record_gesture;
-    string filter_record_command;
-    string filter_share_gesture;
-    string filter_share_command;
-    auto priority_char_to_int = [](char c) -> int {
-        switch (c) {
-            case 'V':
-                return 2;
-            case 'D':
-                return 3;
-            case 'I':
-                return 4;
-            case 'W':
-                return 5;
-            case 'E':
-                return 6;
-            case 'F':
-                return 7;
-            default:
-                return 2; // 默认为 VERBOSE
+    class Filter {
+    public:
+        void initialize() {
+            valid = !(origin_gesture.empty() || origin_command.empty());
+            if (!valid)return;
+            auto slices = split(origin_gesture, '\x1F');
+            priority = slices[0].empty() ? ' ' : slices[0][0];
+            tag = slices[1];
+            msg_regex = regex(slices[2]);
         }
+
+        [[nodiscard]]int execute_command() const {
+            if (!valid)return -1;
+            auto i = split(origin_command, '\x1F');
+            auto first = i.front();
+            string command;
+            if (first == "screencap" || first == "screenrecord") {
+                auto file_name = getCurrentDateString() + "_" + getRandomString(4) + i.back();
+                i.pop_back();
+                filesystem::create_directories(i.back());
+                i.back() = i.back() + "/" + file_name;
+                string result;
+                for (const auto &j: i) {
+                    command.append(j);
+                    command += ' ';
+                }
+                command.pop_back();
+            } else {
+                return -1;
+            }
+            vector<string> args = {"/system/bin/sh", "-c", command};
+            vector<char *> argv;
+            argv.reserve(args.size() + 1);
+            for (auto &a: args) argv.push_back(const_cast<char *>(a.c_str()));
+            argv.push_back(nullptr);
+            posix_spawnattr_t attr;
+            posix_spawnattr_init(&attr);
+            pid_t pid;
+            int ret = posix_spawn(&pid, argv[0], nullptr, &attr, argv.data(), environ);
+            posix_spawnattr_destroy(&attr);
+            return ret;
+        }
+
+        bool valid = false;
+        char priority = ' ';
+        string tag;
+        regex msg_regex;
+        string origin_gesture;
+        string origin_command;
     };
-    auto int_to_priority_char = [](int pri) -> char {
-        switch (pri) {
-            case 2:
-                return 'V';
-            case 3:
-                return 'D';
-            case 4:
-                return 'I';
-            case 5:
-                return 'W';
-            case 6:
-                return 'E';
-            case 7:
-                return 'F';
-            default:
-                return 'V';
+    class PipeManager {
+    public:
+        ~PipeManager() { stop(); }
+
+        bool start(const string &cmd) {
+            stop();
+            vector<string> tokens = split(cmd, ' ');
+            vector<char *> args;
+            args.reserve(tokens.size() + 1);
+            for (auto &t: tokens) args.push_back(const_cast<char *>(t.c_str()));
+            args.push_back(nullptr);
+
+            if (pipe(pipe_fd) == -1) return false;
+            pid = fork();
+            if (pid == -1) {
+                close(pipe_fd[0]);
+                close(pipe_fd[1]);
+                return false;
+            }
+            if (pid == 0) {
+                dup2(pipe_fd[1], STDOUT_FILENO);
+                close(pipe_fd[0]);
+                close(pipe_fd[1]);
+                execvp(args[0], args.data());
+                exit(1);
+            }
+            close(pipe_fd[1]);
+            pipe_fd[1] = -1;
+            // 将读端转换为 FILE*
+            f = fdopen(pipe_fd[0], "r");
+            return f != nullptr;
         }
+
+        void stop() {
+            if (pid > 0) {
+                kill(pid, SIGTERM);
+                // 等待最多 1 秒，简单轮询
+                for (int i = 0; i < 10; ++i) {
+                    if (kill(pid, 0) != 0) break;  // 进程已不存在
+                    usleep(100000);
+                }
+                if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+                pid = -1;
+            }
+            if (f) {
+                fclose(f);
+                f = nullptr;
+                pipe_fd[0] = -1;   // 标记已关闭
+            }
+            // 以防万一，关闭 fd
+            if (pipe_fd[0] != -1) {
+                close(pipe_fd[0]);
+                pipe_fd[0] = -1;
+            }
+            if (pipe_fd[1] != -1) {
+                close(pipe_fd[1]);
+                pipe_fd[1] = -1;
+            }
+        }
+
+        [[nodiscard]] FILE *get_file() const { return f; }
+
+    private:
+        pid_t pid = -1;
+        int pipe_fd[2] = {-1, -1};
+        FILE *f = nullptr;
+    };
+    static PipeManager proc;
+    Filter capture_filter, record_filter, share_filter;
+    auto parse_log_line = [](const string &line) -> tuple<char, string, string> {
+        char priority = 'V';
+        string tag, msg;
+        size_t slash = line.find('/');
+        if (slash != string::npos && slash > 0) {
+            priority = line[0];
+            size_t colon = line.find(':', slash);
+            if (colon != string::npos) {
+                tag = line.substr(slash + 1, colon - slash - 1);
+                msg = line.substr(colon + 1);
+                if (!msg.empty() && msg[0] == ' ') msg.erase(0, 1);
+            }
+        }
+        return {priority, tag, msg};
+    };
+    auto get_logcat_command = [&capture_filter, &record_filter, &share_filter]() -> string {
+        string cmd = "logcat -v tag";
+        map<string, int> tag_min_priority;
+        auto priority_char_to_int = [](const char &c) -> int {
+            switch (c) {
+                case 'V':
+                    return 2;
+                case 'D':
+                    return 3;
+                case 'I':
+                    return 4;
+                case 'W':
+                    return 5;
+                case 'E':
+                    return 6;
+                case 'F':
+                    return 7;
+                default:
+                    return 2; // 默认为 VERBOSE
+            }
+        };
+        auto int_to_priority_char = [](const int &pri) -> char {
+            switch (pri) {
+                case 2:
+                    return 'V';
+                case 3:
+                    return 'D';
+                case 4:
+                    return 'I';
+                case 5:
+                    return 'W';
+                case 6:
+                    return 'E';
+                case 7:
+                    return 'F';
+                default:
+                    return 'V';
+            }
+        };
+        auto parse_gesture = [&](const string &gesture) -> pair<string, int> {
+            if (gesture.empty()) return {"", 2};  // 默认 VERBOSE
+            auto parts = split(gesture, '\x1F');
+            if (parts.size() < 3) return {"", 2};
+            string tag = parts[1];
+            int lv = 2;
+            if (!parts[0].empty()) {
+                lv = priority_char_to_int(parts[0][0]);
+            }
+            return {tag, lv};
+        };
+        auto process_gesture = [&](const string &gesture) {
+            if (gesture.empty()) return;
+            auto [tag, lv] = parse_gesture(gesture);
+            if (tag.empty()) return;
+            auto it = tag_min_priority.find(tag);
+            if (it == tag_min_priority.end()) {
+                tag_min_priority[tag] = lv;
+            } else {
+                if (lv < it->second) {
+                    it->second = lv;
+                }
+            }
+        };
+        process_gesture(capture_filter.origin_gesture);
+        process_gesture(record_filter.origin_gesture);
+        process_gesture(share_filter.origin_gesture);
+        if (tag_min_priority.empty()) {
+            return cmd;
+        }
+        for (const auto &pair: tag_min_priority) {
+            cmd += " " + pair.first + ":" + int_to_priority_char(pair.second);
+        }
+        cmd += " *:S";
+        return cmd;
     };
     while (true) {
         if (filter_update.load()) {
-            lock_guard<mutex> lock(config_mutex);
-            filter_capture_gesture = capture_gesture;
-            filter_capture_command = capture_command;
-            filter_record_gesture = record_gesture;
-            filter_record_command = record_command;
-            filter_share_gesture = share_gesture;
-            filter_share_command = share_command;
-            filter_update.store(false);
+            proc.stop();
+            {
+                lock_guard<mutex> lock(config_mutex);
+                capture_filter.origin_gesture = capture_gesture;
+                capture_filter.origin_command = capture_command;
+                record_filter.origin_gesture = record_gesture;
+                record_filter.origin_command = record_command;
+                share_filter.origin_gesture = share_gesture;
+                share_filter.origin_command = share_command;
+                filter_update.store(false);
+            }
+            capture_filter.initialize();
+            record_filter.initialize();
+            share_filter.initialize();
         }
-        if (filter_capture_gesture.empty()
-            && filter_record_gesture.empty()
-            && filter_share_gesture.empty()) {
+        if (!(capture_filter.valid || record_filter.valid || share_filter.valid)) {
             this_thread::sleep_for(chrono::milliseconds(200));
             continue;
         }
-        auto logcat_command = [&filter_capture_gesture, &filter_record_gesture, &filter_share_gesture, &priority_char_to_int, &int_to_priority_char]() -> string {
-            string cmd = "logcat -v raw";
-            map<string, int> tag_min_priority;
-            auto parse_gesture = [&](const string &gesture) -> pair<string, int> {
-                if (gesture.empty()) return {"", 2};  // 默认 VERBOSE
-                auto parts = split(gesture, '\x1F');
-                if (parts.size() < 3) return {"", 2};
-                string tag = parts[1];
-                int lv = 2;
-                if (!parts[0].empty()) {
-                    lv = priority_char_to_int(parts[0][0]);
-                }
-                return {tag, lv};
-            };
-            auto process_gesture = [&](const string &gesture) {
-                if (gesture.empty()) return;
-                auto [tag, lv] = parse_gesture(gesture);
-                if (tag.empty()) return;
-                auto it = tag_min_priority.find(tag);
-                if (it == tag_min_priority.end()) {
-                    tag_min_priority[tag] = lv;
-                } else {
-                    if (lv < it->second) {
-                        it->second = lv;
-                    }
-                }
-            };
-            process_gesture(filter_capture_gesture);
-            process_gesture(filter_record_gesture);
-            process_gesture(filter_share_gesture);
-            if (tag_min_priority.empty()) {
-                return cmd;
+        if (!proc.get_file()) {
+            if (!proc.start(get_logcat_command())) {
+                this_thread::sleep_for(chrono::milliseconds(200));
+                continue;
             }
-            for (const auto &pair: tag_min_priority) {
-                cmd += " " + pair.first + ":" + int_to_priority_char(pair.second);
+        }
+        FILE *pipe = proc.get_file();
+        int fd = fileno(pipe);
+        struct pollfd pfd{fd, POLLIN, 0};
+        char buffer[4096] = {0};
+        bool pipe_active = true;
+        while (pipe_active) {
+            if (filter_update.load()) {
+                pipe_active = false;
+                break;
             }
-            cmd += " *:S";
-            return cmd;
-        }();
-        //TODO Begin filter
+            int poll_ret = poll(&pfd, 1, 200);
+            if (poll_ret < 0) {
+                pipe_active = false;
+                break;
+            } else if (poll_ret == 0) {
+                continue;
+            }
+            if (fgets(buffer, sizeof(buffer), pipe) == nullptr) {
+                pipe_active = false;
+                break;
+            }
+            string line(buffer);
+            if (!line.empty() && line.back() == '\n') line.pop_back();
+            //logcat: I/VSyncReactor: startPeriodTransitionInternal newPeriod:11111111
+            auto [priority, tag, msg] = parse_log_line(line);
+            if (capture_filter.valid && tag == capture_filter.tag) {
+                if ((priority == capture_filter.priority || capture_filter.priority == ' ') &&
+                    regex_match(msg, capture_filter.msg_regex)) {
+                    (void) capture_filter.execute_command();
+                }
+            }
+            if (record_filter.valid && tag == record_filter.tag) {
+                if ((priority == record_filter.priority || record_filter.priority == ' ') &&
+                    regex_match(msg, record_filter.msg_regex)) {
+                    (void) record_filter.execute_command();
+                }
+            }
+            if (share_filter.valid && tag == share_filter.tag) {
+                if ((priority == share_filter.priority || share_filter.priority == ' ') &&
+                    regex_match(msg, share_filter.msg_regex)) {
+                    (void) share_filter.execute_command();
+                }
+            }
+        }
+        if (!pipe_active && !filter_update.load()) {
+            proc.stop();
+        }
     }
 }
 
@@ -144,10 +328,11 @@ int main(int argc, char *argv[]) {
     string password = argv[2];
     daemonize();
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, SIG_IGN);
     vector<unsigned char> key = derive_key(password);
     __builtin_memset(argv[2], 0, strlen(argv[2]));
     __builtin_memset(argv[1], 0, strlen(argv[1]));
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         return 2;
     }
@@ -173,6 +358,7 @@ int main(int argc, char *argv[]) {
     while (true) {
         int client_fd = accept(fd, nullptr, nullptr);
         if (client_fd < 0) continue;
+        else fcntl(client_fd, F_SETFD, FD_CLOEXEC);
         string plaintext = recv_encrypted(client_fd, key);
         if (plaintext.empty()) {
             close(client_fd);
@@ -261,7 +447,8 @@ int main(int argc, char *argv[]) {
                         if (gesture.empty())return "";
                         auto patterns = split(gesture, '\x1F');
                         auto result = patterns[0] + "\x1F" + patterns[1] + "\x1F";
-                        result += isRegexValid(patterns[2]) ? patterns[2] : "(?!)";
+                        if (!isRegexValid(patterns[2]))return "";
+                        result += patterns[2];
                         return result;
                     };
                     string filterPart = data.substr(0, pos1D);

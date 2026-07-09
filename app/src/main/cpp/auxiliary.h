@@ -23,6 +23,7 @@
 #include <random>
 #include <poll.h>
 #include <spawn.h>
+#include <filesystem>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
