@@ -1,1 +1,2 @@
 app/src/main/cpp/openssl/** linguist-vendored
+app/src/main/cpp/libssh2/** linguist-vendored
