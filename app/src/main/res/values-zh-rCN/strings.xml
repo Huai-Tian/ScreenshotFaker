@@ -37,6 +37,7 @@
     <string name="about">关于</string>
     <string name="detach">脱离</string>
     <string name="daemon_connect_failed">守护进程未运行或无法连接</string>
+    <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击配置无痕截图</string>
     <string name="click_to_config_stealth_screen_recording">点击配置无痕录屏</string>
@@ -54,6 +55,8 @@
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
     <string name="default_if_empty">留空为默认</string>
     <string name="stealth_file_suffix">文件后缀名</string>
+    <string name="screencasting">屏幕共享中</string>
+    <string name="initializing">初始化中</string>
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>
     <string name="daemon">守护进程</string>

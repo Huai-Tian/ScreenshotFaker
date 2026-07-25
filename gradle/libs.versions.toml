@@ -1,14 +1,15 @@
 [versions]
-agp = "9.2.1"
+agp = "9.3.0"
 api = "13.1.5"
 coreKtx = "1.16.0"
 datastorePreferences = "1.2.1"
+jsch = "2.28.5"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 lifecycleRuntimeKtx = "2.9.4"
 activityCompose = "1.8.2"
-kotlin = "2.4.0"
+kotlin = "2.4.10"
 composeBom = "2026.02.01"
 materialIconsExtended = "1.7.8"
 navigationCompose = "2.9.8"
@@ -21,6 +22,7 @@ androidx-compose-material-icons-extended = { module = "androidx.compose.material
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastorePreferences" }
 api = { module = "dev.rikka.shizuku:api", version.ref = "api" }
+jsch = { module = "com.github.mwiede:jsch", version.ref = "jsch" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

@@ -65,6 +65,10 @@
     <string name="stealth_screenRecord_size">Resolution (WIDTHxHEIGHT)</string>
     <string name="default_if_empty">Default if empty</string>
     <string name="stealth_file_suffix">File suffix</string>
+    <!--TileService-->
+    <string name="stealth_screencast">Stealth Screencast</string>
+    <string name="screencasting">Screencasting</string>
+    <string name="initializing">Initializing</string>
     <!--Common-->
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
