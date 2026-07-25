@@ -7,7 +7,6 @@ import io.github.libxposed.api.XposedModuleInterface
 import java.lang.reflect.Method
 import java.util.Arrays
 
-
 private const val TAG = "ScreenshotFaker"
 
 class ScreenshotFaker : XposedModule() {
