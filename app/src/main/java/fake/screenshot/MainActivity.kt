@@ -1,5 +1,6 @@
 package fake.screenshot
 
+import android.app.Application
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -34,9 +35,14 @@ import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.ReceiveScreenSharingCompose
 import fake.screenshot.pages.SettingsCompose
+import io.github.libxposed.service.XposedService
+import io.github.libxposed.service.XposedServiceHelper
 import rikka.shizuku.Shizuku
+import java.util.concurrent.CopyOnWriteArraySet
+import kotlin.concurrent.Volatile
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
+    private var mService: XposedService? = null
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
         if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
             isShellActivated = true
@@ -65,7 +71,7 @@ class MainActivity : ComponentActivity() {
             // 动态过滤需要显示在底部导航栏的目标
             val visibleDestinations = AppDestinations.entries.filter { destination ->
                 when (destination) {
-                    AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated()
+                    AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated
                     else -> true
                 }
             }
@@ -123,6 +129,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onServiceStateChanged(service: XposedService?) {
+        mService = service
+        isModuleActivated = mService != null
+    }
+
+    override fun onStart() {
+        super.onStart()
+        LSPosedServiceManager.addServiceStateListener(this, true)
+    }
+
+    override fun onStop() {
+        LSPosedServiceManager.removeServiceStateListener(this)
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         isShellActivated = try {
@@ -137,6 +158,63 @@ class MainActivity : ComponentActivity() {
         Shizuku.removeRequestPermissionResultListener(listener)
         Shizuku.removeBinderDeadListener(deadListener)
         Shizuku.removeBinderReceivedListener(receivedListener)
+    }
+}
+
+class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListener {
+    companion object {
+        @Volatile
+        var mService: XposedService? = null
+            private set
+        private val serviceStateListeners = CopyOnWriteArraySet<ServiceStateListener>()
+
+        private fun dispatchServiceState(
+            listener: ServiceStateListener,
+            service: XposedService?
+        ) {
+            if (serviceStateListeners.contains(listener)) {
+                listener.onServiceStateChanged(service)
+            }
+        }
+
+        fun addServiceStateListener(
+            listener: ServiceStateListener,
+            notifyImmediately: Boolean
+        ) {
+            serviceStateListeners.add(listener)
+            if (notifyImmediately) {
+                dispatchServiceState(listener, mService)
+            }
+        }
+
+        fun removeServiceStateListener(listener: ServiceStateListener) {
+            serviceStateListeners.remove(listener)
+        }
+    }
+
+    private fun notifyServiceStateChanged(service: XposedService?) {
+        for (listener in serviceStateListeners) {
+            dispatchServiceState(listener, service)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        XposedServiceHelper.registerListener(this)
+    }
+
+    interface ServiceStateListener {
+        fun onServiceStateChanged(service: XposedService?)
+    }
+
+    override fun onServiceBind(service: XposedService) {
+        mService = service
+        notifyServiceStateChanged(mService)
+    }
+
+    override fun onServiceDied(service: XposedService) {
+        mService = null
+        notifyServiceStateChanged(mService)
     }
 }
 

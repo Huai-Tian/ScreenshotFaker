@@ -1,41 +1,35 @@
 package fake.screenshot
 
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodReplacement
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import android.util.Log
+import io.github.libxposed.api.XposedInterface.Hooker
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
+import java.lang.reflect.Method
+import java.util.Arrays
+
 
 private const val TAG = "ScreenshotFaker"
 
-class ScreenshotFaker : IXposedHookLoadPackage {
-    override fun handleLoadPackage(p0: XC_LoadPackage.LoadPackageParam) {
-        when (p0.packageName) {
-            "com.android.systemui" -> hookSystemUI()
-            "android" -> hookAndroid()
-            this.javaClass.`package`?.name -> {
-                try {
-                    XposedHelpers.findAndHookMethod(
-                        Auxiliary::class.java.name,
-                        p0.classLoader,
-                        "isModuleActivated",
-                        XC_MethodReplacement.returnConstant(true)
-                    )
-                } catch (e: Exception) {
-                    XposedBridge.log("$TAG: Error in hooking ${MainActivity::class.java.name}")
-                    XposedBridge.log(e)
-                }
-            }
+class ScreenshotFaker : XposedModule() {
+    private lateinit var module: XposedModule
+    override fun onModuleLoaded(param: XposedModuleInterface.ModuleLoadedParam) {
+        super.onModuleLoaded(param)
+        module = this
+    }
 
-            else -> XposedBridge.log("$TAG: 模块入口已执行！当前包名: ${p0.packageName}")
+    override fun onPackageReady(param: XposedModuleInterface.PackageReadyParam) {
+        super.onPackageReady(param)
+        when (param.packageName) {
+            "com.android.systemui" -> module.log(Log.INFO, TAG, "UI")
+            "android" -> module.log(Log.INFO, TAG, "ANDROID")
+            else -> module.log(Log.INFO, TAG, param.packageName)
         }
     }
 
-    fun hookSystemUI() {
-        XposedBridge.log("$TAG: 成功注入SystemUI进程！！！")
-    }
-
-    fun hookAndroid() {
-        XposedBridge.log("$TAG: 成功注入Android进程！！！")
+    private fun hookMethods(clazz: Class<*>, hooker: Hooker, vararg names: String?) {
+        val list = listOf(*names)
+        Arrays.stream(clazz.getDeclaredMethods())
+            .filter { method: Method? -> list.contains(method!!.name) }
+            .forEach { method: Method? -> hook(method!!).intercept(hooker) }
     }
 }

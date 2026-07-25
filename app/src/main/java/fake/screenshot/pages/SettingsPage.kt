@@ -213,7 +213,7 @@ fun SettingsCompose(navController: NavController) {
                     )
                 }
             }
-            if (Auxiliary.isModuleActivated()) {
+            if (Auxiliary.isModuleActivated) {
                 item {
                     CommonCard {
                         TwoStatePreference(

@@ -22,6 +22,7 @@ object Auxiliary {
     private const val KEY_LENGTH = 256
     private const val NONCE_LENGTH = 12
     private const val TAG_LENGTH = 128
+    var isModuleActivated by mutableStateOf(false)
     var isShellActivated by mutableStateOf(
         try {
             Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
@@ -30,7 +31,6 @@ object Auxiliary {
         }
     )
 
-    fun isModuleActivated() = false
     fun isRootActivated() = false
     fun exec(cmd: String) = runCatching {
         IShizukuService.Stub.asInterface(Shizuku.getBinder())

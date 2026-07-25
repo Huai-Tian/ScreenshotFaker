@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "fake.screenshot"
     compileSdk {
-        version = release(36)
+        version = release(37)
     }
     packaging {
         jniLibs {
@@ -73,7 +73,8 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.api)
     implementation(libs.provider)
-    compileOnly(files("libs/XposedBridgeAPI-89.jar"))
+    implementation(libs.service)
+    compileOnly(libs.libxposed.api)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

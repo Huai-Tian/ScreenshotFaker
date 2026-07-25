@@ -59,7 +59,7 @@ fun HomeCompose() {
     }
     Column {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) })
-        if (Auxiliary.isModuleActivated() || Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
+        if (Auxiliary.isModuleActivated || Auxiliary.isRootActivated() || Auxiliary.isShellActivated) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -235,9 +235,9 @@ fun WorkingInformation() {
                 Spacer(modifier = Modifier.padding(vertical = 8.dp))
                 InfoItem(
                     stringResource(R.string.privilege), when {
-                        Auxiliary.isModuleActivated() && Auxiliary.isRootActivated() -> "LSPosed + Root"
-                        Auxiliary.isModuleActivated() && Auxiliary.isShellActivated -> "LSPosed + Shell"
-                        Auxiliary.isModuleActivated() -> "LSPosed"
+                        Auxiliary.isModuleActivated && Auxiliary.isRootActivated() -> "LSPosed + Root"
+                        Auxiliary.isModuleActivated && Auxiliary.isShellActivated -> "LSPosed + Shell"
+                        Auxiliary.isModuleActivated -> "LSPosed"
                         Auxiliary.isRootActivated() -> "Root"
                         Auxiliary.isShellActivated -> "Shell"
                         else -> "None"

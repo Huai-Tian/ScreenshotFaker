@@ -1,6 +1,7 @@
 [versions]
 agp = "9.3.0"
 api = "13.1.5"
+apiVersion = "102.0.0"
 coreKtx = "1.16.0"
 datastorePreferences = "1.2.1"
 jsch = "2.28.5"
@@ -15,6 +16,7 @@ materialIconsExtended = "1.7.8"
 navigationCompose = "2.9.8"
 foundation = "1.10.6"
 material3 = "1.4.0"
+service = "102.0.0"
 uiGraphics = "1.10.6"
 
 [libraries]
@@ -41,7 +43,9 @@ androidx-navigation-compose = { group = "androidx.navigation", name = "navigatio
 androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "foundation" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics", version.ref = "uiGraphics" }
+libxposed-api = { module = "io.github.libxposed:api", version.ref = "apiVersion" }
 provider = { module = "dev.rikka.shizuku:provider", version.ref = "api" }
+service = { module = "io.github.libxposed:service", version.ref = "service" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
