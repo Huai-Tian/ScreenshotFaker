@@ -12,6 +12,9 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        dex {
+            useLegacyPackaging = true
+        }
     }
     defaultConfig {
         applicationId = "fake.screenshot"
@@ -30,7 +33,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            optimization {
+                enable = true
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

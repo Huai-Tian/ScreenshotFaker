@@ -4,6 +4,7 @@ bin-release/
 [Oo]bj/
 [Bb]in/
 app/build/
+app/release/
 /build/
 
 # Other files and folders
@@ -11,6 +12,7 @@ app/build/
 .gradle/
 .idea/
 .cxx/
+.kotlin/
 
 # Executables
 *.swf

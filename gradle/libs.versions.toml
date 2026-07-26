@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.0"
+agp = "9.3.1"
 api = "13.1.5"
 apiVersion = "102.0.0"
 coreKtx = "1.16.0"
