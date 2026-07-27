@@ -33,4 +33,12 @@ android {
     }
 }
 
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName = "libscrcpy-server.so"
+        }
+    }
+}
+
 dependencies {}

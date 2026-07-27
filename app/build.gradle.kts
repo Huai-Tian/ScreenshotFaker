@@ -8,6 +8,11 @@ android {
     compileSdk {
         version = release(37)
     }
+    sourceSets {
+        named("main") {
+            jniLibs.directories.add("build/generated/jniLibs")
+        }
+    }
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -89,4 +94,51 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+val buildScrcpy = tasks.register<Exec>("buildScrcpy") {
+    description = "Build libscrcpy-server.so"
+    workingDir = project.rootDir
+    commandLine = listOf(
+        if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "./gradlew",
+        ":scrcpy:assembleRelease"
+    )
+}
+
+val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
+    description = "Add scrcpy to ScreenshotFaker's jnilibs"
+    dependsOn(buildScrcpy)
+
+    val scrcpySo = project(":scrcpy").layout.buildDirectory
+        .file("outputs/apk/release/libscrcpy-server.so")
+        .get()
+        .asFile
+    val abiList = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+    val targetBaseDir = layout.buildDirectory.dir("generated/jniLibs")
+    val targetFiles = abiList.map { abi ->
+        targetBaseDir.map { it.file("${abi}/libscrcpy-server.so") }
+    }
+
+    inputs.files(listOf(scrcpySo))
+    outputs.files(targetFiles)
+
+    doLast {
+        if (!scrcpySo.exists()) {
+            throw GradleException("Failed to find libscrcpy-server.so Path: ${scrcpySo.absolutePath}")
+        }
+        abiList.forEach { abi ->
+            val targetBase = targetBaseDir.get().asFile
+            val targetDir = file("${targetBase}/${abi}")
+            targetDir.mkdirs()
+            copy {
+                from(scrcpySo)
+                into(targetDir)
+            }
+        }
+        println("Successfully added libscrcpy-server.so")
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(injectScrcpyAsLib)
 }
