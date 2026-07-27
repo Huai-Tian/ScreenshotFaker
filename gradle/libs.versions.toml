@@ -18,6 +18,8 @@ foundation = "1.10.6"
 material3 = "1.4.0"
 service = "102.0.0"
 uiGraphics = "1.10.6"
+appcompat = "1.6.1"
+material = "1.10.0"
 
 [libraries]
 androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended", version.ref = "materialIconsExtended" }
@@ -46,6 +48,8 @@ androidx-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics", ve
 libxposed-api = { module = "io.github.libxposed:api", version.ref = "apiVersion" }
 provider = { module = "dev.rikka.shizuku:provider", version.ref = "api" }
 service = { module = "io.github.libxposed:service", version.ref = "service" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

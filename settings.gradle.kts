@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ScreenshotFaker"
 include(":app")
+include(":scrcpy")
