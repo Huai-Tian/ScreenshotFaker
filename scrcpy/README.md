@@ -11,7 +11,8 @@
 
 ## 修改说明
 
-本项目基于上述原始项目进行了修改，主要改动为：\
+本目录仅包含并修改了原项目 [scrcpy](https://github.com/Genymobile/scrcpy) 中 Android 服务端的主要源代码，其余部分未包含在本目录中。  
+主要改动为：  
 使原始功能摆脱对 ADB 的依赖，改为直接使用 Shell 权限（UID: 2000）运行。
 
 ## 许可证
@@ -22,4 +23,4 @@
 http://www.apache.org/licenses/LICENSE-2.0
 
 ---
-*本修改版本与原始项目并非同一项目，原始项目由 Genymobile 维护。*
+**本修改版本与原始项目并非同一项目，原始项目由 Genymobile 维护。**
