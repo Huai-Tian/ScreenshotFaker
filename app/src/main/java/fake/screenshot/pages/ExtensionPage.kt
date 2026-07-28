@@ -117,6 +117,29 @@ fun ExtensionCompose() {
                     && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
         }
     }
+    //ScreenShare
+    val screenShareControl by ConfigManager.rememberValue(context, "screenShare_control", false)
+    val screenShareAudio by ConfigManager.rememberValue(context, "screenShare_audio", true)
+    val screenShareAudioOutput by ConfigManager.rememberValue(
+        context,
+        "screenShare_audio_output",
+        true
+    )
+    val screenShareAudioMic by ConfigManager.rememberValue(
+        context,
+        "screenShare_audio_mic",
+        false
+    )
+    var screenShareConfigDialog by remember { mutableStateOf(false) }
+    var screenShareConfigDialogAllowControl by remember { mutableStateOf(screenShareControl) }
+    var screenShareConfigDialogEnableAudio by remember { mutableStateOf(screenShareAudio) }
+    var screenShareConfigDialogAudioOutput by remember { mutableStateOf(screenShareAudioOutput) }
+    var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
+    val isScreenShareConfigValid by remember {
+        derivedStateOf {
+            !screenShareConfigDialogEnableAudio || screenShareConfigDialogAudioOutput || screenShareConfigDialogAudioMic
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -192,7 +215,13 @@ fun ExtensionCompose() {
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = {
+                            screenShareConfigDialogAllowControl = screenShareControl
+                            screenShareConfigDialogEnableAudio = screenShareAudio
+                            screenShareConfigDialogAudioOutput = screenShareAudioOutput
+                            screenShareConfigDialogAudioMic = screenShareAudioMic
+                            screenShareConfigDialog = true
+                        }
                     )
                 }
             }
@@ -357,7 +386,6 @@ fun ExtensionCompose() {
                                 onCheckedChange = { screenRecordConfigDialogEnableBugreport = it }
                             )
                         }
-
                     }
                 },
                 confirmButton = {
@@ -431,6 +459,114 @@ fun ExtensionCompose() {
                 },
                 dismissButton = {
                     TextButton(onClick = { screenRecordConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (screenShareConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { screenShareConfigDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.config_stealth_screenShare))
+                },
+                text = {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.stealth_screenShare_control))
+                            Switch(
+                                checked = screenShareConfigDialogAllowControl,
+                                onCheckedChange = { screenShareConfigDialogAllowControl = it }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.stealth_screenShare_audio))
+                            Switch(
+                                checked = screenShareConfigDialogEnableAudio,
+                                onCheckedChange = { screenShareConfigDialogEnableAudio = it }
+                            )
+                        }
+                        if (screenShareConfigDialogEnableAudio) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = stringResource(R.string.stealth_screenShare_audio_output))
+                                Switch(
+                                    checked = screenShareConfigDialogAudioOutput,
+                                    onCheckedChange = { screenShareConfigDialogAudioOutput = it }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = stringResource(R.string.stealth_screenShare_audio_mic))
+                                Switch(
+                                    checked = screenShareConfigDialogAudioMic,
+                                    onCheckedChange = { screenShareConfigDialogAudioMic = it }
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            var configChanged = false
+                            if (screenShareControl != screenShareConfigDialogAllowControl) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_control",
+                                    screenShareConfigDialogAllowControl
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareAudio != screenShareConfigDialogEnableAudio) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_audio",
+                                    screenShareConfigDialogEnableAudio
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareAudioOutput != screenShareConfigDialogAudioOutput) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_audio_output",
+                                    screenShareConfigDialogAudioOutput
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareAudioMic != screenShareConfigDialogAudioMic) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_audio_mic",
+                                    screenShareConfigDialogAudioMic
+                                )
+                                configChanged = true
+                            }
+                            if (configChanged) {
+                                DaemonManager.syncConfig()
+                            }
+                        }
+                        screenShareConfigDialog = false
+                    }, enabled = isScreenShareConfigValid) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { screenShareConfigDialog = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }

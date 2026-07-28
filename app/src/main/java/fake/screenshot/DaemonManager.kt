@@ -176,6 +176,7 @@ object DaemonManager {
     }
 
     suspend fun syncConfig(): Boolean {
+        if (!isDaemonRunning()) return false
         val separator = ConfigManager.getDataOnce(appContext, "daemon_config_separator", "#")
         val screenshot =
             ConfigManager.getDataOnce(appContext, "daemon_screenshot_config", "").split(separator)

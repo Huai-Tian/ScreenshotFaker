@@ -53,6 +53,10 @@
     <string name="stealth_screenRecord_duration">录屏时长（秒）</string>
     <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
+    <string name="config_stealth_screenShare">配置无痕屏幕共享</string>
+    <string name="stealth_screenShare_control">允许控制</string>
+    <string name="stealth_screenShare_audio">启用音频</string>
+    <string name="stealth_screenShare_audio_mic">麦克风音频</string>
     <string name="default_if_empty">留空为默认</string>
     <string name="stealth_file_suffix">文件后缀名</string>
     <string name="screencasting">屏幕共享中</string>
@@ -71,4 +75,5 @@
     <string name="screenshot_condition">截屏条件</string>
     <string name="screenRecord_condition">录屏条件</string>
     <string name="refresh">刷新</string>
+    <string name="stealth_screenShare_audio_output">系统音频</string>
 </resources>
