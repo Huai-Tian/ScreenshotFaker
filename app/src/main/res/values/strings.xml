@@ -68,6 +68,13 @@
     <!--ScreenShare-->
     <string name="config_stealth_screenShare">Config stealth screen sharing</string>
     <string name="stealth_screenShare_control">Allow Control</string>
+    <string name="stealth_screenShare_sync_clipboard">Sync clipboard</string>
+    <string name="stealth_screenShare_video">Enable Video</string>
+    <string name="stealth_screenShare_video_display">Display video</string>
+    <string name="stealth_screenShare_video_camera">Camera video</string>
+    <string name="stealth_screenShare_video_camera_id">Camera ID</string>
+    <string name="stealth_screenShare_video_camera_torch">Camera torch</string>
+    <string name="stealth_screenShare_video_camera_zoom">Camera zoom</string>
     <string name="stealth_screenShare_audio">Enable Audio</string>
     <string name="stealth_screenShare_audio_output">System audio</string>
     <string name="stealth_screenShare_audio_mic">microphone audio</string>

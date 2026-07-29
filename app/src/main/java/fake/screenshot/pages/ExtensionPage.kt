@@ -1,5 +1,7 @@
 package fake.screenshot.pages
 
+import java.math.BigDecimal
+import android.os.Build
 import android.os.Environment
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -118,7 +120,43 @@ fun ExtensionCompose() {
         }
     }
     //ScreenShare
-    val screenShareControl by ConfigManager.rememberValue(context, "screenShare_control", false)
+    val screenShareControl by ConfigManager.rememberValue(context, "screenShare_control", true)
+    val screenShareSyncClipboard by ConfigManager.rememberValue(
+        context,
+        "screenShare_sync_clipboard",
+        true
+    )
+    val screenShareVideo by ConfigManager.rememberValue(context, "screenShare_video", true)
+    val screenShareVideoDisplay by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_display",
+        true
+    )
+    val screenShareVideoDisplayID by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_display_id",
+        ""
+    )
+    val screenShareVideoCamera by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_camera",
+        false
+    )
+    val screenShareVideoCameraID by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_camera_id",
+        ""
+    )
+    val screenShareVideoCameraZoom by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_camera_zoom",
+        ""
+    )
+    val screenShareVideoCameraTorch by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_camera_torch",
+        false
+    )
     val screenShareAudio by ConfigManager.rememberValue(context, "screenShare_audio", true)
     val screenShareAudioOutput by ConfigManager.rememberValue(
         context,
@@ -132,12 +170,34 @@ fun ExtensionCompose() {
     )
     var screenShareConfigDialog by remember { mutableStateOf(false) }
     var screenShareConfigDialogAllowControl by remember { mutableStateOf(screenShareControl) }
+    var screenShareConfigDialogSyncClipboard by remember { mutableStateOf(screenShareSyncClipboard) }
+    var screenShareConfigDialogEnableVideo by remember { mutableStateOf(screenShareVideo) }
+    var screenShareConfigDialogVideoDisplayID by remember { mutableStateOf(screenShareVideoDisplayID) }
+    var screenShareConfigDialogVideoDisplay by remember { mutableStateOf(screenShareVideoDisplay) }
+    var screenShareConfigDialogVideoCamera by remember { mutableStateOf(screenShareVideoCamera) }
+    var screenShareConfigDialogVideoCameraID by remember { mutableStateOf(screenShareVideoCameraID) }
+    var screenShareConfigDialogVideoCameraZoom by remember {
+        mutableStateOf(
+            screenShareVideoCameraZoom
+        )
+    }
+    var screenShareConfigDialogVideoCameraTorch by remember {
+        mutableStateOf(
+            screenShareVideoCameraTorch
+        )
+    }
     var screenShareConfigDialogEnableAudio by remember { mutableStateOf(screenShareAudio) }
     var screenShareConfigDialogAudioOutput by remember { mutableStateOf(screenShareAudioOutput) }
     var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
     val isScreenShareConfigValid by remember {
         derivedStateOf {
-            !screenShareConfigDialogEnableAudio || screenShareConfigDialogAudioOutput || screenShareConfigDialogAudioMic
+            (!screenShareConfigDialogEnableAudio || screenShareConfigDialogAudioOutput || screenShareConfigDialogAudioMic) &&
+                    Auxiliary.isConfigValid(screenShareConfigDialogVideoCameraID) &&
+                    (screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
+                        ?.let { it >= BigDecimal.ONE }
+                        ?: screenShareConfigDialogVideoCameraZoom.isEmpty()) &&
+                    (screenShareConfigDialogEnableAudio || screenShareConfigDialogEnableVideo) &&
+                    (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
         }
     }
     Scaffold(
@@ -217,6 +277,14 @@ fun ExtensionCompose() {
                         },
                         onClick = {
                             screenShareConfigDialogAllowControl = screenShareControl
+                            screenShareConfigDialogSyncClipboard = screenShareSyncClipboard
+                            screenShareConfigDialogEnableVideo = screenShareVideo
+                            screenShareConfigDialogVideoDisplay = screenShareVideoDisplay
+                            screenShareConfigDialogVideoDisplayID = screenShareVideoDisplayID
+                            screenShareConfigDialogVideoCamera = screenShareVideoCamera
+                            screenShareConfigDialogVideoCameraID = screenShareVideoCameraID
+                            screenShareConfigDialogVideoCameraZoom = screenShareVideoCameraZoom
+                            screenShareConfigDialogVideoCameraTorch = screenShareVideoCameraTorch
                             screenShareConfigDialogEnableAudio = screenShareAudio
                             screenShareConfigDialogAudioOutput = screenShareAudioOutput
                             screenShareConfigDialogAudioMic = screenShareAudioMic
@@ -483,6 +551,101 @@ fun ExtensionCompose() {
                                 onCheckedChange = { screenShareConfigDialogAllowControl = it }
                             )
                         }
+                        if (screenShareConfigDialogAllowControl) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = stringResource(R.string.stealth_screenShare_sync_clipboard))
+                                Switch(
+                                    checked = screenShareConfigDialogSyncClipboard,
+                                    onCheckedChange = { screenShareConfigDialogSyncClipboard = it }
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.stealth_screenShare_video))
+                            Switch(
+                                checked = screenShareConfigDialogEnableVideo,
+                                onCheckedChange = { screenShareConfigDialogEnableVideo = it }
+                            )
+                        }
+                        if (screenShareConfigDialogEnableVideo) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = stringResource(R.string.stealth_screenShare_video_display))
+                                Switch(
+                                    checked = screenShareConfigDialogVideoDisplay,
+                                    onCheckedChange = {
+                                        screenShareConfigDialogVideoDisplay = it
+                                        screenShareConfigDialogVideoCamera = !it
+                                    }
+                                )
+                            }
+                            if (screenShareConfigDialogVideoDisplay) {
+                                OutlinedTextField(
+                                    value = screenShareConfigDialogVideoDisplayID,
+                                    onValueChange = { screenShareConfigDialogVideoDisplayID = it },
+                                    label = { Text(stringResource(R.string.physical_display_id)) },
+                                    placeholder = { Text(stringResource(R.string.default_if_empty)) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = stringResource(R.string.stealth_screenShare_video_camera))
+                                Switch(
+                                    checked = screenShareConfigDialogVideoCamera,
+                                    onCheckedChange = {
+                                        screenShareConfigDialogVideoCamera = it
+                                        screenShareConfigDialogVideoDisplay = !it
+                                    }
+                                )
+                            }
+                            if (screenShareConfigDialogVideoCamera) {
+                                OutlinedTextField(
+                                    value = screenShareConfigDialogVideoCameraID,
+                                    onValueChange = { screenShareConfigDialogVideoCameraID = it },
+                                    label = { Text(stringResource(R.string.stealth_screenShare_video_camera_id)) },
+                                    placeholder = { Text(stringResource(R.string.default_if_empty)) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                                OutlinedTextField(
+                                    value = screenShareConfigDialogVideoCameraZoom,
+                                    onValueChange = { screenShareConfigDialogVideoCameraZoom = it },
+                                    label = { Text(stringResource(R.string.stealth_screenShare_video_camera_zoom)) },
+                                    placeholder = { Text(stringResource(R.string.default_if_empty)) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(text = stringResource(R.string.stealth_screenShare_video_camera_torch))
+                                    Switch(
+                                        checked = screenShareConfigDialogVideoCameraTorch,
+                                        onCheckedChange = {
+                                            screenShareConfigDialogVideoCameraTorch = it
+                                        }
+                                    )
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -529,6 +692,70 @@ fun ExtensionCompose() {
                                     context,
                                     "screenShare_control",
                                     screenShareConfigDialogAllowControl
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareSyncClipboard != screenShareConfigDialogSyncClipboard) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_sync_clipboard",
+                                    screenShareConfigDialogSyncClipboard
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideo != screenShareConfigDialogEnableVideo) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video",
+                                    screenShareConfigDialogEnableVideo
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoDisplay != screenShareConfigDialogVideoDisplay) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_display",
+                                    screenShareConfigDialogVideoDisplay
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoDisplayID != screenShareConfigDialogVideoDisplayID) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_display_id",
+                                    screenShareConfigDialogVideoDisplayID
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoCamera != screenShareConfigDialogVideoCamera) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_camera",
+                                    screenShareConfigDialogVideoCamera
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoCameraID != screenShareConfigDialogVideoCameraID) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_camera_id",
+                                    screenShareConfigDialogVideoCameraID
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoCameraZoom != screenShareConfigDialogVideoCameraZoom) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_camera_zoom",
+                                    screenShareConfigDialogVideoCameraZoom
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoCameraTorch != screenShareConfigDialogVideoCameraTorch) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_camera_torch",
+                                    screenShareConfigDialogVideoCameraTorch
                                 )
                                 configChanged = true
                             }

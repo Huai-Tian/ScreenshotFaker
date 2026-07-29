@@ -54,7 +54,13 @@
     <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
     <string name="config_stealth_screenShare">配置无痕屏幕共享</string>
+    <string name="stealth_screenShare_sync_clipboard">同步剪贴板</string>
+    <string name="stealth_screenShare_video">启用视频</string>
     <string name="stealth_screenShare_control">允许控制</string>
+    <string name="stealth_screenShare_video_camera">相机视频</string>
+    <string name="stealth_screenShare_video_camera_id">摄像头编号</string>
+    <string name="stealth_screenShare_video_camera_torch">闪光灯</string>
+    <string name="stealth_screenShare_video_camera_zoom">放大倍数</string>
     <string name="stealth_screenShare_audio">启用音频</string>
     <string name="stealth_screenShare_audio_mic">麦克风音频</string>
     <string name="default_if_empty">留空为默认</string>
@@ -76,4 +82,5 @@
     <string name="screenRecord_condition">录屏条件</string>
     <string name="refresh">刷新</string>
     <string name="stealth_screenShare_audio_output">系统音频</string>
+    <string name="stealth_screenShare_video_display">屏幕视频</string>
 </resources>
