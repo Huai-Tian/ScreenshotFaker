@@ -13,7 +13,7 @@
 
 本目录仅包含并修改了原项目 [scrcpy](https://github.com/Genymobile/scrcpy) 中 Android 服务端的主要源代码，其余部分未包含在本目录中。  
 主要改动为：  
-使原始功能摆脱对 ADB 的依赖，改为直接使用 Shell 权限（UID: 2000）运行。
+使服务端与客户端的数据传输摆脱对 ADB 的依赖，支持通过自定义的 TCP 端口通信，进而方便 ScreenshotFaker 使用 SSH 转发。
 
 ## 许可证
 
