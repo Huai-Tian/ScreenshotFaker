@@ -2,15 +2,19 @@ package fake.screenshot.services
 
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import fake.screenshot.Auxiliary
 import fake.screenshot.R
 
 class ScreenShareTileService : TileService() {
 
     private var screencasting = false
     private var initializing = false
+    private val scrcpyName = Auxiliary.getRandomString(8)
 
     private fun initialize(): Boolean {
-        Thread.sleep(3000)
+        if (!Auxiliary.isShellActivated) return false
+        //TODO Generate Random Port Number and Prepare SSH
+        if (Auxiliary.exec("cp ${this@ScreenShareTileService.applicationInfo.nativeLibraryDir}/libscrcpy-server.so /data/local/tmp/$scrcpyName").first != 0) return false
         return true
     }
 
