@@ -25,13 +25,19 @@ import fake.screenshot.scrcpy.video.SurfaceEncoder;
 import fake.screenshot.scrcpy.video.VideoSource;
 
 import android.annotation.SuppressLint;
+import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.os.Build;
 import android.os.Looper;
 import android.system.Os;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -92,6 +98,7 @@ public final class Server {
         }
 
         int scid = options.getScid();
+        int tcpPort = options.getTcpPort();
         boolean tunnelForward = options.isTunnelForward();
         boolean control = options.getControl();
         boolean video = options.getVideo();
@@ -99,6 +106,101 @@ public final class Server {
         boolean sendDummyByte = options.getSendDummyByte();
 
         Workarounds.apply();
+
+        if (tcpPort != -1) {
+            Thread proxyThread = new Thread(() -> {
+                String socketName = DesktopConnection.getSocketName(scid);
+                try (ServerSocket serverSocket = new ServerSocket(tcpPort)) {
+                    Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
+                    while (!Thread.currentThread().isInterrupted()) {
+                        Socket clientSocket = serverSocket.accept();
+                        LocalSocket localSocket = null; // 声明在外层，以便 catch 块访问
+                        try {
+                            clientSocket.setTcpNoDelay(true);
+
+                            try {
+                                localSocket = new LocalSocket();
+                                localSocket.connect(new LocalSocketAddress(socketName));
+                            } catch (IOException e) {
+                                Ln.w("Failed to connect to abstract socket " + socketName + ": " + e.getMessage());
+                                clientSocket.close();
+                                continue;
+                            }
+
+                            final InputStream clientIn = clientSocket.getInputStream();
+                            final OutputStream clientOut = clientSocket.getOutputStream();
+                            final InputStream localIn = localSocket.getInputStream();
+                            final OutputStream localOut = localSocket.getOutputStream();
+
+                            final byte[] buffer1 = new byte[256 * 1024];
+                            final byte[] buffer2 = new byte[256 * 1024];
+
+                            Thread t1 = new Thread(() -> {
+                                try {
+                                    int len;
+                                    while ((len = clientIn.read(buffer1)) != -1) {
+                                        localOut.write(buffer1, 0, len);
+                                        localOut.flush();
+                                    }
+                                } catch (IOException ignored) {}
+                            });
+
+                            Thread t2 = new Thread(() -> {
+                                try {
+                                    int len;
+                                    while ((len = localIn.read(buffer2)) != -1) {
+                                        clientOut.write(buffer2, 0, len);
+                                        clientOut.flush();
+                                    }
+                                } catch (IOException ignored) {}
+                            });
+
+                            t1.start();
+                            t2.start();
+
+                            while (t1.isAlive() && t2.isAlive()) {
+                                try {
+                                    Thread.sleep(50);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    break;
+                                }
+                            }
+
+                            t1.interrupt();
+                            t2.interrupt();
+                            clientIn.close();
+                            clientOut.close();
+                            localIn.close();
+                            localOut.close();
+                            t1.join(1000);
+                            t2.join(1000);
+
+                            // 正常关闭
+                            localSocket.close();
+                            clientSocket.close();
+
+                        } catch (Exception e) {
+                            if (!Thread.currentThread().isInterrupted()) {
+                                Ln.e("Proxy connection error: " + e.getMessage());
+                            }
+                            try { clientSocket.close(); } catch (IOException ignored) {}
+                            if (localSocket != null) {
+                                try { localSocket.close(); } catch (IOException ignored) {}
+                            }
+                        }
+                    }
+                } catch (IOException e) {
+                    if (!Thread.currentThread().isInterrupted()) {
+                        Ln.e("TCP proxy error", e);
+                    }
+                }
+            });
+            proxyThread.setName("proxy_thread");
+            proxyThread.setPriority(Thread.MAX_PRIORITY);
+            proxyThread.setDaemon(true);
+            proxyThread.start();
+        }
 
         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
 

@@ -44,7 +44,7 @@ public final class DesktopConnection implements Closeable {
         return localSocket;
     }
 
-    private static String getSocketName(int scid) {
+    public static String getSocketName(int scid) {
         if (scid == -1) {
             // If no SCID is set, use "scrcpy" to simplify using scrcpy-server alone
             return SOCKET_NAME_PREFIX;
