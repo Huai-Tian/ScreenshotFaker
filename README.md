@@ -45,12 +45,12 @@ You are welcome to submit issues, suggestions, or bug reports via GitHub Issues.
 欢迎通过 GitHub Issue 提交问题、建议或反馈。
 
 **Disclaimer**\
-This project is intended for **security research**, **software testing**, and **educational purposes** only.
+This project is intended for **Privacy Protection**, **security research**, **software testing**, and **educational purposes** only.
 Please do not use this project for any illegal purposes (including but not limited to cheating in exams and data falsification).
 Users must assume all legal responsibilities arising from the use of this project.
 
 **免责声明**\
-本项目仅供**安全研究、软件测试和教育目的**使用。  
+本项目仅供**隐私保护、安全研究、软件测试和教育目的**使用。  
 请勿将本项目用于任何非法用途（包括但不限于考试作弊，数据造假）。  
 使用者需自行承担因使用本项目而产生的一切法律责任。
 
