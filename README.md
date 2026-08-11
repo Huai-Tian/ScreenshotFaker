@@ -4,22 +4,22 @@
 
 **一个支持用户自定义截屏功能的软件，并且具有很强的反检测能力**
 
-This is a module that is currently under active development, supporting user customization of the content captured by screen captures and bypassing the software's screenshot detection.
+This is a module that is currently under active development, supporting user customization of the content captured by screen captures and bypassing the software's malicious screenshot detection.
 
-这是一个正在积极开发中的模块，支持用户自定义被屏幕抓拍获取到的内容以及绕过软件的截屏检测
+这是一个正在积极开发中的模块，支持用户自定义被屏幕抓拍获取到的内容以及绕过软件的恶意截屏检测
 
 **Key Features (Under Development)** 
-* **Replace the content obtained from the screenshot:** Replaces screenshot content with a custom image (Requires LSPosed framework).
-* **Render the software's screenshot detection ineffective:** Neutralizes the app's screenshot detection (Requires LSPosed framework).
-* **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer detection via direct system-level calls (Requires Shizuku/Root privileges).
+* **Replace the content obtained from the screenshot:** Replace the content obtained by the screenshot service with a user-specified image (Requires LSPosed framework).
+* **Render the software's screenshot detection ineffective:** Neutralizes the app's malicious screenshot detection (Requires LSPosed framework).
+* **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer malicious detection via direct system-level calls (Requires Shizuku/Root privileges).
 * **Custom operation mode:** Triggers screen capture, recording, and sharing via designated system logs (Requires Shizuku/Root privileges).
 * **Extreme stealth support:** Retains screen capture, recording, and sharing capabilities even after the software is uninstalled (Requires Shizuku/Root privileges).
 * **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
 
 **核心功能（开发中）**
-* **替换截屏获取到的内容:** 需要LSPosed框架支持，将屏幕截图的内容替换为用户指定的图片
-* **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的截图检测
-* **无痕的截录屏以及屏幕共享:** 需要Shizuku/Root特权，通过系统底层的直接调用绕过应用层的检测
+* **替换截屏获取到的内容:** 需要LSPosed框架支持，将截图服务获取到的内容替换为用户指定的图片
+* **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的恶意截图检测
+* **无痕的截录屏以及屏幕共享:** 需要Shizuku/Root特权，通过系统底层的直接调用绕过应用层的恶意检测
 * **自定义操作方式:** 需要Shizuku/Root特权，通过指定系统日志触发截录屏以及屏幕共享
 * **极致的隐藏支持:** 需要Shizuku/Root特权，支持在卸载此软件后，依然可以完成截录屏以及屏幕共享功能
 * **接收来自此应用的屏幕共享:** 无需特权，接收局域网中来自此应用的投屏
