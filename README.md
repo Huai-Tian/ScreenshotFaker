@@ -30,17 +30,19 @@ This software is currently in the early stages of development. Many features are
 **重要提示**\
 本软件尚在开发早期阶段，大量的功能还在实现中，已实现的功能可能存在各种问题和不足，如果你在使用过程中遇到任何错误，我深感抱歉。同时也欢迎您提交 Issue 和 Pull Request！
 
-**Contact**\
-Welcome to join us for communication and feedback: 
-* QQ: [https://qm.qq.com/q/j2NM49cd8c](https://qm.qq.com/q/j2NM49cd8c)
-* Telegram: [https://t.me/ScreenshotFaker](https://t.me/ScreenshotFaker)  
-Alternatively, you can directly submit issues and suggestions on the project's Issue page. I will actively respond and do my best to resolve them.
+**Contact**
 
-**联系方式**\
-欢迎加入我们进行交流和反馈：
-* QQ: [https://qm.qq.com/q/j2NM49cd8c](https://qm.qq.com/q/j2NM49cd8c)
-* Telegram: [https://t.me/ScreenshotFaker](https://t.me/ScreenshotFaker)  
-或者，你也可以直接在本项目的 Issue 页面提交问题和建议，我会积极回复并尽力解决。
+- QQ: https://qm.qq.com/q/j2NM49cd8c
+- Telegram: https://t.me/ScreenshotFaker
+
+You are welcome to submit issues, suggestions, or bug reports via GitHub Issues.
+
+**联系方式**
+
+- QQ: https://qm.qq.com/q/j2NM49cd8c
+- Telegram: https://t.me/ScreenshotFaker
+
+欢迎通过 GitHub Issue 提交问题、建议或反馈。
 
 **Disclaimer**\
 This project is intended for **security research**, **software testing**, and **educational purposes** only.
