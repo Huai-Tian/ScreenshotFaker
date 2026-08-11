@@ -1,15 +1,15 @@
 # ScreenshotFaker
 
-**A software that supports user-defined screenshot functionality and boasts strong anti-detection capabilities.**
+**A software that supports users in protecting personal privacy in screenshots and has strong anti‑detection capabilities.**
 
-**一个支持用户自定义截屏功能的软件，并且具有很强的反检测能力**
+**一个支持用户在截屏中保护个人隐私的软件，并且具有很强的反检测能力**
 
-This is a module that is currently under active development, supporting user customization of the content captured by screen captures and bypassing the software's malicious screenshot detection.
+This is an actively developed software that allows users to protect sensitive content captured from screen grabs and to block screenshot detection by malicious apps.
 
-这是一个正在积极开发中的模块，支持用户自定义被屏幕抓拍获取到的内容以及绕过软件的恶意截屏检测
+这是一个正在积极开发中的软件，支持用户保护被屏幕抓拍获取到的敏感内容以及屏蔽恶意软件的截屏检测
 
 **Key Features (Under Development)** 
-* **Replace the content obtained from the screenshot:** Replace the content obtained by the screenshot service with a user-specified image (Requires LSPosed framework).
+* **Protect private content captured by the screenshot service:** Safeguard sensitive content from the screenshot service with customizable redaction options (Requires LSPosed framework).
 * **Render the software's screenshot detection ineffective:** Neutralizes the app's malicious screenshot detection (Requires LSPosed framework).
 * **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer malicious detection via direct system-level calls (Requires Shizuku/Root privileges).
 * **Custom operation mode:** Triggers screen capture, recording, and sharing via designated system logs (Requires Shizuku/Root privileges).
@@ -17,7 +17,7 @@ This is a module that is currently under active development, supporting user cus
 * **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
 
 **核心功能（开发中）**
-* **替换截屏获取到的内容:** 需要LSPosed框架支持，将截图服务获取到的内容替换为用户指定的图片
+* **保护截屏获取到的隐私内容:** 需要LSPosed框架支持，保护截图服务获取到的内容中敏感部分，并且支持用户自定义遮挡方式
 * **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的恶意截图检测
 * **无痕的截录屏以及屏幕共享:** 需要Shizuku/Root特权，通过系统底层的直接调用绕过应用层的恶意检测
 * **自定义操作方式:** 需要Shizuku/Root特权，通过指定系统日志触发截录屏以及屏幕共享
