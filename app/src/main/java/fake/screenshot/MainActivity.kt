@@ -63,6 +63,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.addBinderDeadListener(deadListener)
         Shizuku.addBinderReceivedListener(receivedListener)
         DaemonManager.init(applicationContext)
+        ScreenShareManager.init(applicationContext)
         setContent {
             val navController = rememberNavController()
             val currentDestination by navController.currentBackStackEntryAsState()
