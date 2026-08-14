@@ -66,6 +66,7 @@
     <string name="stealth_screenRecord_bitrate">Bitrate (bps)</string>
     <string name="stealth_screenRecord_size">Resolution (WIDTHxHEIGHT)</string>
     <!--ScreenShare-->
+    <string name="stealth_screenShare_port">Screencast local port</string>
     <string name="config_stealth_screenShare">Config stealth screen sharing</string>
     <string name="stealth_screenShare_control">Allow Control</string>
     <string name="stealth_screenShare_sync_clipboard">Sync clipboard</string>

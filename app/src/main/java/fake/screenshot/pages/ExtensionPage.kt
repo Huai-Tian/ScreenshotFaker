@@ -120,6 +120,7 @@ fun ExtensionCompose() {
         }
     }
     //ScreenShare
+    val screenShareLocalPort by ConfigManager.rememberValue(context, "screenShare_port", 2345)
     val screenShareControl by ConfigManager.rememberValue(context, "screenShare_control", true)
     val screenShareSyncClipboard by ConfigManager.rememberValue(
         context,
@@ -145,7 +146,7 @@ fun ExtensionCompose() {
     val screenShareVideoCameraID by ConfigManager.rememberValue(
         context,
         "screenShare_video_camera_id",
-        ""
+        "0"
     )
     val screenShareVideoCameraZoom by ConfigManager.rememberValue(
         context,
@@ -169,6 +170,7 @@ fun ExtensionCompose() {
         false
     )
     var screenShareConfigDialog by remember { mutableStateOf(false) }
+    var screenShareConfigDialogLocalPort by remember { mutableStateOf(screenShareLocalPort.toString()) }
     var screenShareConfigDialogAllowControl by remember { mutableStateOf(screenShareControl) }
     var screenShareConfigDialogSyncClipboard by remember { mutableStateOf(screenShareSyncClipboard) }
     var screenShareConfigDialogEnableVideo by remember { mutableStateOf(screenShareVideo) }
@@ -191,13 +193,17 @@ fun ExtensionCompose() {
     var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
     val isScreenShareConfigValid by remember {
         derivedStateOf {
-            (!screenShareConfigDialogEnableAudio || screenShareConfigDialogAudioOutput || screenShareConfigDialogAudioMic) &&
-                    Auxiliary.isConfigValid(screenShareConfigDialogVideoCameraID) &&
-                    (screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
-                        ?.let { it >= BigDecimal.ONE }
-                        ?: screenShareConfigDialogVideoCameraZoom.isEmpty()) &&
+            val port = screenShareConfigDialogLocalPort.toIntOrNull()
+            val portValid = port != null && port in 1024..65535
+            val cameraIdValid =
+                !screenShareConfigDialogVideoCamera || (screenShareConfigDialogVideoCameraID.isNotEmpty() && Auxiliary.isConfigValid(
+                    screenShareConfigDialogVideoCameraID
+                ))
+            (screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
+                ?.let { it >= BigDecimal.ONE }
+                ?: screenShareConfigDialogVideoCameraZoom.isEmpty()) &&
                     (screenShareConfigDialogEnableAudio || screenShareConfigDialogEnableVideo) &&
-                    (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) && portValid && cameraIdValid
         }
     }
     Scaffold(
@@ -276,6 +282,7 @@ fun ExtensionCompose() {
                             )
                         },
                         onClick = {
+                            screenShareConfigDialogLocalPort = screenShareLocalPort.toString()
                             screenShareConfigDialogAllowControl = screenShareControl
                             screenShareConfigDialogSyncClipboard = screenShareSyncClipboard
                             screenShareConfigDialogEnableVideo = screenShareVideo
@@ -540,6 +547,18 @@ fun ExtensionCompose() {
                 },
                 text = {
                     Column {
+                        OutlinedTextField(
+                            value = screenShareConfigDialogLocalPort,
+                            onValueChange = { screenShareConfigDialogLocalPort = it }, // 可编辑
+                            label = { Text(stringResource(R.string.stealth_screenShare_port)) },
+                            placeholder = {
+                                Text(
+                                    "1024…65535"
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -595,7 +614,6 @@ fun ExtensionCompose() {
                                     value = screenShareConfigDialogVideoDisplayID,
                                     onValueChange = { screenShareConfigDialogVideoDisplayID = it },
                                     label = { Text(stringResource(R.string.physical_display_id)) },
-                                    placeholder = { Text(stringResource(R.string.default_if_empty)) },
                                     modifier = Modifier.fillMaxWidth(),
                                     singleLine = true
                                 )
@@ -666,7 +684,10 @@ fun ExtensionCompose() {
                                 Text(text = stringResource(R.string.stealth_screenShare_audio_output))
                                 Switch(
                                     checked = screenShareConfigDialogAudioOutput,
-                                    onCheckedChange = { screenShareConfigDialogAudioOutput = it }
+                                    onCheckedChange = {
+                                        screenShareConfigDialogAudioOutput = it
+                                        screenShareConfigDialogAudioMic = !it
+                                    }
                                 )
                             }
                             Row(
@@ -677,7 +698,10 @@ fun ExtensionCompose() {
                                 Text(text = stringResource(R.string.stealth_screenShare_audio_mic))
                                 Switch(
                                     checked = screenShareConfigDialogAudioMic,
-                                    onCheckedChange = { screenShareConfigDialogAudioMic = it }
+                                    onCheckedChange = {
+                                        screenShareConfigDialogAudioMic = it
+                                        screenShareConfigDialogAudioOutput = !it
+                                    }
                                 )
                             }
                         }
@@ -687,6 +711,14 @@ fun ExtensionCompose() {
                     TextButton(onClick = {
                         scope.launch {
                             var configChanged = false
+                            if (screenShareLocalPort != screenShareConfigDialogLocalPort.toInt()) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_port",
+                                    screenShareConfigDialogLocalPort.toInt()
+                                )
+                                configChanged = true
+                            }
                             if (screenShareControl != screenShareConfigDialogAllowControl) {
                                 ConfigManager.saveData(
                                     context,

@@ -53,6 +53,7 @@
     <string name="stealth_screenRecord_duration">录屏时长（秒）</string>
     <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
+    <string name="stealth_screenShare_port">屏幕共享本地端口</string>
     <string name="config_stealth_screenShare">配置无痕屏幕共享</string>
     <string name="stealth_screenShare_sync_clipboard">同步剪贴板</string>
     <string name="stealth_screenShare_video">启用视频</string>

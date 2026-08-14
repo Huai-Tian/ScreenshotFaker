@@ -36,13 +36,15 @@ class ScreenShareTileService : TileService() {
         super.onClick()
 
         if (screencasting) {
-            screencasting = !ScreenShareManager.stop()
+            ScreenShareManager.stopScreenShare()
+            screencasting = !ScreenShareManager.scrcpyRunning
         } else {
             initializing = true
             updateUI()
-            ScreenShareManager.initialize()
+            ScreenShareManager.initialize(this@ScreenShareTileService)
             initializing = false
-            screencasting = ScreenShareManager.start()
+            ScreenShareManager.startScreenShare()
+            screencasting = ScreenShareManager.scrcpyRunning
         }
         updateUI()
     }
