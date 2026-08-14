@@ -67,13 +67,20 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 
 This project is initiated by the developer out of personal interest and for technical research purposes, and is **non-commercial** in nature:
 
-- **Permanently Free**: This project is completely free, with **no paid features, memberships, subscriptions, or in-app purchases**. All features are fully accessible to all users.
+- **Permanently Free**:  
+  This project is completely free, with **no paid features, memberships, subscriptions, or in-app purchases**. All features are fully accessible to all users.
 
-- **No Sponsorship Channels**: The author has **never opened any sponsorship channels**, nor does the author **accept any financial donations** — to maintain the project's neutrality and purity.
+- **No Sponsorship Channels**:  
+  The author has **never opened any sponsorship channels**, nor does the author **accept any financial donations** — to maintain the project's neutrality and purity.
 
-- **Non-Profit Purpose**: This project involves no commercial operations, and the author derives no direct or indirect financial benefit from it.
+- **Non-Profit Purpose**:  
+  This project involves no commercial operations, and the author derives no direct or indirect financial benefit from it.
 
-- **Research-Oriented**: This project is consistently positioned for **security research, privacy protection, and software testing** — providing a research tool for the community, not a commercial product. Any commercial use of this project is the user's own initiative and is unrelated to this project.
+- **Resale Prohibited**:  
+  Resale, redistribution for profit, or commercial use of this project is strictly prohibited. Please obtain it only from this repository (GitHub) or other officially designated channels. The developer assumes no responsibility for any issues arising from unofficial sources.
+
+- **Research-Oriented**:  
+  This project is consistently positioned for **security research, privacy protection, and software testing** — providing a research tool for the community, not a commercial product. Any commercial use of this project is the user's own initiative and is unrelated to this project.
 
 ---
 
