@@ -6,7 +6,7 @@
 
 ## 📖 Introduction
 
-ScreenshotFaker is a privacy‑protection tool for screenshots, equipped with strong anti‑detection capabilities.
+**ScreenshotFaker** is a privacy‑protection tool for screenshots, equipped with strong anti‑detection capabilities.
 
 It allows you to customize how your personal information is protected during screenshots, screen recordings, and screen sharing — preventing untrusted apps from maliciously capturing your sensitive content.
 
