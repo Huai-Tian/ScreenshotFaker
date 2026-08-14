@@ -1,58 +1,125 @@
 # ScreenshotFaker
 
-**A software that supports users in protecting personal privacy in screenshots and has strong anti‑detection capabilities.**
+[简体中文](README_ZH.md) | English
 
-**一个支持用户在截屏中保护个人隐私的软件，并且具有很强的反检测能力**
+---
 
-This is an actively developed software that allows users to protect sensitive content captured from screen grabs and to block screenshot detection by malicious apps.
+## 📖 Introduction
 
-这是一个正在积极开发中的软件，支持用户保护被屏幕抓拍获取到的敏感内容以及屏蔽恶意软件的截屏检测
+ScreenshotFaker is a privacy‑protection tool for screenshots, equipped with strong anti‑detection capabilities.
 
-**Key Features (Under Development)** 
-* **Protect private content captured by the screenshot service:** Safeguard sensitive content from the screenshot service with customizable redaction options (Requires LSPosed framework).
-* **Render the software's screenshot detection ineffective:** Neutralizes the app's malicious screenshot detection (Requires LSPosed framework).
-* **Unobtrusive screen capture, recording, and sharing:** Bypasses application layer malicious detection via direct system-level calls (Requires Shizuku/Root privileges).
-* **Custom operation mode:** Triggers screen capture, recording, and sharing via designated system logs (Requires Shizuku/Root privileges).
-* **Extreme stealth support:** Retains screen capture, recording, and sharing capabilities even after the software is uninstalled (Requires Shizuku/Root privileges).
-* **Receive screen sharing from this app:** Receives screencasting from this app over the LAN (No privileges required).
+It allows you to customize how your personal information is protected during screenshots, screen recordings, and screen sharing — preventing untrusted apps from maliciously capturing your sensitive content.
 
-**核心功能（开发中）**
-* **保护截屏获取到的隐私内容:** 需要LSPosed框架支持，保护截图服务获取到的内容中敏感部分，并且支持用户自定义遮挡方式
-* **使软件的截屏检测无效:** 需要LSPosed框架支持，让用户的截图事件跳过应用的恶意截图检测
-* **无痕的截录屏以及屏幕共享:** 需要Shizuku/Root特权，通过系统底层的直接调用绕过应用层的恶意检测
-* **自定义操作方式:** 需要Shizuku/Root特权，通过指定系统日志触发截录屏以及屏幕共享
-* **极致的隐藏支持:** 需要Shizuku/Root特权，支持在卸载此软件后，依然可以完成截录屏以及屏幕共享功能
-* **接收来自此应用的屏幕共享:** 无需特权，接收局域网中来自此应用的投屏
+---
 
-**Important Notice**\
-This software is currently in the early stages of development. Many features are still under construction, and existing ones may have bugs or limitations. I sincerely apologize for any errors or issues you may encounter.You are also welcome to submit Issues and Pull Requests!
+## ✨ Features
 
-**重要提示**\
-本软件尚在开发早期阶段，大量的功能还在实现中，已实现的功能可能存在各种问题和不足，如果你在使用过程中遇到任何错误，我深感抱歉。同时也欢迎您提交 Issue 和 Pull Request！
+- **Protect private content from being captured in screenshots**  
+  Prevents the screenshot service from capturing sensitive content on the screen, with support for user‑defined redaction.
 
-**Contact**
+- **Neutralizes screenshot detection in specific applications**  
+  Bypasses malicious screenshot detection in apps.
+
+- **Enables stealthy screen capture, recording, and sharing**  
+  Bypasses application-layer malicious detection via direct system-level calls.
+
+- **Custom trigger methods**  
+  Supports system-log-based triggering for screen capture, recording, and sharing — not limited to conventional gestures.
+
+- **Extreme stealth support**  
+  Retains screen capture, recording, and sharing capabilities even after the software is uninstalled.
+
+- **Extreme privacy protection**  
+  Most configurations are user‑customizable, filenames support full randomization, and all port communications are secured with high‑strength encryption.
+
+- **Comprehensive screen sharing**  
+  Supports receiving screen sharing, initiating LAN screen sharing, and remote sharing via SSH.
+
+- **More features coming soon...**
+
+---
+
+## ⚠️ Project Status
+
+This project is currently in an early development stage. Bugs, incomplete features, and breaking changes may occur.
+
+---
+
+## ⚙️ Technical Dependencies
+
+This project's core functionality relies on **LSPosed** and **Shizuku**:
+
+**LSPosed**
+- Protects private content from being captured in screenshots.
+- Bypasses screenshot detection by specific apps.
+
+**Shizuku**
+- Enables stealthy screen capture, recording, and sharing.
+- Triggers screen capture, recording, and sharing by matching system logs.
+- Retains screen capture, recording, and sharing capabilities even after uninstallation.
+
+**Root**
+- Rooted users can grant Root permission directly, providing the same functionality as Shizuku — **choose either one**.
+
+---
+
+## 🚫 Non‑Commercial Statement
+
+This project is initiated by the developer out of personal interest and for technical research purposes, and is **non-commercial** in nature:
+
+- **Permanently Free**: This project is completely free, with **no paid features, memberships, subscriptions, or in-app purchases**. All features are fully accessible to all users.
+
+- **No Sponsorship Channels**: The author has **never opened any sponsorship channels**, nor does the author **accept any financial donations** — to maintain the project's neutrality and purity.
+
+- **Non-Profit Purpose**: This project involves no commercial operations, and the author derives no direct or indirect financial benefit from it.
+
+- **Research-Oriented**: This project is consistently positioned for **security research, privacy protection, and software testing** — providing a research tool for the community, not a commercial product. Any commercial use of this project is the user's own initiative and is unrelated to this project.
+
+---
+
+## ⚖️ Disclaimer
+
+- **Purpose Limitation**:  
+  This project is intended for **privacy protection, security research, software testing, and educational purposes** only.  
+  Do not use this project for any illegal purposes (including but not limited to exam cheating and data falsification).
+
+- **No Warranty**:  
+  This software is provided under the terms of its license, **without any express or implied warranties**, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
+
+- **Limitation of Liability**:  
+  To the fullest extent permitted by applicable law, **in no event shall the author or contributors be liable** for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with the use or inability to use this software, even if advised of the possibility of such damages.
+
+- **User Responsibility**:  
+  Users assume all legal responsibilities arising from the use of this project.
+
+- **Final Interpretation**:  
+  The final interpretation of this disclaimer belongs to the author of this project.
+
+---
+
+## 🙏 Acknowledgements
+
+- LSPosed
+- Shizuku
+- scrcpy
+- libssh2
+- openssl
+
+---
+
+## 💬 Contact
 
 - QQ: https://qm.qq.com/q/j2NM49cd8c
 - Telegram: https://t.me/ScreenshotFaker
 
 You are welcome to submit issues, suggestions, or bug reports via GitHub Issues.
 
-**联系方式**
+---
 
-- QQ: https://qm.qq.com/q/j2NM49cd8c
-- Telegram: https://t.me/ScreenshotFaker
+## ⭐ Support the Project
 
-欢迎通过 GitHub Issue 提交问题、建议或反馈。
+If you find this project helpful, or if you recognize its value in technical research, consider giving it a ⭐ on GitHub.
 
-**Disclaimer**\
-This project is intended for **Privacy Protection**, **security research**, **software testing**, and **educational purposes** only.
-Please do not use this project for any illegal purposes (including but not limited to cheating in exams and data falsification).
-Users must assume all legal responsibilities arising from the use of this project.
+Your support helps more people discover this project, and also lets the author feel the significance of continued maintenance.
 
-**免责声明**\
-本项目仅供**隐私保护、安全研究、软件测试和教育目的**使用。  
-请勿将本项目用于任何非法用途（包括但不限于考试作弊，数据造假）。  
-使用者需自行承担因使用本项目而产生的一切法律责任。
-
-**Thank you for your attention and support!**\
-**感谢你的关注和支持！**
+Thank you for your recognition.
