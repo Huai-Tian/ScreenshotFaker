@@ -88,7 +88,7 @@ fun SettingsCompose(navController: NavController) {
 
             val portValid =
                 daemonSocketPortInputText.toIntOrNull().let { it != null && it in 1024..65535 }
-            val separatorValid = daemonConfigSeparatorInputText.isNotEmpty()
+            val separatorValid = daemonConfigSeparatorInputText.isNotBlank()
             portValid && separatorValid && checkConfig(
                 daemonScreenshotConfigInputText,
                 daemonScreenRecordConfigInputText,
