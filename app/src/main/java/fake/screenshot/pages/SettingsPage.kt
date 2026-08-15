@@ -5,6 +5,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
@@ -293,6 +295,7 @@ fun SettingsCompose(navController: NavController) {
                                     "1024…65535"
                                 )
                             },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -300,6 +303,7 @@ fun SettingsCompose(navController: NavController) {
                             value = daemonVerificationPasswordInputText,
                             onValueChange = { daemonVerificationPasswordInputText = it }, // 可编辑
                             label = { Text(stringResource(R.string.verification_password)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -349,7 +353,7 @@ fun SettingsCompose(navController: NavController) {
                             supportingText = {
                                 Text(
                                     text = "LV <- (V/D/I/W/E/F/S)\n" +
-                                            "Part blank= All, Whole blank= Disable",
+                                            stringResource(R.string.disable_if_empty),
                                     fontSize = 9.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
