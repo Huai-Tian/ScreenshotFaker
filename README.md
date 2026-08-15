@@ -30,7 +30,10 @@ It allows you to customize how your personal information is protected during scr
   Retains screen capture, recording, and sharing capabilities even after the software is uninstalled.
 
 - **Extreme privacy protection**  
-  Most configurations are user‑customizable, filenames support full randomization, and all port communications are secured with high‑strength encryption.
+  Most configurations are user‑customizable;  
+  Page protection against screenshot‑based configuration leakage;  
+  Filenames support full randomization;  
+  All port communications are secured with high‑strength encryption.
 
 - **Comprehensive screen sharing**  
   Supports receiving screen sharing, initiating LAN screen sharing, and remote sharing via SSH.
