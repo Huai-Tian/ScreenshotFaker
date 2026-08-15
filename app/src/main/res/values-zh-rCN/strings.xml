@@ -64,7 +64,11 @@
     <string name="stealth_screenShare_video_camera_zoom">放大倍数</string>
     <string name="stealth_screenShare_audio">启用音频</string>
     <string name="stealth_screenShare_audio_mic">麦克风音频</string>
+    <string name="click_to_config_ssh_tunnel">点击配置 SSH 隧道</string>
+    <string name="config_ssh_tunnel">配置 SSH 隧道</string>
+    <string name="ssh_server_user_password">用户密码</string>
     <string name="default_if_empty">留空为默认</string>
+    <string name="disable_if_empty">留空为禁用</string>
     <string name="stealth_file_suffix">文件后缀名</string>
     <string name="screencasting">屏幕共享中</string>
     <string name="initializing">初始化中</string>
@@ -84,4 +88,9 @@
     <string name="refresh">刷新</string>
     <string name="stealth_screenShare_audio_output">系统音频</string>
     <string name="stealth_screenShare_video_display">屏幕视频</string>
+    <string name="ssh_tunnel">SSH 隧道</string>
+    <string name="ssh_server_enabled">启用 SSH 隧道</string>
+    <string name="ssh_server_address">SSH 服务器地址</string>
+    <string name="ssh_server_port">SSH 服务端口</string>
+    <string name="ssh_server_user_name">用户名</string>
 </resources>

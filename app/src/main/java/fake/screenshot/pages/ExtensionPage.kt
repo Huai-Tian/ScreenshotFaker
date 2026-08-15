@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Environment
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -15,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
@@ -193,17 +195,60 @@ fun ExtensionCompose() {
     var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
     val isScreenShareConfigValid by remember {
         derivedStateOf {
-            val port = screenShareConfigDialogLocalPort.toIntOrNull()
-            val portValid = port != null && port in 1024..65535
+            val portValid = screenShareConfigDialogLocalPort.toIntOrNull()
+                .let { it != null && it in 1024..65535 }
             val cameraIdValid =
-                !screenShareConfigDialogVideoCamera || (screenShareConfigDialogVideoCameraID.isNotEmpty() && Auxiliary.isConfigValid(
-                    screenShareConfigDialogVideoCameraID
-                ))
-            (screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
+                !screenShareConfigDialogVideoCamera || screenShareConfigDialogVideoCameraID.isDigitsOnly()
+            val displayIdValid =
+                !screenShareConfigDialogVideoDisplay || screenShareConfigDialogVideoDisplayID.isDigitsOnly()
+            val cameraZoomValid = screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
                 ?.let { it >= BigDecimal.ONE }
-                ?: screenShareConfigDialogVideoCameraZoom.isEmpty()) &&
-                    (screenShareConfigDialogEnableAudio || screenShareConfigDialogEnableVideo) &&
-                    (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) && portValid && cameraIdValid
+                ?: screenShareConfigDialogVideoCameraZoom.isEmpty()
+
+            (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                    && portValid && cameraIdValid && cameraZoomValid && displayIdValid
+        }
+    }
+    //SSH Tunnel
+    val sshTunnelEnabled by ConfigManager.rememberValue(context, "ssh_tunnel_enabled", false)
+    val sshTunnelServerAddress by ConfigManager.rememberValue(
+        context,
+        "ssh_tunnel_server_address",
+        "127.0.0.1"
+    )
+    val sshTunnelServerPort by ConfigManager.rememberValue(context, "ssh_tunnel_server_port", 22)
+    val sshTunnelUserName by ConfigManager.rememberValue(
+        context,
+        "ssh_tunnel_user_name",
+        "ScreenshotFaker"
+    )
+    val sshTunnelUserPassword by ConfigManager.rememberValue(
+        context,
+        "ssh_tunnel_user_password",
+        "ScreenshotFaker"
+    )
+    var sshTunnelConfigDialog by remember { mutableStateOf(false) }
+    var sshTunnelConfigDialogEnabled by remember { mutableStateOf(sshTunnelEnabled) }
+    var sshTunnelConfigDialogServerAddress by remember { mutableStateOf(sshTunnelServerAddress) }
+    var sshTunnelConfigDialogServerPort by remember { mutableStateOf(sshTunnelServerPort.toString()) }
+    var sshTunnelConfigDialogUserName by remember { mutableStateOf(sshTunnelUserName) }
+    var sshTunnelConfigDialogUserPassword by remember { mutableStateOf(sshTunnelUserPassword) }
+    val isSshTunnelConfigValid by remember {
+        derivedStateOf {
+            val addressValid = sshTunnelConfigDialogServerAddress.let {
+                it.isNotEmpty() && it.all { char ->
+                    char.isLetterOrDigit() || char in listOf(
+                        '.',
+                        '-'
+                    )
+                }
+            }
+            val portValid = sshTunnelConfigDialogServerPort.toIntOrNull()
+                .let { it != null && it in 1..65535 }
+            val nameValid = sshTunnelConfigDialogUserName.let {
+                it.isNotEmpty() && it.matches(Regex("^[a-zA-Z0-9_][a-zA-Z0-9_-]*$"))
+            }
+            addressValid && portValid && nameValid && sshTunnelConfigDialogUserPassword.isNotBlank()
         }
     }
     Scaffold(
@@ -296,6 +341,29 @@ fun ExtensionCompose() {
                             screenShareConfigDialogAudioOutput = screenShareAudioOutput
                             screenShareConfigDialogAudioMic = screenShareAudioMic
                             screenShareConfigDialog = true
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.CellTower,
+                        title = stringResource(R.string.ssh_tunnel),
+                        subtitle = stringResource(R.string.click_to_config_ssh_tunnel),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            sshTunnelConfigDialogEnabled = sshTunnelEnabled
+                            sshTunnelConfigDialogServerAddress = sshTunnelServerAddress
+                            sshTunnelConfigDialogServerPort = sshTunnelServerPort.toString()
+                            sshTunnelConfigDialogUserName = sshTunnelUserName
+                            sshTunnelConfigDialogUserPassword = sshTunnelUserPassword
+                            sshTunnelConfigDialog = true
                         }
                     )
                 }
@@ -556,6 +624,7 @@ fun ExtensionCompose() {
                                     "1024…65535"
                                 )
                             },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -614,6 +683,7 @@ fun ExtensionCompose() {
                                     value = screenShareConfigDialogVideoDisplayID,
                                     onValueChange = { screenShareConfigDialogVideoDisplayID = it },
                                     label = { Text(stringResource(R.string.physical_display_id)) },
+                                    placeholder = { Text(stringResource(R.string.default_if_empty)) },
                                     modifier = Modifier.fillMaxWidth(),
                                     singleLine = true
                                 )
@@ -829,6 +899,125 @@ fun ExtensionCompose() {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
+            )
+        }
+        if (sshTunnelConfigDialog) {
+            AlertDialog(
+                onDismissRequest = { screenshotConfigDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.config_ssh_tunnel))
+                },
+                text = {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.ssh_server_enabled))
+                            Switch(
+                                checked = sshTunnelConfigDialogEnabled,
+                                onCheckedChange = { sshTunnelConfigDialogEnabled = it }
+                            )
+                        }
+                        OutlinedTextField(
+                            value = sshTunnelConfigDialogServerAddress,
+                            onValueChange = { sshTunnelConfigDialogServerAddress = it },
+                            label = { Text(stringResource(R.string.ssh_server_address)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = sshTunnelConfigDialogServerPort,
+                            onValueChange = { sshTunnelConfigDialogServerPort = it },
+                            label = { Text(stringResource(R.string.ssh_server_port)) },
+                            placeholder = {
+                                Text(
+                                    "1024…65535"
+                                )
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = sshTunnelConfigDialogUserName,
+                            onValueChange = { sshTunnelConfigDialogUserName = it },
+                            label = { Text(stringResource(R.string.ssh_server_user_name)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = sshTunnelConfigDialogUserPassword,
+                            onValueChange = { sshTunnelConfigDialogUserPassword = it },
+                            label = { Text(stringResource(R.string.ssh_server_user_password)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                var configChanged = false
+                                if (sshTunnelEnabled != sshTunnelConfigDialogEnabled) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_enabled",
+                                        sshTunnelConfigDialogEnabled
+                                    )
+                                    configChanged = true
+                                }
+                                if (sshTunnelServerAddress != sshTunnelConfigDialogServerAddress) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_server_address",
+                                        sshTunnelConfigDialogServerAddress
+                                    )
+                                    configChanged = true
+                                }
+                                if (sshTunnelServerPort != sshTunnelConfigDialogServerPort.toInt()) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_server_port",
+                                        sshTunnelConfigDialogServerPort.toInt()
+                                    )
+                                    configChanged = true
+                                }
+                                if (sshTunnelUserName != sshTunnelConfigDialogUserName) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_user_name",
+                                        sshTunnelConfigDialogUserName
+                                    )
+                                    configChanged = true
+                                }
+                                if (sshTunnelUserPassword != sshTunnelConfigDialogUserPassword) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_user_password",
+                                        sshTunnelConfigDialogUserPassword
+                                    )
+                                    configChanged = true
+                                }
+                                if (configChanged) {
+                                    DaemonManager.syncConfig()
+                                }
+                            }
+                            sshTunnelConfigDialog = false
+                        },
+                        enabled = isSshTunnelConfigValid
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { sshTunnelConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                },
             )
         }
     }
