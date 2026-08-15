@@ -1,5 +1,7 @@
 package fake.screenshot.pages
 
+import android.app.Activity
+import android.view.WindowManager
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -35,6 +37,7 @@ fun SettingsCompose(navController: NavController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
+    val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", false)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val daemonSocketPort by ConfigManager.rememberValue(
         context,
@@ -129,6 +132,24 @@ fun SettingsCompose(navController: NavController) {
                         onCheckedChange = {
                             scope.launch {
                                 ConfigManager.saveData(context, "check_update", it)
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.AppBlocking,
+                        title = stringResource(R.string.enable_page_protection),
+                        subtitle = stringResource(R.string.protect_pages_from_screenshotting),
+                        checked = enableFlagSecure,
+                        onCheckedChange = {
+                            scope.launch {
+                                ConfigManager.saveData(context, "enable_flag_secure", it)
+                                val activity = context as? Activity
+                                if (enableFlagSecure) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                                else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                             }
                         }
                     )

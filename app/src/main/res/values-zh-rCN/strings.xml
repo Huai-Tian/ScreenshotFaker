@@ -76,6 +76,7 @@
     <string name="Cancel">取消</string>
     <string name="daemon">守护进程</string>
     <string name="not_running">未运行</string>
+    <string name="protect_pages_from_screenshotting">软件页面不允许截屏</string>
     <string name="start_daemon">运行守护进程</string>
     <string name="running">运行中</string>
     <string name="click_to_view_daemon_status">点击查看守护进程状态</string>
@@ -93,4 +94,5 @@
     <string name="ssh_server_address">SSH 服务器地址</string>
     <string name="ssh_server_port">SSH 服务端口</string>
     <string name="ssh_server_user_name">用户名</string>
+    <string name="enable_page_protection">启用页面保护</string>
 </resources>
