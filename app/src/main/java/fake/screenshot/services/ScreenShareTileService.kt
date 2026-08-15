@@ -7,14 +7,13 @@ import fake.screenshot.ScreenShareManager
 
 class ScreenShareTileService : TileService() {
 
-    private var screencasting = false
     private var initializing = false
 
     private fun updateUI() {
         val tile = qsTile ?: return
 
         when {
-            screencasting -> {
+            ScreenShareManager.scrcpyRunning -> {
                 tile.state = Tile.STATE_ACTIVE
                 tile.label = getString(R.string.screencasting)
             }
@@ -35,16 +34,14 @@ class ScreenShareTileService : TileService() {
     override fun onClick() {
         super.onClick()
 
-        if (screencasting) {
+        if (ScreenShareManager.scrcpyRunning) {
             ScreenShareManager.stopScreenShare()
-            screencasting = !ScreenShareManager.scrcpyRunning
         } else {
             initializing = true
             updateUI()
             ScreenShareManager.initialize(this@ScreenShareTileService)
             initializing = false
             ScreenShareManager.startScreenShare()
-            screencasting = ScreenShareManager.scrcpyRunning
         }
         updateUI()
     }
