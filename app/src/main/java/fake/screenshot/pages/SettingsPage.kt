@@ -75,7 +75,6 @@ fun SettingsCompose(navController: NavController) {
     val isDaemonConfigValid by remember {
         derivedStateOf {
             val validPriorityLetters = setOf('V', 'D', 'I', 'W', 'E', 'F')
-            val port = daemonSocketPortInputText.toIntOrNull()
             fun checkConfig(vararg inputs: String): Boolean = inputs.all { input ->
                 val parts = input.split(daemonConfigSeparatorInputText)
                 input.isEmpty() || (
@@ -87,7 +86,8 @@ fun SettingsCompose(navController: NavController) {
                                 && Auxiliary.isRegexValid(parts[2]))
             }
 
-            val portValid = port != null && port in 1024..65535
+            val portValid =
+                daemonSocketPortInputText.toIntOrNull().let { it != null && it in 1024..65535 }
             val separatorValid = daemonConfigSeparatorInputText.isNotEmpty()
             portValid && separatorValid && checkConfig(
                 daemonScreenshotConfigInputText,
