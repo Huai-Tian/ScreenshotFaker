@@ -47,6 +47,9 @@ import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.Volatile
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 
 class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
     private var mService: XposedService? = null
@@ -74,6 +77,10 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
             val enableFlagSecure = ConfigManager.getDataOnce(applicationContext,"enable_flag_secure",false)
             if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        WindowCompat.getInsetsController(window, window.decorView).let {
+            it.hide(WindowInsetsCompat.Type.statusBars())
+            it.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         setContent {
             val navController = rememberNavController()
