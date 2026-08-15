@@ -120,7 +120,7 @@ fun SettingsCompose(navController: NavController) {
                 .padding(horizontal = 16.dp),
             // 关键：通过 spacedBy 控制卡片之间的垂直间距
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(vertical = 20.dp),
+            contentPadding = PaddingValues(bottom = 20.dp),
         ) {
             item {
                 CommonCard {

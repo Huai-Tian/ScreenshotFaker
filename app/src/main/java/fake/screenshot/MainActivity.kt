@@ -8,6 +8,8 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Extension
@@ -20,6 +22,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.navigation.compose.NavHost
@@ -124,6 +127,9 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 NavHost(
                     navController = navController,
                     startDestination = AppDestinations.HOME.route,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(bottom = it.calculateBottomPadding())
                 ) {
                     composable(AppDestinations.HOME.route) { HomeCompose() }
                     composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
