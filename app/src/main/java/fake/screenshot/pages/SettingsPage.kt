@@ -93,7 +93,7 @@ fun SettingsCompose(navController: NavController) {
                 daemonScreenshotConfigInputText,
                 daemonScreenRecordConfigInputText,
                 daemonScreenShareConfigInputText
-            )
+            ) && daemonVerificationPasswordInputText.isNotBlank()
 
         }
     }
