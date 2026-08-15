@@ -51,10 +51,12 @@ fun ExtensionCompose() {
     var screenshotConfigDialogDisplayIDInputText by remember { mutableStateOf(screenshotDisplayID) }
     val isScreenshotConfigValid by remember {
         derivedStateOf {
-            Auxiliary.isConfigValid(
+            screenshotConfigDialogDisplayIDInputText.isDigitsOnly()
+                    && screenshotConfigDialogSavaPathInputText.isNotEmpty()
+                    && Auxiliary.isConfigValid(
                 screenshotConfigDialogSuffixInputText,
                 screenshotConfigDialogSavaPathInputText
-            ) && screenshotConfigDialogDisplayIDInputText.isDigitsOnly()
+            )
         }
     }
     //ScreenRecord
@@ -111,14 +113,15 @@ fun ExtensionCompose() {
     var screenRecordConfigDialogEnableBugreport by remember { mutableStateOf(screenRecordBugreport) }
     val isScreenRecordConfigValid by remember {
         derivedStateOf {
-            Auxiliary.isConfigValid(
+            screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
+                    && screenRecordConfigDialogDurationInputText.let { it.isNotEmpty() && it.isDigitsOnly() }
+                    && screenRecordConfigDialogSavePathInputText.isNotEmpty()
+                    && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
+                    && Auxiliary.isConfigValid(
                 screenRecordConfigDialogSavePathInputText,
                 screenRecordConfigDialogSuffixInputText,
                 screenRecordConfigDialogResolutionInputText
-            ) && screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
-                    && screenRecordConfigDialogDurationInputText.isDigitsOnly()
-                    && screenRecordConfigDialogDurationInputText.isNotEmpty()
-                    && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
+            )
         }
     }
     //ScreenShare
@@ -903,7 +906,7 @@ fun ExtensionCompose() {
         }
         if (sshTunnelConfigDialog) {
             AlertDialog(
-                onDismissRequest = { screenshotConfigDialog = false },
+                onDismissRequest = { sshTunnelConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_ssh_tunnel))
                 },
