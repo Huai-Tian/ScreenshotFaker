@@ -37,7 +37,7 @@ fun SettingsCompose(navController: NavController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
-    val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", false)
+    val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val daemonSocketPort by ConfigManager.rememberValue(
         context,

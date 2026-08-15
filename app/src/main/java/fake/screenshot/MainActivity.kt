@@ -41,15 +41,13 @@ import fake.screenshot.pages.ReceiveScreenSharingCompose
 import fake.screenshot.pages.SettingsCompose
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlin.concurrent.Volatile
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import kotlinx.coroutines.runBlocking
 
 class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
     private var mService: XposedService? = null
@@ -73,8 +71,8 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.addBinderDeadListener(deadListener)
         Shizuku.addBinderReceivedListener(receivedListener)
         DaemonManager.init(applicationContext)
-        CoroutineScope(Dispatchers.IO).launch{
-            val enableFlagSecure = ConfigManager.getDataOnce(applicationContext,"enable_flag_secure",false)
+        runBlocking{
+            val enableFlagSecure = ConfigManager.getDataOnce(applicationContext,"enable_flag_secure",true)
             if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
