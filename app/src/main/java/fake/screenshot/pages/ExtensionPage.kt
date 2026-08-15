@@ -198,15 +198,13 @@ fun ExtensionCompose() {
             val portValid = screenShareConfigDialogLocalPort.toIntOrNull()
                 .let { it != null && it in 1024..65535 }
             val cameraIdValid =
-                !screenShareConfigDialogVideoCamera || screenShareConfigDialogVideoCameraID.isDigitsOnly()
+                !screenShareConfigDialogVideoCamera || screenShareConfigDialogVideoCameraID.let { it.isNotEmpty() && it.isDigitsOnly() }
             val displayIdValid =
                 !screenShareConfigDialogVideoDisplay || screenShareConfigDialogVideoDisplayID.isDigitsOnly()
             val cameraZoomValid = screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
                 ?.let { it >= BigDecimal.ONE }
                 ?: screenShareConfigDialogVideoCameraZoom.isEmpty()
-
-            (!screenShareConfigDialogVideoCamera || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
-                    && portValid && cameraIdValid && cameraZoomValid && displayIdValid
+            portValid && cameraIdValid && cameraZoomValid && displayIdValid
         }
     }
     //SSH Tunnel
@@ -675,7 +673,8 @@ fun ExtensionCompose() {
                                     onCheckedChange = {
                                         screenShareConfigDialogVideoDisplay = it
                                         screenShareConfigDialogVideoCamera = !it
-                                    }
+                                    },
+                                    enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                                 )
                             }
                             if (screenShareConfigDialogVideoDisplay) {
@@ -699,7 +698,8 @@ fun ExtensionCompose() {
                                     onCheckedChange = {
                                         screenShareConfigDialogVideoCamera = it
                                         screenShareConfigDialogVideoDisplay = !it
-                                    }
+                                    },
+                                    enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                                 )
                             }
                             if (screenShareConfigDialogVideoCamera) {
