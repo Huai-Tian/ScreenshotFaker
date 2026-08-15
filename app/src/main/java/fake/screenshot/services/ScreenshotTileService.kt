@@ -35,6 +35,11 @@ class ScreenshotTileService : TileService() {
                     key = "screenshot_display_id",
                     defaultValue = ""
                 ).let { if (it.isEmpty()) "" else "-d $it" }
+                val fullRandom = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "screenshot_full_random",
+                    defaultValue = false
+                )
                 with(File(savePath)) {
                     if (!(exists() && isDirectory)) mkdirs()
                 }
@@ -42,7 +47,13 @@ class ScreenshotTileService : TileService() {
                     "screencap",
                     "-p",
                     displayID,
-                    "${savePath}/${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
+                    "${savePath}/${
+                        if (fullRandom) {
+                            Auxiliary.getRandomStringEx((1..12).random())
+                        } else {
+                            "${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
+                        }
+                    }"
                 ).filter { it.isNotEmpty() }
                 Auxiliary.exec(args.joinToString(" "))
             }

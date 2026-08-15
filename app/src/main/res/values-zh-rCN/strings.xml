@@ -37,6 +37,7 @@
     <string name="about">关于</string>
     <string name="detach">脱离</string>
     <string name="daemon_connect_failed">守护进程未运行或无法连接</string>
+    <string name="full_random_file_name">文件名全随机</string>
     <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击配置无痕截图</string>

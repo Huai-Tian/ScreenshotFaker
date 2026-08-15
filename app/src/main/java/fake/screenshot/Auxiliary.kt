@@ -97,6 +97,16 @@ object Auxiliary {
             .joinToString("")
     }
 
+    fun getRandomStringEx(length: Int): String {
+        val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
+        val fullChars = allowedChars + listOf('-', '_')
+        val first = allowedChars.random()
+        val rest = (1 until length)
+            .map { fullChars.random() }
+            .joinToString("")
+        return first + rest
+    }
+
     fun deriveKey(password: String): SecretKeySpec {
         val spec =
             PBEKeySpec(password.toCharArray(), SALT.toByteArray(), PBKDF2_ITERATIONS, KEY_LENGTH)

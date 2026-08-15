@@ -94,6 +94,7 @@
     <string name="default_if_empty">Default if empty</string>
     <string name="disable_if_empty">Disable if empty</string>
     <string name="stealth_file_suffix">File suffix</string>
+    <string name="full_random_file_name">Full random file name</string>
     <!--TileService-->
     <string name="stealth_screencast">Stealth Screencast</string>
     <string name="screencasting">Screencasting</string>

@@ -45,10 +45,16 @@ fun ExtensionCompose() {
         "screenshot_display_id",
         ""
     )
+    val screenshotFullRandom by ConfigManager.rememberValue(
+        context,
+        "screenshot_full_random",
+        false
+    )
     var screenshotConfigDialog by remember { mutableStateOf(false) }
     var screenshotConfigDialogSavaPathInputText by remember { mutableStateOf(screenshotSavePath) }
     var screenshotConfigDialogSuffixInputText by remember { mutableStateOf(screenshotSuffix) }
     var screenshotConfigDialogDisplayIDInputText by remember { mutableStateOf(screenshotDisplayID) }
+    var screenshotConfigDialogFullRandomInputText by remember { mutableStateOf(screenshotFullRandom) }
     val isScreenshotConfigValid by remember {
         derivedStateOf {
             screenshotConfigDialogDisplayIDInputText.isDigitsOnly()
@@ -90,6 +96,11 @@ fun ExtensionCompose() {
         "screenRecord_resolution",
         ""
     )
+    val screenRecordFullRandom by ConfigManager.rememberValue(
+        context,
+        "screenRecord_full_random",
+        false
+    )
     val screenRecordBugreport by ConfigManager.rememberValue(
         context,
         "screenRecord_bugreport",
@@ -108,6 +119,11 @@ fun ExtensionCompose() {
     var screenRecordConfigDialogResolutionInputText by remember {
         mutableStateOf(
             screenRecordResolution
+        )
+    }
+    var screenRecordConfigDialogFullRandomInputText by remember {
+        mutableStateOf(
+            screenRecordFullRandom
         )
     }
     var screenRecordConfigDialogEnableBugreport by remember { mutableStateOf(screenRecordBugreport) }
@@ -285,6 +301,7 @@ fun ExtensionCompose() {
                             screenshotConfigDialogSavaPathInputText = screenshotSavePath
                             screenshotConfigDialogDisplayIDInputText = screenshotDisplayID
                             screenshotConfigDialogSuffixInputText = screenshotSuffix
+                            screenshotConfigDialogFullRandomInputText = screenshotFullRandom
                             screenshotConfigDialog = true
                         }
                     )
@@ -309,6 +326,7 @@ fun ExtensionCompose() {
                             screenRecordConfigDialogDurationInputText = screenRecordDuration
                             screenRecordConfigDialogBitRateInputText = screenRecordBitRate
                             screenRecordConfigDialogResolutionInputText = screenRecordResolution
+                            screenRecordConfigDialogFullRandomInputText = screenRecordFullRandom
                             screenRecordConfigDialogEnableBugreport = screenRecordBugreport
                             screenRecordConfigDialog = true
                         }
@@ -385,13 +403,15 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
-                        OutlinedTextField(
-                            value = screenshotConfigDialogSuffixInputText,
-                            onValueChange = { screenshotConfigDialogSuffixInputText = it },
-                            label = { Text(stringResource(R.string.stealth_file_suffix)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
+                        if (!screenshotConfigDialogFullRandomInputText) {
+                            OutlinedTextField(
+                                value = screenshotConfigDialogSuffixInputText,
+                                onValueChange = { screenshotConfigDialogSuffixInputText = it },
+                                label = { Text(stringResource(R.string.stealth_file_suffix)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                            )
+                        }
                         OutlinedTextField(
                             value = screenshotConfigDialogDisplayIDInputText,
                             onValueChange = {
@@ -402,6 +422,17 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.full_random_file_name))
+                            Switch(
+                                checked = screenshotConfigDialogFullRandomInputText,
+                                onCheckedChange = { screenshotConfigDialogFullRandomInputText = it }
+                            )
+                        }
                     }
                 },
                 confirmButton = {
@@ -433,6 +464,14 @@ fun ExtensionCompose() {
                                         context,
                                         "screenshot_display_id",
                                         screenshotConfigDialogDisplayIDInputText
+                                    )
+                                    configChanged = true
+                                }
+                                if (screenshotFullRandom != screenshotConfigDialogFullRandomInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "screenshot_full_random",
+                                        screenshotConfigDialogFullRandomInputText
                                     )
                                     configChanged = true
                                 }
@@ -480,15 +519,17 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
-                        OutlinedTextField(
-                            value = screenRecordConfigDialogSuffixInputText,
-                            onValueChange = {
-                                screenRecordConfigDialogSuffixInputText = it
-                            }, // 可编辑
-                            label = { Text(stringResource(R.string.stealth_file_suffix)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
+                        if (!screenRecordConfigDialogFullRandomInputText) {
+                            OutlinedTextField(
+                                value = screenRecordConfigDialogSuffixInputText,
+                                onValueChange = {
+                                    screenRecordConfigDialogSuffixInputText = it
+                                }, // 可编辑
+                                label = { Text(stringResource(R.string.stealth_file_suffix)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                        }
                         OutlinedTextField(
                             value = screenRecordConfigDialogDisplayIDInputText,
                             onValueChange = {
@@ -519,6 +560,19 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.full_random_file_name))
+                            Switch(
+                                checked = screenRecordConfigDialogFullRandomInputText,
+                                onCheckedChange = {
+                                    screenRecordConfigDialogFullRandomInputText = it
+                                }
+                            )
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -557,6 +611,14 @@ fun ExtensionCompose() {
                                     context,
                                     "screenRecord_display_id",
                                     screenRecordConfigDialogDisplayIDInputText
+                                )
+                                configChanged = true
+                            }
+                            if (screenRecordFullRandom != screenRecordConfigDialogFullRandomInputText) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenRecord_full_random",
+                                    screenRecordConfigDialogFullRandomInputText
                                 )
                                 configChanged = true
                             }
