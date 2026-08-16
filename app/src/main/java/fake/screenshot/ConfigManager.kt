@@ -2,29 +2,67 @@ package fake.screenshot
 
 import android.content.Context
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.DataStoreFactory
 import androidx.datastore.preferences.core.*
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.datastore.tink.AeadSerializer
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.crypto.tink.Aead
+import com.google.crypto.tink.RegistryConfiguration
+import com.google.crypto.tink.KeyTemplates
+import com.google.crypto.tink.integration.android.AndroidKeysetManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import java.util.concurrent.ConcurrentHashMap
 
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "app_settings")
+private const val DATA_STORE_FILE_NAME = "encrypted_settings.preferences_pb"
+private const val KEYSTORE_PREF_NAME = "tink_keyset"
+private const val MASTER_KEY_URI = "android-keystore://tink_master_key"
 
 object ConfigManager {
+    private val dataStoreCache = ConcurrentHashMap<Context, DataStore<Preferences>>()
+
+    private fun getEncryptedDataStore(context: Context): DataStore<Preferences> {
+        val appContext = context.applicationContext
+        return dataStoreCache.getOrPut(appContext) {
+            val keysetManager = AndroidKeysetManager.Builder()
+                .withSharedPref(appContext, KEYSTORE_PREF_NAME, "tink_prefs")
+                .withKeyTemplate(KeyTemplates.get("AES256_GCM"))
+                .withMasterKeyUri(MASTER_KEY_URI)
+                .build()
+
+            val aead = keysetManager.keysetHandle.getPrimitive(
+                RegistryConfiguration.get(),
+                Aead::class.java
+            )
+
+            val serializer = AeadSerializer(
+                aead = aead,
+                wrappedSerializer = PreferencesFileSerializer,
+                associatedData = "fake.screenshot".encodeToByteArray()
+            )
+
+            DataStoreFactory.create(
+                serializer = serializer,
+                produceFile = { appContext.filesDir.resolve("datastore/$DATA_STORE_FILE_NAME") }
+            )
+        }
+    }
+
     @Composable
     fun <T> rememberValue(
         context: Context,
         key: String,
         defaultValue: T
-    ): androidx.compose.runtime.State<T> {
+    ): State<T> {
         return getData(context, key, defaultValue)
             .collectAsStateWithLifecycle(initialValue = defaultValue)
     }
 
     fun <T> getData(context: Context, key: String, defaultValue: T): Flow<T> {
-        return context.dataStore.data.map { preferences ->
+        return getEncryptedDataStore(context).data.map { preferences ->
             @Suppress("UNCHECKED_CAST")
             when (defaultValue) {
                 is String -> preferences[stringPreferencesKey(key)] as? T ?: defaultValue
@@ -38,8 +76,7 @@ object ConfigManager {
     }
 
     suspend fun <T> saveData(context: Context, key: String, value: T) {
-        context.dataStore.edit { preferences ->
-            @Suppress("UNCHECKED_CAST") // 加上这个注解消除警告
+        getEncryptedDataStore(context).edit { preferences ->
             when (value) {
                 is String -> preferences[stringPreferencesKey(key)] = value
                 is Int -> preferences[intPreferencesKey(key)] = value
@@ -52,7 +89,7 @@ object ConfigManager {
     }
 
     suspend fun <T> getDataOnce(context: Context, key: String, defaultValue: T): T {
-        return context.dataStore.data.map { preferences ->
+        return getEncryptedDataStore(context).data.map { preferences ->
             @Suppress("UNCHECKED_CAST")
             when (defaultValue) {
                 is String -> preferences[stringPreferencesKey(key)] as? T ?: defaultValue

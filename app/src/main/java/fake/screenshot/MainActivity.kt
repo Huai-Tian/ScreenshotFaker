@@ -47,6 +47,7 @@ import kotlin.concurrent.Volatile
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.google.crypto.tink.aead.AeadConfig
 import kotlinx.coroutines.runBlocking
 
 class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
@@ -223,6 +224,7 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
     override fun onCreate() {
         super.onCreate()
         XposedServiceHelper.registerListener(this)
+        AeadConfig.register()
     }
 
     interface ServiceStateListener {
