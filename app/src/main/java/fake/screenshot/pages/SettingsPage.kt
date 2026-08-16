@@ -148,7 +148,7 @@ fun SettingsCompose(navController: NavController) {
                             scope.launch {
                                 ConfigManager.saveData(context, "enable_flag_secure", it)
                                 val activity = context as? Activity
-                                if (enableFlagSecure) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                                if (it) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                                 else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                             }
                         }
