@@ -30,6 +30,11 @@ class ScreenRecordTileService : TileService() {
                     key = "screenRecord_duration",
                     defaultValue = "180"
                 )
+                val prefix = ConfigManager.getDataOnce(
+                    context = this@ScreenRecordTileService,
+                    key = "screenRecord_prefix",
+                    defaultValue = ""
+                )
                 val suffix = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
                     key = "screenRecord_suffix",
@@ -50,16 +55,21 @@ class ScreenRecordTileService : TileService() {
                     key = "screenRecord_resolution",
                     defaultValue = ""
                 ).let { if (it.isEmpty()) "" else "--size $it" }
-                val bugreport = ConfigManager.getDataOnce(
+                val customPrefix = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
-                    key = "screenRecord_bugreport",
+                    key = "screenRecord_custom_prefix",
                     defaultValue = false
-                ).let { if (it) "--bugreport" else "" }
+                )
                 val fullRandom = ConfigManager.getDataOnce(
                     context = this@ScreenRecordTileService,
                     key = "screenRecord_full_random",
                     defaultValue = false
                 )
+                val bugreport = ConfigManager.getDataOnce(
+                    context = this@ScreenRecordTileService,
+                    key = "screenRecord_bugreport",
+                    defaultValue = false
+                ).let { if (it) "--bugreport" else "" }
                 with(File(savePath)) {
                     if (!(exists() && isDirectory)) mkdirs()
                 }
@@ -71,10 +81,14 @@ class ScreenRecordTileService : TileService() {
                     resolution,
                     bugreport,
                     "${savePath}/${
-                        if (fullRandom) {
-                            Auxiliary.getRandomStringEx((1..12).random())
-                        } else {
-                            "${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
+                        when {
+                            fullRandom -> Auxiliary.getRandomStringEx((1..12).random())
+                            customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
+                            else -> "${Auxiliary.getCurrentDateString()}_${
+                                Auxiliary.getRandomString(
+                                    4
+                                )
+                            }$suffix"
                         }
                     }"
                 ).filter { it.isNotEmpty() }

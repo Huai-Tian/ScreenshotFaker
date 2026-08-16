@@ -25,6 +25,11 @@ class ScreenshotTileService : TileService() {
                     key = "screenshot_save_path",
                     defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
                 )
+                val prefix = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "screenshot_prefix",
+                    defaultValue = ""
+                )
                 val suffix = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
                     key = "screenshot_suffix",
@@ -35,6 +40,11 @@ class ScreenshotTileService : TileService() {
                     key = "screenshot_display_id",
                     defaultValue = ""
                 ).let { if (it.isEmpty()) "" else "-d $it" }
+                val customPrefix = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "screenshot_custom_prefix",
+                    defaultValue = false
+                )
                 val fullRandom = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
                     key = "screenshot_full_random",
@@ -48,10 +58,14 @@ class ScreenshotTileService : TileService() {
                     "-p",
                     displayID,
                     "${savePath}/${
-                        if (fullRandom) {
-                            Auxiliary.getRandomStringEx((1..12).random())
-                        } else {
-                            "${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
+                        when {
+                            fullRandom -> Auxiliary.getRandomStringEx((1..12).random())
+                            customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
+                            else -> "${Auxiliary.getCurrentDateString()}_${
+                                Auxiliary.getRandomString(
+                                    4
+                                )
+                            }$suffix"
                         }
                     }"
                 ).filter { it.isNotEmpty() }
