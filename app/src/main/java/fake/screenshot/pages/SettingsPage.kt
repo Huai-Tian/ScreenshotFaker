@@ -20,9 +20,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
@@ -300,7 +303,7 @@ fun SettingsCompose(navController: NavController) {
             }
         }
         if (daemonConfigDialog) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { daemonConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_daemon)) // 标题
@@ -465,7 +468,6 @@ fun SettingsCompose(navController: NavController) {
     }
 }
 
-// 通用卡片容器：包裹单个设置项
 @Composable
 fun CommonCard(content: @Composable () -> Unit) {
     Card(
@@ -481,7 +483,6 @@ fun CommonCard(content: @Composable () -> Unit) {
     }
 }
 
-// 列表项（带箭头或文本尾部）
 @Composable
 fun PreferenceItemEx(
     icon: ImageVector,
@@ -583,5 +584,67 @@ fun TwoStatePreference(
                 uncheckedTrackColor = Color.Gray.copy(alpha = 0.5f)
             )
         )
+    }
+}
+
+@Composable
+fun CenteredAlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    dismissButton: @Composable (() -> Unit)? = null,
+    title: @Composable (() -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+    shape: Shape = RoundedCornerShape(28.dp),
+    containerColor: Color = MaterialTheme.colorScheme.surface
+) {
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            shape = shape,
+            color = containerColor,
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp)
+            ) {
+                if (title != null) {
+                    ProvideTextStyle(value = MaterialTheme.typography.titleLarge) {
+                        title()
+                    }
+                    Spacer(modifier = Modifier.height(if (text != null) 16.dp else 24.dp))
+                }
+                if (text != null) {
+                    ProvideTextStyle(value = MaterialTheme.typography.bodyMedium) {
+                        text()
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (dismissButton != null) {
+                        Box(
+                            modifier = Modifier.weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            dismissButton()
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        confirmButton()
+                    }
+                }
+            }
+        }
     }
 }

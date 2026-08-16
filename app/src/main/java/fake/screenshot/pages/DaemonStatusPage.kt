@@ -150,7 +150,7 @@ fun DaemonStatusCompose() {
             }
         }
         if (detachWarning) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { detachWarning = false },
                 title = {
                     Text(text = stringResource(R.string.warning)) // 标题

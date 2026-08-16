@@ -427,7 +427,7 @@ fun ExtensionCompose() {
             }
         }
         if (screenshotConfigDialog) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { screenshotConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_stealth_screenshot)) // 标题
@@ -572,7 +572,7 @@ fun ExtensionCompose() {
             )
         }
         if (screenRecordConfigDialog) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { screenRecordConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_stealth_screenRecord)) // 标题
@@ -791,7 +791,7 @@ fun ExtensionCompose() {
             )
         }
         if (screenShareConfigDialog) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { screenShareConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_stealth_screenShare))
@@ -1087,7 +1087,7 @@ fun ExtensionCompose() {
             )
         }
         if (sshTunnelConfigDialog) {
-            AlertDialog(
+            CenteredAlertDialog(
                 onDismissRequest = { sshTunnelConfigDialog = false },
                 title = {
                     Text(text = stringResource(R.string.config_ssh_tunnel))
