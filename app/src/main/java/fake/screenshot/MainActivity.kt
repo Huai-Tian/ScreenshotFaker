@@ -71,14 +71,16 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.addBinderDeadListener(deadListener)
         Shizuku.addBinderReceivedListener(receivedListener)
         DaemonManager.init(applicationContext)
-        runBlocking{
-            val enableFlagSecure = ConfigManager.getDataOnce(applicationContext,"enable_flag_secure",true)
+        runBlocking {
+            val enableFlagSecure =
+                ConfigManager.getDataOnce(applicationContext, "enable_flag_secure", true)
             if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
         WindowCompat.getInsetsController(window, window.decorView).let {
             it.hide(WindowInsetsCompat.Type.statusBars())
-            it.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            it.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
         setContent {
             val navController = rememberNavController()
