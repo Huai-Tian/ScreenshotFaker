@@ -46,7 +46,7 @@ object DaemonManager {
         return if (cachedPassword == password && cachedKey != null) {
             cachedKey!!
         } else {
-            val key = Auxiliary.deriveKey(password)
+            val key = EncryptManager.deriveKey(password)
             cachedPassword = password
             cachedKey = key
             key
@@ -121,7 +121,7 @@ object DaemonManager {
                         // 1. 构造并发送加密命令
                         val timestamp = Auxiliary.getCurrentTimestampSeconds()
                         val plaintext = "$command\u001C$timestamp"
-                        val (nonce, ciphertext) = Auxiliary.encryptData(key, plaintext)
+                        val (nonce, ciphertext) = EncryptManager.encryptByPassword(key, plaintext)
 
                         val out = DataOutputStream(socket.getOutputStream())
                         out.writeInt(ciphertext.size + nonce.size)
@@ -139,7 +139,7 @@ object DaemonManager {
                         // 3. 解密响应
                         val respNonce = respData.sliceArray(0 until 12)
                         val respCiphertext = respData.sliceArray(12 until respData.size)
-                        val plainResponse = Auxiliary.decryptData(key, respNonce, respCiphertext)
+                        val plainResponse = EncryptManager.decryptByPassword(key, respNonce, respCiphertext)
 
                         // 4. 如果是错误响应，返回 null 以便重试
                         if (plainResponse == "Decryption failed") {
