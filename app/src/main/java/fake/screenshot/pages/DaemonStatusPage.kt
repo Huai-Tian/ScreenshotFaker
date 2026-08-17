@@ -163,8 +163,8 @@ fun DaemonStatusCompose() {
                         onClick = {
                             scope.launch {
                                 DaemonManager.detachDaemon()
-                                detachWarning = false
                             }
+                            detachWarning = false
                         },
                     ) {
                         Text(stringResource(R.string.Confirm))
