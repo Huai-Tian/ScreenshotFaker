@@ -1,8 +1,14 @@
 package fake.screenshot.pages
 
+import android.content.Intent
+import android.net.Uri
 import java.math.BigDecimal
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
@@ -17,12 +23,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.core.net.toUri
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
+import fake.screenshot.EncryptManager
 import fake.screenshot.R
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -302,6 +312,68 @@ fun ExtensionCompose() {
             addressValid && portValid && nameValid && sshTunnelConfigDialogUserPassword.isNotBlank()
         }
     }
+    //File Encrypt/Decrypt
+    var externalStorageRequireDialog by remember { mutableStateOf(false) }
+    var fileEncryptionWarnings by remember { mutableStateOf(false) }
+    var selectedUris by remember { mutableStateOf(emptyList<Uri>()) }
+    var showOperationDialog by remember { mutableStateOf(false) }
+    var isProcessing by remember { mutableStateOf(false) }
+    val pickFilesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            selectedUris = uris
+            showOperationDialog = true
+        }
+    }
+
+    suspend fun processFiles(uris: List<Uri>, encrypt: Boolean) =
+        withContext(Dispatchers.IO) {
+            val resolver = context.contentResolver
+            var successCount = 0
+            var failCount = 0
+            uris.forEach { uri ->
+                try {
+                    val originalBytes = resolver.openInputStream(uri)?.readBytes() ?: run {
+                        failCount++
+                        return@forEach
+                    }
+                    val processedBytes = if (encrypt) {
+                        val (nonce, ciphertext) = EncryptManager.encryptByKeystore(originalBytes)
+                        nonce + ciphertext
+                    } else {
+                        if (originalBytes.size < 12) {
+                            failCount++
+                            return@forEach
+                        }
+                        val nonce = originalBytes.copyOfRange(0, 12)
+                        val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
+                        EncryptManager.decryptByKeystore(nonce, ciphertext)
+                    }
+                    resolver.openOutputStream(uri, "rwt")?.use { outputStream ->
+                        outputStream.write(processedBytes)
+                        successCount++
+                    } ?: run {
+                        failCount++
+                    }
+                } catch (_: Exception) {
+                    failCount++
+                }
+            }
+            withContext(Dispatchers.Main) {
+                when {
+                    successCount == uris.size && successCount > 0 -> {
+                        Toast.makeText(context, R.string.success, Toast.LENGTH_SHORT).show()
+                    }
+
+                    successCount > 0 -> {
+                        Toast.makeText(context, R.string.part_success, Toast.LENGTH_SHORT).show()
+                    }
+
+                    else -> Toast.makeText(context, R.string.failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -421,6 +493,28 @@ fun ExtensionCompose() {
                             sshTunnelConfigDialogUserName = sshTunnelUserName
                             sshTunnelConfigDialogUserPassword = sshTunnelUserPassword
                             sshTunnelConfigDialog = true
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.LockReset,
+                        title = stringResource(R.string.file_encryption_and_decryption),
+                        subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            if (Environment.isExternalStorageManager()) {
+                                fileEncryptionWarnings = true
+                            } else {
+                                externalStorageRequireDialog = true
+                            }
                         }
                     )
                 }
@@ -1203,6 +1297,102 @@ fun ExtensionCompose() {
                         Text(stringResource(R.string.Cancel))
                     }
                 },
+            )
+        }
+        if (externalStorageRequireDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { externalStorageRequireDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.tips))
+                },
+                text = {
+                    Text(stringResource(R.string.full_storage_access_required))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent =
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = "package:${context.packageName}".toUri()
+                                }
+                            context.startActivity(intent)
+                            externalStorageRequireDialog = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.go_to_settings))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { externalStorageRequireDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (fileEncryptionWarnings) {
+            CenteredAlertDialog(
+                onDismissRequest = { },
+                title = {
+                    Text(text = stringResource(R.string.warning))
+                },
+                text = {
+                    Text(stringResource(R.string.hardware_encryption_warnings))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            fileEncryptionWarnings = false
+                            pickFilesLauncher.launch(arrayOf("*/*"))
+                        },
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { fileEncryptionWarnings = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (showOperationDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = {
+                    showOperationDialog = false
+                    selectedUris = emptyList()
+                },
+                title = { Text(stringResource(R.string.operation_selection)) },
+                text = { Text(stringResource(R.string.select_encrypt_or_decrypt)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showOperationDialog = false
+                            scope.launch {
+                                isProcessing = true
+                                processFiles(selectedUris, encrypt = true)
+                                isProcessing = false
+                                selectedUris = emptyList()
+                            }
+                        }
+                    ) {
+                        Text(stringResource(R.string.encrypt))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showOperationDialog = false
+                            scope.launch {
+                                isProcessing = true
+                                processFiles(selectedUris, encrypt = false)
+                                isProcessing = false
+                                selectedUris = emptyList()
+                            }
+                        }
+                    ) {
+                        Text(stringResource(R.string.decrypt))
+                    }
+                }
             )
         }
     }

@@ -66,7 +66,6 @@ object EncryptManager {
         return Pair(cipher.iv, ciphertext)
     }
 
-    @Suppress("unused")
     fun decryptByKeystore(nonce: ByteArray, ciphertext: ByteArray): ByteArray {
         val key = getOrCreateHardwareKey()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
@@ -90,6 +89,7 @@ object EncryptManager {
         }
     }
 
+    @Suppress("unused")
     fun decryptFileByKeystore(inputFile: File, outputFile: File) {
         val key = getOrCreateHardwareKey()
         inputFile.inputStream().use { input ->

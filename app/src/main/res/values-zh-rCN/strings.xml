@@ -18,6 +18,8 @@
     <string name="system_version">系统版本</string>
     <string name="loading">获取中</string>
     <string name="detach_description">这项操作将会让守护进程关闭通信端口，无法通过端口是否开放判断进程的存活。这可能有助于隐藏性，但是您再也无法与它通信并查看其状态。</string>
+    <string name="part_success">部分成功</string>
+    <string name="failed">失败</string>
     <string name="warning">警告</string>
     <string name="check_update">检查更新</string>
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
@@ -39,6 +41,7 @@
     <string name="daemon_connect_failed">守护进程未运行或无法连接</string>
     <string name="custom_file_prefix">自定义文件名前缀</string>
     <string name="full_random_file_name">文件名全随机</string>
+    <string name="operation_selection">操作选择</string>
     <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击配置无痕截图</string>
@@ -69,6 +72,10 @@
     <string name="click_to_config_ssh_tunnel">点击配置 SSH 隧道</string>
     <string name="config_ssh_tunnel">配置 SSH 隧道</string>
     <string name="ssh_server_user_password">用户密码</string>
+    <string name="file_encryption_and_decryption">文件加解密</string>
+    <string name="click_to_encrypt_or_decrypt_files">点击加密或解密文件</string>
+    <string name="select_encrypt_or_decrypt">选择加密或解密</string>
+    <string name="decrypt">解密</string>
     <string name="default_if_empty">留空为默认</string>
     <string name="disable_if_empty">留空为禁用</string>
     <string name="stealth_file_prefix">文件名前缀</string>
@@ -85,7 +92,7 @@
     <string name="encrypt_outputs">文件加密</string>
     <string name="auto_encrypt_outputs">截录屏后自动加密输出的文件</string>
     <string name="full_storage_access_required">此功能需要 所有文件访问权限 用于加解密文件</string>
-    <string name="hardware_encryption_warnings">此功能基于硬件加密。卸载本软件前，请务必先解密所有文件，否则文件将永久无法解密，即使重新安装本软件也无法恢复。</string>
+    <string name="hardware_encryption_warnings">此功能基于硬件加解密。卸载本软件前，请务必先解密所有已加密的文件，否则文件将永久无法解密，即使重新安装本软件也无法恢复。</string>
     <string name="start_daemon">运行守护进程</string>
     <string name="running">运行中</string>
     <string name="click_to_view_daemon_status">点击查看守护进程状态</string>
@@ -104,4 +111,6 @@
     <string name="ssh_server_port">SSH 服务端口</string>
     <string name="ssh_server_user_name">用户名</string>
     <string name="enable_page_protection">启用页面保护</string>
+    <string name="encrypt">加密</string>
+    <string name="success">成功</string>
 </resources>

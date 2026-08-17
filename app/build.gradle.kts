@@ -83,6 +83,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.datastore.tink)
     implementation(libs.tink.android)
+    implementation(libs.androidx.documentfile)
     implementation(libs.jsch)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.api)
