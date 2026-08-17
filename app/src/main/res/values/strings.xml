@@ -26,7 +26,7 @@
     <string name="protect_pages_from_screenshotting">Protect pages from screenshotting</string>
     <string name="encrypt_outputs">Encrypt outputs</string>
     <string name="auto_encrypt_outputs">Automatically encrypt outputs after screenshotting or recording</string>
-    <string name="full_storage_access_required">This function requires full storage access to encrypt/decrypt files</string>
+    <string name="full_storage_access_required">Full storage access is required for this feature to encrypt and decrypt files.</string>
     <string name="hardware_encryption_warnings">This feature uses hardware-based encryption. If you uninstall this software without decrypting your files first, they will be permanently undecryptable — even if you reinstall the software.</string>
     <string name="start_daemon">Start daemon</string>
     <string name="start_daemon_to_work_background">Start a daemon to work background</string>

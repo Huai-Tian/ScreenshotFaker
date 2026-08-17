@@ -84,7 +84,7 @@
     <string name="protect_pages_from_screenshotting">软件页面不允许截屏</string>
     <string name="encrypt_outputs">文件加密</string>
     <string name="auto_encrypt_outputs">截录屏后自动加密输出的文件</string>
-    <string name="full_storage_access_required">此功能需要全部文件访问权限用于加解密文件</string>
+    <string name="full_storage_access_required">此功能需要 所有文件访问权限 用于加解密文件</string>
     <string name="hardware_encryption_warnings">此功能基于硬件加密。卸载本软件前，请务必先解密所有文件，否则文件将永久无法解密，即使重新安装本软件也无法恢复。</string>
     <string name="start_daemon">运行守护进程</string>
     <string name="running">运行中</string>
