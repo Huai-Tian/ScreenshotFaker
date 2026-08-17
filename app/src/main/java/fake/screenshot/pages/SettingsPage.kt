@@ -110,6 +110,7 @@ fun SettingsCompose(navController: NavController) {
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
+    var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
     LaunchedEffect(daemonSocketPort) {
         isDaemonRunning = DaemonManager.isDaemonRunning()
@@ -173,10 +174,12 @@ fun SettingsCompose(navController: NavController) {
                         checked = encryptOutputs,
                         onCheckedChange = {
                             scope.launch {
-                                if (it && !Environment.isExternalStorageManager()) {
-                                    externalStorageRequireDialog = true
-                                } else {
-                                    ConfigManager.saveData(context, "encrypt_outputs", it)
+                                when {
+                                    !it -> ConfigManager.saveData(context, "encrypt_outputs", false)
+                                    Environment.isExternalStorageManager() -> fileEncryptionWarnings =
+                                        true
+
+                                    else -> externalStorageRequireDialog = true
                                 }
                             }
                         }
@@ -515,6 +518,34 @@ fun SettingsCompose(navController: NavController) {
                 },
                 dismissButton = {
                     TextButton(onClick = { externalStorageRequireDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (fileEncryptionWarnings) {
+            CenteredAlertDialog(
+                onDismissRequest = { },
+                title = {
+                    Text(text = stringResource(R.string.warning))
+                },
+                text = {
+                    Text(stringResource(R.string.hardware_encryption_warnings))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                ConfigManager.saveData(context, "encrypt_outputs", true)
+                            }
+                            fileEncryptionWarnings = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { fileEncryptionWarnings = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
