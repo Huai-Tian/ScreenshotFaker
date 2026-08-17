@@ -23,7 +23,7 @@ android {
     }
     defaultConfig {
         applicationId = "fake.screenshot"
-        minSdk = 29
+        minSdk = 30
         //noinspection OldTargetApi
         targetSdk = 36
         versionCode = 1

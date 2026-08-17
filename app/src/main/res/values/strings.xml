@@ -1,7 +1,7 @@
 <resources>
     <!--HomePage-->
     <string name="app_name">ScreenshotFaker</string>
-    <string name="xposed_description">Replace Screenshots with customized picture</string>
+    <string name="application_description">Preventing untrusted apps from maliciously capturing your sensitive content</string>
     <string name="settings">Settings</string>
     <string name="gallery">Gallery</string>
     <string name="application">Application</string>
@@ -19,12 +19,14 @@
     <string name="daemon">Daemon</string>
     <string name="loading">Loading</string>
     <string name="detach_description">This operation will cause the daemon to close its communication port, making it impossible to determine whether the process is alive by checking if the port is open. This may aid in hiding the process, but you will no longer be able to communicate with it or view its status.</string>
-    <string name="warning">Warning</string>
     <!--SettingPage-->
     <string name="check_update">Check for update</string>
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
     <string name="enable_page_protection">Enable page protection</string>
     <string name="protect_pages_from_screenshotting">Protect pages from screenshotting</string>
+    <string name="encrypt_outputs">Encrypt outputs</string>
+    <string name="auto_encrypt_outputs">Automatically encrypt outputs after screenshotting or recording</string>
+    <string name="full_storage_access_required">This function requires full storage access to encrypt/decrypt files</string>
     <string name="start_daemon">Start daemon</string>
     <string name="start_daemon_to_work_background">Start a daemon to work background</string>
     <string name="view_daemon_status">View daemon working status</string>
@@ -102,6 +104,9 @@
     <string name="screencasting">Screencasting</string>
     <string name="initializing">Initializing</string>
     <!--Common-->
+    <string name="warning">Warning</string>
+    <string name="tips">Tips</string>
+    <string name="go_to_settings">Go to Settings</string>
     <string name="Confirm">Confirm</string>
     <string name="Cancel">Cancel</string>
     <string name="not_running">Not running</string>

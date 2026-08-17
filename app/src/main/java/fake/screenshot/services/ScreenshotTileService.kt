@@ -4,6 +4,7 @@ import android.os.Environment
 import android.service.quicksettings.TileService
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
+import fake.screenshot.EncryptManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -50,26 +51,44 @@ class ScreenshotTileService : TileService() {
                     key = "screenshot_full_random",
                     defaultValue = false
                 )
+                val encryptOutputs = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "encrypt_outputs",
+                    defaultValue = false
+                )
                 with(File(savePath)) {
-                    if (!(exists() && isDirectory)) mkdirs()
+                    if (!exists()) mkdirs()
                 }
+                val filePath = "${savePath}/${
+                    when {
+                        fullRandom -> Auxiliary.getRandomStringEx((1..12).random())
+                        customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
+                        else -> "${Auxiliary.getCurrentDateString()}_${
+                            Auxiliary.getRandomString(
+                                4
+                            )
+                        }$suffix"
+                    }
+                }"
                 val args = listOf(
                     "screencap",
                     "-p",
                     displayID,
-                    "${savePath}/${
-                        when {
-                            fullRandom -> Auxiliary.getRandomStringEx((1..12).random())
-                            customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
-                            else -> "${Auxiliary.getCurrentDateString()}_${
-                                Auxiliary.getRandomString(
-                                    4
-                                )
-                            }$suffix"
-                        }
-                    }"
+                    filePath
                 ).filter { it.isNotEmpty() }
                 Auxiliary.exec(args.joinToString(" "))
+                if (encryptOutputs) {
+                    try {
+                        File(filePath).apply {
+                            File("$path.enc").also {
+                                EncryptManager.encryptFileByKeystore(this, it)
+                                delete()
+                                it.renameTo(this)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
             }
         }
         clicked = false

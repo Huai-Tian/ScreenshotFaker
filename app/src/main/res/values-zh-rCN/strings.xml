@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">截图伪装</string>
-    <string name="xposed_description">将屏幕截图替换为自定义图片</string>
+    <string name="application_description">防止个人隐私被不信任的应用恶意获取</string>
     <string name="settings">设置</string>
     <string name="gallery">图库</string>
     <string name="application">应用</string>
@@ -75,11 +75,16 @@
     <string name="stealth_file_suffix">文件后缀名</string>
     <string name="screencasting">屏幕共享中</string>
     <string name="initializing">初始化中</string>
+    <string name="tips">提示</string>
+    <string name="go_to_settings">跳转到设置</string>
     <string name="Confirm">确定</string>
     <string name="Cancel">取消</string>
     <string name="daemon">守护进程</string>
     <string name="not_running">未运行</string>
     <string name="protect_pages_from_screenshotting">软件页面不允许截屏</string>
+    <string name="encrypt_outputs">文件加密</string>
+    <string name="auto_encrypt_outputs">截录屏后自动加密输出的文件</string>
+    <string name="full_storage_access_required">此功能需要全部文件访问权限用于加解密文件</string>
     <string name="start_daemon">运行守护进程</string>
     <string name="running">运行中</string>
     <string name="click_to_view_daemon_status">点击查看守护进程状态</string>

@@ -1,6 +1,9 @@
 package fake.screenshot.pages
 
 import android.app.Activity
+import android.content.Intent
+import android.os.Environment
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -32,6 +35,7 @@ import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
 import fake.screenshot.R
 import kotlinx.coroutines.launch
+import androidx.core.net.toUri
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,6 +45,7 @@ fun SettingsCompose(navController: NavController) {
     val scope = rememberCoroutineScope()
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
+    val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val daemonSocketPort by ConfigManager.rememberValue(
         context,
@@ -104,6 +109,7 @@ fun SettingsCompose(navController: NavController) {
         }
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
+    var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
     LaunchedEffect(daemonSocketPort) {
         isDaemonRunning = DaemonManager.isDaemonRunning()
@@ -153,6 +159,25 @@ fun SettingsCompose(navController: NavController) {
                                 val activity = context as? Activity
                                 if (it) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                                 else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.Lock,
+                        title = stringResource(R.string.encrypt_outputs),
+                        subtitle = stringResource(R.string.auto_encrypt_outputs),
+                        checked = encryptOutputs,
+                        onCheckedChange = {
+                            scope.launch {
+                                if (it && !Environment.isExternalStorageManager()) {
+                                    externalStorageRequireDialog = true
+                                } else {
+                                    ConfigManager.saveData(context, "encrypt_outputs", it)
+                                }
                             }
                         }
                     )
@@ -460,6 +485,36 @@ fun SettingsCompose(navController: NavController) {
                 },
                 dismissButton = {
                     TextButton(onClick = { daemonConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (externalStorageRequireDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { externalStorageRequireDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.tips))
+                },
+                text = {
+                    Text(stringResource(R.string.full_storage_access_required))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent =
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = "package:${context.packageName}".toUri()
+                                }
+                            context.startActivity(intent)
+                            externalStorageRequireDialog = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.go_to_settings))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { externalStorageRequireDialog = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
