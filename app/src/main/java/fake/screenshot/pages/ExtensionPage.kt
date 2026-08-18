@@ -313,6 +313,12 @@ fun ExtensionCompose() {
         }
     }
     //File Encrypt/Decrypt
+    val daemonVerificationPassword by ConfigManager.rememberValue(
+        context,
+        "daemon_verification_password",
+        "ScreenshotFaker"
+    )
+    var daemonVerificationPasswordInputText by remember { mutableStateOf(daemonVerificationPassword) }
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var selectedUris by remember { mutableStateOf(emptyList<Uri>()) }
@@ -595,6 +601,7 @@ fun ExtensionCompose() {
                         },
                         onClick = {
                             if (Environment.isExternalStorageManager()) {
+                                daemonVerificationPasswordInputText = daemonVerificationPassword
                                 pickFilesForPasswordLauncher.launch(arrayOf("*/*"))
                             } else {
                                 externalStorageRequireDialog = true
@@ -1480,7 +1487,6 @@ fun ExtensionCompose() {
             )
         }
         if (showPasswordOperationDialog) {
-            var passwordInputText by remember { mutableStateOf("ScreenshotFaker") }
             CenteredAlertDialog(
                 onDismissRequest = {
                     showPasswordOperationDialog = false
@@ -1489,8 +1495,8 @@ fun ExtensionCompose() {
                 title = { Text(stringResource(R.string.operation_selection)) },
                 text = {
                     OutlinedTextField(
-                        value = passwordInputText,
-                        onValueChange = { passwordInputText = it },
+                        value = daemonVerificationPasswordInputText,
+                        onValueChange = { daemonVerificationPasswordInputText = it },
                         label = { Text(stringResource(R.string.verification_password)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),
@@ -1505,14 +1511,14 @@ fun ExtensionCompose() {
                                 isProcessing = true
                                 processFilesByPassword(
                                     selectedUris,
-                                    passwordInputText,
+                                    daemonVerificationPasswordInputText,
                                     encrypt = true
                                 )
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
                         },
-                        enabled = passwordInputText.isNotBlank()
+                        enabled = daemonVerificationPasswordInputText.isNotBlank()
                     ) {
                         Text(stringResource(R.string.encrypt))
                     }
@@ -1525,14 +1531,14 @@ fun ExtensionCompose() {
                                 isProcessing = true
                                 processFilesByPassword(
                                     selectedUris,
-                                    passwordInputText,
+                                    daemonVerificationPasswordInputText,
                                     encrypt = false
                                 )
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
                         },
-                        enabled = passwordInputText.isNotBlank()
+                        enabled = daemonVerificationPasswordInputText.isNotBlank()
 
                     ) {
                         Text(stringResource(R.string.decrypt))
