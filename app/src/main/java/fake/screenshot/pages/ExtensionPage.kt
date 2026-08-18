@@ -316,18 +316,27 @@ fun ExtensionCompose() {
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var selectedUris by remember { mutableStateOf(emptyList<Uri>()) }
-    var showOperationDialog by remember { mutableStateOf(false) }
+    var showKeystoreOperationDialog by remember { mutableStateOf(false) }
+    var showPasswordOperationDialog by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
-    val pickFilesLauncher = rememberLauncherForActivityResult(
+    val pickFilesForKeystoreLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
             selectedUris = uris
-            showOperationDialog = true
+            showKeystoreOperationDialog = true
+        }
+    }
+    val pickFilesForPasswordLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            selectedUris = uris
+            showPasswordOperationDialog = true
         }
     }
 
-    suspend fun processFiles(uris: List<Uri>, encrypt: Boolean) =
+    suspend fun processFilesByKeystore(uris: List<Uri>, encrypt: Boolean) =
         withContext(Dispatchers.IO) {
             val resolver = context.contentResolver
             var successCount = 0
@@ -371,6 +380,59 @@ fun ExtensionCompose() {
                     }
 
                     else -> Toast.makeText(context, R.string.failed, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+    suspend fun processFilesByPassword(uris: List<Uri>, password: String, encrypt: Boolean) =
+        withContext(Dispatchers.IO) {
+            val resolver = context.contentResolver
+            var successCount = 0
+            var failCount = 0
+            val key = EncryptManager.deriveKey(password)
+
+            uris.forEach { uri ->
+                try {
+                    val originalBytes = resolver.openInputStream(uri)?.readBytes() ?: run {
+                        failCount++
+                        return@forEach
+                    }
+                    val processedBytes = if (encrypt) {
+                        val (nonce, ciphertext) = EncryptManager.encryptBytesByPassword(
+                            key,
+                            originalBytes
+                        )
+                        nonce + ciphertext
+                    } else {
+                        if (originalBytes.size < 12) {
+                            failCount++
+                            return@forEach
+                        }
+                        val nonce = originalBytes.copyOfRange(0, 12)
+                        val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
+                        EncryptManager.decryptBytesByPassword(key, nonce, ciphertext)
+                    }
+                    resolver.openOutputStream(uri, "rwt")?.use { outputStream ->
+                        outputStream.write(processedBytes)
+                        successCount++
+                    } ?: run {
+                        failCount++
+                    }
+                } catch (_: Exception) {
+                    failCount++
+                }
+            }
+
+            withContext(Dispatchers.Main) {
+                when {
+                    successCount == uris.size && successCount > 0 ->
+                        Toast.makeText(context, R.string.success, Toast.LENGTH_SHORT).show()
+
+                    successCount > 0 ->
+                        Toast.makeText(context, R.string.part_success, Toast.LENGTH_SHORT).show()
+
+                    else ->
+                        Toast.makeText(context, R.string.failed, Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -501,7 +563,7 @@ fun ExtensionCompose() {
                 CommonCard {
                     PreferenceItemEx(
                         icon = Icons.Default.LockReset,
-                        title = stringResource(R.string.file_encryption_and_decryption),
+                        title = stringResource(R.string.hardware_file_encryption_and_decryption),
                         subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
                         trailingContent = {
                             Icon(
@@ -512,6 +574,28 @@ fun ExtensionCompose() {
                         onClick = {
                             if (Environment.isExternalStorageManager()) {
                                 fileEncryptionWarnings = true
+                            } else {
+                                externalStorageRequireDialog = true
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.LockReset,
+                        title = stringResource(R.string.software_file_encryption_and_decryption),
+                        subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            if (Environment.isExternalStorageManager()) {
+                                pickFilesForPasswordLauncher.launch(arrayOf("*/*"))
                             } else {
                                 externalStorageRequireDialog = true
                             }
@@ -1342,7 +1426,7 @@ fun ExtensionCompose() {
                     TextButton(
                         onClick = {
                             fileEncryptionWarnings = false
-                            pickFilesLauncher.launch(arrayOf("*/*"))
+                            pickFilesForKeystoreLauncher.launch(arrayOf("*/*"))
                         },
                     ) {
                         Text(stringResource(R.string.Confirm))
@@ -1355,10 +1439,10 @@ fun ExtensionCompose() {
                 }
             )
         }
-        if (showOperationDialog) {
+        if (showKeystoreOperationDialog) {
             CenteredAlertDialog(
                 onDismissRequest = {
-                    showOperationDialog = false
+                    showKeystoreOperationDialog = false
                     selectedUris = emptyList()
                 },
                 title = { Text(stringResource(R.string.operation_selection)) },
@@ -1366,10 +1450,10 @@ fun ExtensionCompose() {
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            showOperationDialog = false
+                            showKeystoreOperationDialog = false
                             scope.launch {
                                 isProcessing = true
-                                processFiles(selectedUris, encrypt = true)
+                                processFilesByKeystore(selectedUris, encrypt = true)
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
@@ -1381,14 +1465,75 @@ fun ExtensionCompose() {
                 dismissButton = {
                     TextButton(
                         onClick = {
-                            showOperationDialog = false
+                            showKeystoreOperationDialog = false
                             scope.launch {
                                 isProcessing = true
-                                processFiles(selectedUris, encrypt = false)
+                                processFilesByKeystore(selectedUris, encrypt = false)
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
                         }
+                    ) {
+                        Text(stringResource(R.string.decrypt))
+                    }
+                }
+            )
+        }
+        if (showPasswordOperationDialog) {
+            var passwordInputText by remember { mutableStateOf("ScreenshotFaker") }
+            CenteredAlertDialog(
+                onDismissRequest = {
+                    showPasswordOperationDialog = false
+                    selectedUris = emptyList()
+                },
+                title = { Text(stringResource(R.string.operation_selection)) },
+                text = {
+                    OutlinedTextField(
+                        value = passwordInputText,
+                        onValueChange = { passwordInputText = it },
+                        label = { Text(stringResource(R.string.verification_password)) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showPasswordOperationDialog = false
+                            scope.launch {
+                                isProcessing = true
+                                processFilesByPassword(
+                                    selectedUris,
+                                    passwordInputText,
+                                    encrypt = true
+                                )
+                                isProcessing = false
+                                selectedUris = emptyList()
+                            }
+                        },
+                        enabled = passwordInputText.isNotBlank()
+                    ) {
+                        Text(stringResource(R.string.encrypt))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showPasswordOperationDialog = false
+                            scope.launch {
+                                isProcessing = true
+                                processFilesByPassword(
+                                    selectedUris,
+                                    passwordInputText,
+                                    encrypt = false
+                                )
+                                isProcessing = false
+                                selectedUris = emptyList()
+                            }
+                        },
+                        enabled = passwordInputText.isNotBlank()
+
                     ) {
                         Text(stringResource(R.string.decrypt))
                     }

@@ -56,7 +56,25 @@ object EncryptManager {
         return String(plain, Charsets.UTF_8)
     }
 
-    @Suppress("unused")
+    fun encryptBytesByPassword(key: SecretKeySpec, data: ByteArray): Pair<ByteArray, ByteArray> {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val nonce = ByteArray(NONCE_LENGTH)
+        SecureRandom().nextBytes(nonce)
+        cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(TAG_LENGTH, nonce))
+        val ciphertext = cipher.doFinal(data)
+        return Pair(nonce, ciphertext)
+    }
+
+    fun decryptBytesByPassword(
+        key: SecretKeySpec,
+        nonce: ByteArray,
+        ciphertextWithTag: ByteArray
+    ): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_LENGTH, nonce))
+        return cipher.doFinal(ciphertextWithTag)
+    }
+
     fun encryptByKeystore(data: ByteArray): Pair<ByteArray, ByteArray> {
         val key = getOrCreateHardwareKey()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {

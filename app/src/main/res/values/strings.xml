@@ -95,7 +95,8 @@
     <string name="ssh_server_user_name">User name</string>
     <string name="ssh_server_user_password">SSH server user password</string>
     <!--File Encrypt/Decrypt-->
-    <string name="file_encryption_and_decryption">File encryption and decryption</string>
+    <string name="hardware_file_encryption_and_decryption">File encryption and decryption (Hardware level)</string>
+    <string name="software_file_encryption_and_decryption">File encryption and decryption (Software level)</string>
     <string name="click_to_encrypt_or_decrypt_files">Click to encrypt or decrypt files</string>
     <string name="select_encrypt_or_decrypt">Select encrypt or decrypt</string>
     <string name="encrypt">Encrypt</string>

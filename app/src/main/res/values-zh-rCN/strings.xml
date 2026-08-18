@@ -72,7 +72,8 @@
     <string name="click_to_config_ssh_tunnel">点击配置 SSH 隧道</string>
     <string name="config_ssh_tunnel">配置 SSH 隧道</string>
     <string name="ssh_server_user_password">用户密码</string>
-    <string name="file_encryption_and_decryption">文件加解密</string>
+    <string name="hardware_file_encryption_and_decryption">文件加解密（硬件级）</string>
+    <string name="software_file_encryption_and_decryption">文件加解密（软件级）</string>
     <string name="click_to_encrypt_or_decrypt_files">点击加密或解密文件</string>
     <string name="select_encrypt_or_decrypt">选择加密或解密</string>
     <string name="decrypt">解密</string>
