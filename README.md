@@ -33,6 +33,7 @@ It allows you to customize how your personal information is protected during scr
   Most configurations are user‑customizable;  
   All configuration data is stored with strong encryption;  
   Page protection against screenshot‑based configuration leakage;  
+  Supports automatic high‑strength encryption for screenshot and screen recording files;  
   Filenames support full randomization;  
   All port communications are secured with high‑strength encryption.
 
