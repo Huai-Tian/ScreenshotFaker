@@ -113,6 +113,7 @@
 
 - LSPosed
 - Shizuku
+- JSch
 - scrcpy
 - libssh2
 - openssl
