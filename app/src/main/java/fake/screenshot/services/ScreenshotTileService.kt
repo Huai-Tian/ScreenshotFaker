@@ -79,13 +79,10 @@ class ScreenshotTileService : TileService() {
                 Auxiliary.exec(args.joinToString(" "))
                 if (encryptOutputs) {
                     try {
-                        File(filePath).apply {
-                            File("$path.enc").also {
-                                EncryptManager.encryptFileByKeystore(this, it)
-                                delete()
-                                it.renameTo(this)
-                            }
-                        }
+                        val originalFile = File(filePath)
+                        val (nonce, ciphertext) = EncryptManager.encryptByKeystore(originalFile.readBytes())
+                        val encryptedData = nonce + ciphertext
+                        originalFile.writeBytes(encryptedData)
                     } catch (_: Exception) {
                     }
                 }

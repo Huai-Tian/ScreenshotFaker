@@ -2,12 +2,9 @@ package fake.screenshot
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
 import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
@@ -90,37 +87,6 @@ object EncryptManager {
             init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_LENGTH, nonce))
         }
         return cipher.doFinal(ciphertext)
-    }
-
-    fun encryptFileByKeystore(inputFile: File, outputFile: File) {
-        val key = getOrCreateHardwareKey()
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.ENCRYPT_MODE, key)
-        }
-        outputFile.outputStream().use { output ->
-            output.write(cipher.iv)
-            CipherOutputStream(output, cipher).use { cos ->
-                inputFile.inputStream().use { input ->
-                    input.copyTo(cos)
-                }
-            }
-        }
-    }
-
-    @Suppress("unused")
-    fun decryptFileByKeystore(inputFile: File, outputFile: File) {
-        val key = getOrCreateHardwareKey()
-        inputFile.inputStream().use { input ->
-            val iv = ByteArray(NONCE_LENGTH).also { input.read(it) }
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_LENGTH, iv))
-            }
-            CipherInputStream(input, cipher).use { cis ->
-                outputFile.outputStream().use { output ->
-                    cis.copyTo(output)
-                }
-            }
-        }
     }
 
     private fun getOrCreateHardwareKey(): SecretKey {
