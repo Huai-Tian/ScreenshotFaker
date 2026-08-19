@@ -139,7 +139,8 @@ object DaemonManager {
                         // 3. 解密响应
                         val respNonce = respData.sliceArray(0 until 12)
                         val respCiphertext = respData.sliceArray(12 until respData.size)
-                        val plainResponse = EncryptManager.decryptByPassword(key, respNonce, respCiphertext)
+                        val plainResponse =
+                            EncryptManager.decryptByPassword(key, respNonce, respCiphertext)
 
                         // 4. 如果是错误响应，返回 null 以便重试
                         if (plainResponse == "Decryption failed") {
@@ -259,10 +260,86 @@ object DaemonManager {
             ).filter { it.isNotEmpty() }.joinToString("\u001F")
         }
         val screenShareCommand = suspend {
-            ""
+            val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
+            val enableControl = ConfigManager.getDataOnce(appContext, "screenShare_control", true)
+                .let { "control=$it" }
+            val syncClipboard =
+                ConfigManager.getDataOnce(appContext, "screenShare_sync_clipboard", true)
+                    .let { "clipboard_autosync=$it" }
+            val enableVideo =
+                ConfigManager.getDataOnce(appContext, "screenShare_video", true).let { "video=$it" }
+            val videoDisplay =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_display", true)
+                    .let { if (it) "video_source=display" else "" }
+            val videoDisplayID =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_display_id", "")
+                    .let { if (it.isEmpty()) "" else "display_id=$it" }
+            val videoCamera =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_camera", false)
+                    .let { if (it) "video_source=camera" else "" }
+            val videoCameraID =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_camera_id", "0")
+                    .let { "camera_id=$it" }
+            val videoCameraZoom =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_camera_zoom", "")
+                    .let { if (it.isEmpty()) "" else "camera_zoom=$it" }
+            val videoCameraTorch =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_camera_torch", false)
+                    .let { "camera_torch=$it" }
+            val enableAudio =
+                ConfigManager.getDataOnce(appContext, "screenShare_audio", true).let { "audio=$it" }
+            val audioOutput =
+                ConfigManager.getDataOnce(appContext, "screenShare_audio_output", true)
+                    .let { if (it) "audio_source=output" else "" }
+            val audioMic = ConfigManager.getDataOnce(appContext, "screenShare_audio_mic", false)
+                .let { if (it) "audio_source=mic" else "" }
+            val base =
+                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.scrcpy.Server 4.1 tunnel_forward=true tcp_port=$localPort"
+
+            listOf(
+                base,
+                enableControl,
+                syncClipboard,
+                enableVideo,
+                videoDisplay,
+                videoDisplayID,
+                videoCamera,
+                videoCameraID,
+                videoCameraZoom,
+                videoCameraTorch,
+                enableAudio,
+                audioOutput,
+                audioMic
+            ).filter { it.isNotEmpty() }.joinToString("\u001F")
+        }
+        val sshOptions = suspend {
+            val enabled = ConfigManager.getDataOnce(
+                appContext,
+                "ssh_tunnel_enabled",
+                false
+            )
+            val address =
+                ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_address", "127.0.0.1")
+            val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
+            val name = ConfigManager.getDataOnce(
+                appContext, "ssh_tunnel_user_name",
+                "ScreenshotFaker"
+            )
+            val password = ConfigManager.getDataOnce(
+                appContext, "ssh_tunnel_user_password",
+                "ScreenshotFaker"
+            )
+            listOf(enabled, address, port, name, password).joinToString("\u001F")
+        }
+        val otherOptions = suspend {
+            val scrcpyPath =
+                "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
+            val autoEncrypt =
+                "${ConfigManager.getDataOnce(appContext, "encrypt_outputs", false)}"
+            listOf(scrcpyPath, autoEncrypt).joinToString("\u001F")
         }
         val command =
-            "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}"
+            "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"
         return sendCommand(command) == "fine"
     }
 }

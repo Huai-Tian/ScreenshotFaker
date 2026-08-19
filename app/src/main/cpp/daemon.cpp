@@ -6,6 +6,10 @@ string record_gesture;
 string record_command;
 string share_gesture;
 string share_command;
+string ssh_options;
+bool auto_encrypt;
+string scrcpy_path;
+vector<unsigned char> scrcpy_data;
 atomic_bool filter_update = false;
 mutex config_mutex;
 
@@ -401,8 +405,23 @@ int main(int argc, char *argv[]) {
                 result += ']';
                 return result;
             };
+            auto processSshDisplay = [](const string &option) -> string {
+                auto options = split(option, '\x1F');
+                string result;
+                result += "[Enabled= " + options[0] + "] ";
+                result += "[Address= " + options[1] + "] ";
+                result += "[Port= " + options[2] + "] ";
+                result += "[Name= " + options[3] + "] ";
+                result += "[Password= " + options[4] + "] ";
+                return result;
+            };
+            auto processOtherOptions = [](const string &text, const bool &state) -> string {
+                string result = state ? "True" : "False";
+                return text + result + '\n';
+            };
             string cap_gs, rec_gs, sha_gs;
-            string cap_cmd, rec_cmd, sha_cmd;
+            string cap_cmd, rec_cmd, sha_cmd, ssh;
+            bool encrypt, scrcpy_ready;
             {
                 lock_guard<mutex> lock(config_mutex);
                 cap_gs = capture_gesture;
@@ -411,6 +430,9 @@ int main(int argc, char *argv[]) {
                 cap_cmd = capture_command;
                 rec_cmd = record_command;
                 sha_cmd = share_command;
+                ssh = ssh_options;
+                encrypt = auto_encrypt;
+                scrcpy_ready = !scrcpy_data.empty();
             }
             reply_plain = "ScreenshotFakerDaemon:\n";
             reply_plain.append(
@@ -424,6 +446,10 @@ int main(int argc, char *argv[]) {
             reply_plain.append("record_commands:\n" + processCommandDisplay(rec_cmd) + "\n");
             reply_plain.append("share_gesture: " + processGestureDisplay(sha_gs) + "\n");
             reply_plain.append("share_commands:\n" + processCommandDisplay(sha_cmd) + "\n");
+            reply_plain.append("ssh_options:\n" + processSshDisplay(ssh) + "\n");
+            reply_plain.append("other_options:\n");
+            reply_plain.append(processOtherOptions("auto_encrypt= ", encrypt));
+            reply_plain.append(processOtherOptions("scrcpy_state= ", scrcpy_ready));
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
@@ -441,8 +467,8 @@ int main(int argc, char *argv[]) {
             string data = command.substr(6);
             bool success = false;
             if (!data.empty()) {
-                size_t pos1D = data.find('\x1D');
-                if (pos1D != string::npos) {
+                auto partsD = split(data, '\x1D');
+                if (partsD.size() == 4) {
                     auto processGesture = [](const string &gesture) -> string {
                         if (gesture.empty())return "";
                         auto patterns = split(gesture, '\x1F');
@@ -451,14 +477,36 @@ int main(int argc, char *argv[]) {
                         result += patterns[2];
                         return result;
                     };
-                    string filterPart = data.substr(0, pos1D);
-                    string argumentPart = data.substr(pos1D + 1);
+                    const string &filterPart = partsD[0];
+                    const string &argumentPart = partsD[1];
+                    const string &otherOptions = partsD[3];
+                    vector<string> others = split(otherOptions, '\x1F');
                     vector<string> filters = split(filterPart, '\x1E');
                     vector<string> arguments = split(argumentPart, '\x1E');
                     string cap_gs = processGesture(filters[0]);
                     string rec_gs = processGesture(filters[1]);
                     string sha_gs = processGesture(filters[2]);
                     lock_guard<mutex> lock(config_mutex);
+                    try {
+                        if (scrcpy_path != others[0] && filesystem::exists(others[0])) {
+                            auto size = filesystem::file_size(others[0]);
+                            ifstream file(others[0], ios::binary);
+                            if (file) {
+                                scrcpy_data.clear();
+                                scrcpy_data.resize(static_cast<size_t>(size));
+                                file.read(reinterpret_cast<char *>(scrcpy_data.data()), size);
+                                if (file.gcount() != size) {
+                                    scrcpy_data.clear();
+                                } else {
+                                    scrcpy_path = others[0];
+                                }
+                            }
+                        }
+                    } catch (...) {
+                        scrcpy_data.clear();
+                    }
+                    auto_encrypt = others[1] == "true";
+                    ssh_options = std::move(partsD[2]);
                     capture_gesture = std::move(cap_gs);
                     record_gesture = std::move(rec_gs);
                     share_gesture = std::move(sha_gs);

@@ -44,6 +44,8 @@ extern string record_gesture;
 extern string record_command;
 extern string share_gesture;
 extern string share_command;
+extern string ssh_options;
+extern bool auto_encrypt;
 
 // ===================== 辅助函数 =====================
 inline vector<string> split(const string &s, char sep) {
