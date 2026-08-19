@@ -46,6 +46,7 @@ extern string share_gesture;
 extern string share_command;
 extern string ssh_options;
 extern bool auto_encrypt;
+extern string scrcpy_path;
 
 // ===================== 辅助函数 =====================
 inline vector<string> split(const string &s, char sep) {
