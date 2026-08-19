@@ -2,7 +2,9 @@ package fake.screenshot.pages
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Environment
 import android.provider.Settings
 import android.view.WindowManager
@@ -47,6 +49,7 @@ fun SettingsCompose(navController: NavController) {
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
     val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
+    val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
     val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", false)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val daemonSocketPort by ConfigManager.rememberValue(
@@ -183,6 +186,31 @@ fun SettingsCompose(navController: NavController) {
 
                                     else -> externalStorageRequireDialog = true
                                 }
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.VisibilityOff,
+                        title = stringResource(R.string.hide_application_icon),
+                        subtitle = stringResource(R.string.hide_application_icon_description),
+                        checked = hideIcon,
+                        onCheckedChange = {
+                            scope.launch {
+                                context.apply {
+                                    packageManager.setComponentEnabledSetting(
+                                        ComponentName(
+                                            packageName,
+                                            "$packageName.MainActivityAlias"
+                                        ),
+                                        if (it) PackageManager.COMPONENT_ENABLED_STATE_DISABLED else PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                        PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                                ConfigManager.saveData(context, "hide_icon", it)
                             }
                         }
                     )
