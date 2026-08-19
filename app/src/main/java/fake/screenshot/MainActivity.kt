@@ -2,6 +2,7 @@ package fake.screenshot
 
 import android.app.Application
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.WindowManager
@@ -75,8 +76,12 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         runBlocking {
             val enableFlagSecure =
                 ConfigManager.getDataOnce(applicationContext, "enable_flag_secure", true)
+            val hideFromRecent =
+                ConfigManager.getDataOnce(applicationContext, "hide_from_recent", false)
             if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            getSystemService(ActivityManager::class.java)
+                .appTasks.forEach { it.setExcludeFromRecents(hideFromRecent) }
         }
         WindowCompat.getInsetsController(window, window.decorView).let {
             it.hide(WindowInsetsCompat.Type.statusBars())

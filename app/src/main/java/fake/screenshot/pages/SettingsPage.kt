@@ -1,6 +1,7 @@
 package fake.screenshot.pages
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Intent
 import android.os.Environment
 import android.provider.Settings
@@ -46,6 +47,7 @@ fun SettingsCompose(navController: NavController) {
     val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
     val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
     val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
+    val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", false)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val daemonSocketPort by ConfigManager.rememberValue(
         context,
@@ -156,10 +158,10 @@ fun SettingsCompose(navController: NavController) {
                         checked = enableFlagSecure,
                         onCheckedChange = {
                             scope.launch {
-                                ConfigManager.saveData(context, "enable_flag_secure", it)
                                 val activity = context as? Activity
                                 if (it) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                                 else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                                ConfigManager.saveData(context, "enable_flag_secure", it)
                             }
                         }
                     )
@@ -181,6 +183,23 @@ fun SettingsCompose(navController: NavController) {
 
                                     else -> externalStorageRequireDialog = true
                                 }
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.LayersClear,
+                        title = stringResource(R.string.hide_from_recent),
+                        subtitle = stringResource(R.string.hide_this_application_from_recent_tasks),
+                        checked = hideFromRecent,
+                        onCheckedChange = {
+                            scope.launch {
+                                context.getSystemService(ActivityManager::class.java)
+                                    .appTasks.forEach { task -> task.setExcludeFromRecents(it) }
+                                ConfigManager.saveData(context, "hide_from_recent", it)
                             }
                         }
                     )
