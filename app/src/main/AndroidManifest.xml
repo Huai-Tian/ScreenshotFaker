@@ -5,6 +5,11 @@
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="AllFilesAccessPolicy,ScopedStorage" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:ignore="ForegroundServicesPolicy" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:name=".LSPosedServiceManager"
@@ -45,6 +50,26 @@
             </intent-filter>
         </activity-alias>
 
+        <service
+            android:name=".services.DisplayOverlayService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="@string/display_overlay_service_description"
+                tools:ignore="ManifestResource" />
+        </service>
+        <service
+            android:name=".services.ControlOverlayService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="@string/control_overlay_service_description"
+                tools:ignore="ManifestResource" />
+        </service>
         <service
             android:name=".services.ScreenshotTileService"
             android:exported="true"

@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
@@ -29,6 +30,7 @@ import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
 import fake.screenshot.EncryptManager
+import fake.screenshot.OverlayServiceManager
 import fake.screenshot.R
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -182,6 +184,19 @@ fun ExtensionCompose() {
                 screenRecordConfigDialogSuffixInputText,
                 screenRecordConfigDialogResolutionInputText
             )
+        }
+    }
+    //StealthOverlay
+    val isDisplayRunning by OverlayServiceManager.isDisplayRunning.collectAsState()
+    val isControlRunning by OverlayServiceManager.isControlRunning.collectAsState()
+    val mediaList by OverlayServiceManager.mediaList.collectAsState()
+    var stealthOverlayConfigDialog by remember { mutableStateOf(false) }
+    var overlayPermissionRequireDialog by remember { mutableStateOf(false) }
+    val mediaPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            OverlayServiceManager.setMediaList(uris)
         }
     }
     //ScreenShare
@@ -507,6 +522,28 @@ fun ExtensionCompose() {
                             screenRecordConfigDialogFullRandomInputText = screenRecordFullRandom
                             screenRecordConfigDialogEnableBugreport = screenRecordBugreport
                             screenRecordConfigDialog = true
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Outlined.VisibilityOff,
+                        title = stringResource(R.string.stealth_overlay),
+                        subtitle = stringResource(R.string.stealth_overlay_description),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            if (!Settings.canDrawOverlays(context)) {
+                                overlayPermissionRequireDialog = true
+                            } else {
+                                stealthOverlayConfigDialog = true
+                            }
                         }
                     )
                 }
@@ -970,6 +1007,96 @@ fun ExtensionCompose() {
                 },
                 dismissButton = {
                     TextButton(onClick = { screenRecordConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (stealthOverlayConfigDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { stealthOverlayConfigDialog = false },
+                title = { Text(stringResource(R.string.stealth_overlay)) },
+                text = {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.enable_control))
+                            Switch(
+                                checked = isControlRunning,
+                                onCheckedChange = {
+                                    if (it) OverlayServiceManager.startControl(context)
+                                    else OverlayServiceManager.stopControl(context)
+                                },
+                                enabled = isDisplayRunning
+                            )
+                        }
+                        PreferenceItemEx(
+                            icon = Icons.Default.PermMedia,
+                            title = stringResource(R.string.select_media_files),
+                            subtitle = stringResource(R.string.select_media_files_to_be_displayed),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                mediaPickerLauncher.launch(arrayOf("*/*"))
+                            }
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            OverlayServiceManager.start(context)
+                        },
+                        enabled = !isDisplayRunning && mediaList.isNotEmpty()
+                    ) {
+                        Text(stringResource(R.string.start))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            OverlayServiceManager.stop(context)
+                            stealthOverlayConfigDialog = false
+                        },
+                        enabled = isDisplayRunning
+                    ) {
+                        Text(stringResource(R.string.stop))
+                    }
+                },
+            )
+        }
+        if (overlayPermissionRequireDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { overlayPermissionRequireDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.tips))
+                },
+                text = {
+                    Text(stringResource(R.string.overlay_permission_required))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent =
+                                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                                    data = "package:${context.packageName}".toUri()
+                                }
+                            context.startActivity(intent)
+                            overlayPermissionRequireDialog = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.go_to_settings))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { overlayPermissionRequireDialog = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }

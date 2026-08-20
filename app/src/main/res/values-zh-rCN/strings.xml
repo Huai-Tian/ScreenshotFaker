@@ -42,10 +42,17 @@
     <string name="custom_file_prefix">自定义文件名前缀</string>
     <string name="full_random_file_name">文件名全随机</string>
     <string name="operation_selection">操作选择</string>
+    <string name="display_overlay_service_description">此服务用于展示内容且不会被屏幕捕获</string>
+    <string name="control_overlay_service_description">此服务用于控制无法与用户互动的展示悬浮窗</string>
+    <string name="enable_control">启用控制</string>
+    <string name="select_media_files">选择媒体文件</string>
+    <string name="select_media_files_to_be_displayed">选择需要显示的媒体文件</string>
+    <string name="overlay_permission_required">此功能需要被授予 悬浮窗 权限</string>
     <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击配置无痕截图</string>
     <string name="click_to_config_stealth_screen_recording">点击配置无痕录屏</string>
+    <string name="stealth_overlay_description">点击启动无痕悬浮窗</string>
     <string name="stealth_screen_sharing">无痕屏幕共享</string>
     <string name="click_to_config_stealth_screen_sharing">点击配置无痕共享</string>
     <string name="stealth_screen_recording">无痕录屏</string>
@@ -117,6 +124,9 @@
     <string name="ssh_server_user_name">用户名</string>
     <string name="enable_page_protection">启用页面保护</string>
     <string name="encrypt">加密</string>
+    <string name="stop">结束</string>
     <string name="success">成功</string>
     <string name="hide_application_icon">隐藏应用图标</string>
+    <string name="stealth_overlay">无痕悬浮窗</string>
+    <string name="start">开始</string>
 </resources>

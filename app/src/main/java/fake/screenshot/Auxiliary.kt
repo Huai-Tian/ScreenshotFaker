@@ -1,11 +1,14 @@
 package fake.screenshot
 
+import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
+import android.view.View
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import moe.shizuku.server.IShizukuService
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 import rikka.shizuku.Shizuku
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -95,6 +98,40 @@ object Auxiliary {
             .joinToString("")
         return first + rest
     }
+
+    @SuppressLint("BlockedPrivateApi")
+    fun View.enableScreenshotExclusion() {
+        try {
+            HiddenApiBypass.addHiddenApiExemptions("Landroid/view/")
+
+            val parent = rootView.parent ?: return
+            val surfaceField = parent.javaClass.getDeclaredField("mSurfaceControl")
+            surfaceField.isAccessible = true
+            val surfaceControl = surfaceField.get(parent) ?: return
+
+            val isValid = surfaceControl.javaClass.getDeclaredMethod("isValid")
+            isValid.isAccessible = true
+            if (isValid.invoke(surfaceControl) != true) return
+
+            val scClass = Class.forName("android.view.SurfaceControl")
+            val transClass = Class.forName($$"android.view.SurfaceControl$Transaction")
+            val constructor = transClass.getDeclaredConstructor()
+            constructor.isAccessible = true
+            val transaction = constructor.newInstance()
+
+            val setMethod = transClass.getDeclaredMethod(
+                "setSkipScreenshot",
+                scClass,
+                Boolean::class.javaPrimitiveType
+            )
+            setMethod.invoke(transaction, surfaceControl, true)
+
+            transClass.getDeclaredMethod("apply").invoke(transaction)
+
+        } catch (_: Exception) {
+        }
+    }
+
 
     private val ParcelFileDescriptor.text
         get() = ParcelFileDescriptor.AutoCloseInputStream(this)

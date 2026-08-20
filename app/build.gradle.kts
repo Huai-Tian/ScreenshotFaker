@@ -1,11 +1,12 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
-kotlin{
+kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_17
         languageVersion = KotlinVersion.KOTLIN_2_4
@@ -100,6 +101,7 @@ dependencies {
     implementation(libs.provider)
     implementation(libs.service)
     compileOnly(libs.libxposed.api)
+    implementation(libs.hiddenapibypass)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.junit)
