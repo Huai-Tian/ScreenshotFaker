@@ -27,7 +27,7 @@ It allows you to customize how your personal information is protected during scr
   Supports system-log-based triggering for screen capture, recording, and sharing — not limited to conventional gestures.
 
 - **Extreme stealth support**  
-  Supports viewing screenshot and screen recording files in a floating window without being captured by screenshots.
+  Supports viewing screenshot and screen recording files in a floating window without being captured by screenshots.  
   Supports hiding this app from recent tasks.  
   Supports hiding the desktop icon and reopening the app through a reliable method.  
   Retains screen capture, recording, and sharing capabilities even after the software is uninstalled.
