@@ -1,6 +1,16 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+kotlin{
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_17
+        languageVersion = KotlinVersion.KOTLIN_2_4
+        apiVersion = KotlinVersion.KOTLIN_2_4
+    }
 }
 
 android {
