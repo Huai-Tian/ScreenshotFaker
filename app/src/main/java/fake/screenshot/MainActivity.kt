@@ -48,7 +48,10 @@ import kotlin.concurrent.Volatile
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import com.google.crypto.tink.aead.AeadConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
@@ -82,6 +85,56 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
             else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
             getSystemService(ActivityManager::class.java)
                 .appTasks.forEach { it.setExcludeFromRecents(hideFromRecent) }
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            if (ConfigManager.getDataOnce(
+                    applicationContext,
+                    "overlay_service_display_channel_name",
+                    "Display"
+                ) == "Display"
+            ) {
+                ConfigManager.saveData(
+                    applicationContext,
+                    "overlay_service_display_channel_name",
+                    Auxiliary.getRandomString((20..30).random())
+                )
+            }
+            if (ConfigManager.getDataOnce(
+                    applicationContext,
+                    "overlay_service_display_channel_id",
+                    1001
+                ) == 1001
+            ) {
+                ConfigManager.saveData(
+                    applicationContext,
+                    "overlay_service_display_channel_id",
+                    (1000..4999).random()
+                )
+            }
+            if (ConfigManager.getDataOnce(
+                    applicationContext,
+                    "overlay_service_control_channel_name",
+                    "Control"
+                ) == "Control"
+            ) {
+                ConfigManager.saveData(
+                    applicationContext,
+                    "overlay_service_control_channel_name",
+                    Auxiliary.getRandomString((31..36).random())
+                )
+            }
+            if (ConfigManager.getDataOnce(
+                    applicationContext,
+                    "overlay_service_control_channel_id",
+                    1002
+                ) == 1002
+            ) {
+                ConfigManager.saveData(
+                    applicationContext,
+                    "overlay_service_control_channel_id",
+                    (5000..9999).random()
+                )
+            }
         }
         WindowCompat.getInsetsController(window, window.decorView).let {
             it.hide(WindowInsetsCompat.Type.statusBars())

@@ -9,30 +9,30 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.SurfaceTexture
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
-import android.view.Surface
-import android.view.TextureView
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import androidx.core.app.NotificationCompat
+import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.enableScreenshotExclusion
+import fake.screenshot.ConfigManager
 import fake.screenshot.OverlayServiceManager
+import kotlinx.coroutines.runBlocking
 import java.lang.ref.WeakReference
 
 class DisplayOverlayService : Service() {
 
     companion object {
-        private const val CHANNEL_ID = "overlay_channel"
-        private const val NOTIFICATION_ID = 1001
-
         private var instanceRef: WeakReference<DisplayOverlayService>? = null
 
         @JvmStatic
@@ -67,7 +67,6 @@ class DisplayOverlayService : Service() {
                 service.params.width = width
                 service.params.height = height
                 service.windowManager.updateViewLayout(service.floatingView, service.params)
-                // 重绘角标
                 service.cornerHandleView?.invalidate()
             }
         }
@@ -83,21 +82,41 @@ class DisplayOverlayService : Service() {
         }
 
         @JvmStatic
-        fun seekVideo(offset: Int) {
+        fun togglePlayPause() {
             instanceRef?.get()?.let { service ->
                 service.mediaPlayer?.let { mp ->
-                    val newPos = mp.currentPosition + offset
-                    if (newPos > 0) {
-                        mp.seekTo(newPos.coerceAtMost(mp.duration))
+                    if (mp.isPlaying) {
+                        mp.pause()
+                    } else {
+                        mp.start()
                     }
                 }
             }
         }
 
         @JvmStatic
-        fun scaleMedia(factor: Float, focusX: Float, focusY: Float) {
-            instanceRef?.get()?.applyScale(factor, focusX, focusY)
+        fun scaleMedia(factor: Float) {
+            instanceRef?.get()?.applyScale(factor)
         }
+
+        @JvmStatic
+        fun panMedia(dx: Float, dy: Float) {
+            // 仅图片支持平移
+            instanceRef?.get()?.let { service ->
+                if (service.mediaView is ImageView) {
+                    service.panX += dx
+                    service.panY += dy
+                    service.clampPan()
+                    service.updateImageMatrix()
+                }
+            }
+        }
+
+        @JvmStatic
+        fun isCurrentVideo(): Boolean {
+            return instanceRef?.get()?.mediaView is SurfaceView
+        }
+
     }
 
     private lateinit var windowManager: WindowManager
@@ -107,12 +126,24 @@ class DisplayOverlayService : Service() {
     private var currentIndex = 0
     private var mediaList: List<Uri> = emptyList()
     private var contentContainer: FrameLayout? = null
-    private var mediaPlayer: MediaPlayer? = null
+
+    // 图片相关
     private var imageView: ImageView? = null
-    private var textureView: TextureView? = null
+
+    // 视频相关
+    private var surfaceView: SurfaceView? = null
+    private var mediaPlayer: MediaPlayer? = null
+
+    // 当前显示的媒体 View
     private var mediaView: View? = null
 
+    // 图片专用：缩放和平移状态
     private var currentScale = 1.0f
+    private var panX = 0f
+    private var panY = 0f
+    private var baseScale = 1.0f
+    private var mediaWidth = 0
+    private var mediaHeight = 0
 
     private var cornerHandleView: CornerHandleView? = null
 
@@ -120,15 +151,21 @@ class DisplayOverlayService : Service() {
         super.onCreate()
         OverlayServiceManager.setDisplayRunning(true)
         instanceRef = WeakReference(this)
-
+        val id = runBlocking {
+            ConfigManager.getDataOnce(
+                applicationContext,
+                "overlay_service_display_channel_id",
+                1001
+            )
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
-                NOTIFICATION_ID,
+                id,
                 createNotification(),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
         } else {
-            startForeground(NOTIFICATION_ID, createNotification())
+            startForeground(id, createNotification())
         }
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -141,7 +178,11 @@ class DisplayOverlayService : Service() {
                 isFocusable = false
                 isFocusableInTouchMode = false
             }
-            addView(cornerHandleView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(
+                cornerHandleView,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
         }
 
         params = WindowManager.LayoutParams(
@@ -172,6 +213,7 @@ class DisplayOverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
     override fun onDestroy() {
         super.onDestroy()
         OverlayServiceManager.setDisplayRunning(false)
@@ -185,12 +227,20 @@ class DisplayOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotification(): Notification {
-        val channel = NotificationChannel(CHANNEL_ID, "Overlay Service", NotificationManager.IMPORTANCE_LOW)
+        val channelId = runBlocking {
+            ConfigManager.getDataOnce(
+                applicationContext,
+                "overlay_service_display_channel_name",
+                "Display"
+            )
+        }
+        val channel =
+            NotificationChannel(channelId, Auxiliary.getRandomString((20..30).random()), NotificationManager.IMPORTANCE_LOW)
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(channel)
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("悬浮窗运行中")
-            .setContentText("媒体展示中")
+        return NotificationCompat.Builder(this, channelId)
+            .setContentTitle("")
+            .setContentText("")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -211,67 +261,158 @@ class DisplayOverlayService : Service() {
             }
         }
         currentIndex = index
-        resetScale()
-        // 确保角标在最上层
-        floatingView.bringChildToFront(cornerHandleView)
-    }
-
-    private fun resetScale() {
-        mediaView?.apply {
-            scaleX = 1f
-            scaleY = 1f
-            pivotX = 0f
-            pivotY = 0f
+        if (mediaView is ImageView) {
+            currentScale = 1.0f
+            panX = 0f
+            panY = 0f
+            updateImageMatrix()
         }
-        currentScale = 1f
+        floatingView.bringChildToFront(cornerHandleView)
+        floatingView.setBackgroundColor(Color.TRANSPARENT)
     }
 
+    // ---------- 图片 ----------
     private fun showImage(uri: Uri) {
         imageView = ImageView(this).apply {
-            // 改为 FIT_CENTER，使缩小能看到更多原始内容
-            scaleType = ImageView.ScaleType.FIT_CENTER
+            scaleType = ImageView.ScaleType.MATRIX
             setImageURI(uri)
+            drawable?.let {
+                mediaWidth = it.intrinsicWidth
+                mediaHeight = it.intrinsicHeight
+            }
         }
         mediaView = imageView
         contentContainer = FrameLayout(this).apply {
-            addView(imageView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(
+                imageView,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
         }
-        floatingView.addView(contentContainer, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        floatingView.addView(
+            contentContainer,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
         floatingView.bringChildToFront(cornerHandleView)
-        floatingView.setBackgroundColor(Color.TRANSPARENT)
+        updateImageMatrix()
     }
 
+    private fun updateImageMatrix() {
+        val view = mediaView
+        if (view !is ImageView) return
+        if (mediaWidth <= 0 || mediaHeight <= 0) return
+        val viewWidth = params.width
+        val viewHeight = params.height
+        if (viewWidth <= 0 || viewHeight <= 0) return
+
+        val scaleX = viewWidth.toFloat() / mediaWidth
+        val scaleY = viewHeight.toFloat() / mediaHeight
+        baseScale = maxOf(scaleX, scaleY)
+        val finalScale = baseScale * currentScale
+
+        clampPan()
+
+        val centerX = (viewWidth - mediaWidth * finalScale) / 2
+        val centerY = (viewHeight - mediaHeight * finalScale) / 2
+
+        val matrix = Matrix()
+        matrix.setScale(finalScale, finalScale)
+        matrix.postTranslate(centerX + panX, centerY + panY)
+        view.imageMatrix = matrix
+    }
+
+    private fun clampPan() {
+        if (mediaWidth <= 0 || mediaHeight <= 0) return
+        val viewWidth = params.width
+        val viewHeight = params.height
+        val finalScale = baseScale * currentScale
+        val scaledW = mediaWidth * finalScale
+        val scaledH = mediaHeight * finalScale
+        if (scaledW > viewWidth) {
+            val maxPanX = (scaledW - viewWidth) / 2
+            panX = panX.coerceIn(-maxPanX, maxPanX)
+        } else {
+            panX = 0f
+        }
+        if (scaledH > viewHeight) {
+            val maxPanY = (scaledH - viewHeight) / 2
+            panY = panY.coerceIn(-maxPanY, maxPanY)
+        } else {
+            panY = 0f
+        }
+    }
+
+    private fun applyScale(factor: Float) {
+        if (mediaView !is ImageView) return
+        var newScale = currentScale * factor
+        newScale = maxOf(newScale, 1.0f)
+        if (newScale > 5.0f) return
+        currentScale = newScale
+        clampPan()
+        updateImageMatrix()
+    }
+
+    // ---------- 视频 ----------
     private fun showVideo(uri: Uri) {
-        textureView = TextureView(this).apply {
-            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                    initVideoPlayer(uri, Surface(surface))
+        surfaceView = SurfaceView(this).apply {
+            holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    initPlayer(uri, holder.surface)
                 }
-                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+
+                override fun surfaceChanged(
+                    holder: SurfaceHolder,
+                    format: Int,
+                    width: Int,
+                    height: Int
+                ) {
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
                     releasePlayer()
-                    return true
                 }
-                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
-            }
+            })
+            // 确保 SurfaceView 在悬浮窗中正常显示
+            setZOrderMediaOverlay(true)
         }
-        mediaView = textureView
+        mediaView = surfaceView
         contentContainer = FrameLayout(this).apply {
-            addView(textureView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            addView(
+                surfaceView,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
         }
-        floatingView.addView(contentContainer, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        floatingView.addView(
+            contentContainer,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
         floatingView.bringChildToFront(cornerHandleView)
         floatingView.setBackgroundColor(Color.TRANSPARENT)
     }
 
-    private fun initVideoPlayer(uri: Uri, surface: Surface) {
+    private fun initPlayer(uri: Uri, surface: android.view.Surface) {
         releasePlayer()
-        mediaPlayer = MediaPlayer().apply {
-            setDataSource(this@DisplayOverlayService, uri)
-            setSurface(surface)
-            isLooping = true
-            prepare()
-            start()
+        try {
+            mediaPlayer = MediaPlayer().apply {
+                setDataSource(this@DisplayOverlayService, uri)
+                setSurface(surface)
+                // 关键：设置系统级裁剪填充
+                setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
+                isLooping = true
+                setOnPreparedListener {
+                    start()
+                }
+                setOnErrorListener { _, _, _ ->
+                    floatingView.setBackgroundColor(Color.RED)
+                    false
+                }
+                prepare()
+            }
+        } catch (_: Exception) {
+            floatingView.setBackgroundColor(Color.RED)
         }
     }
 
@@ -280,39 +421,28 @@ class DisplayOverlayService : Service() {
         mediaPlayer = null
     }
 
+    // ---------- 清理 ----------
     private fun clearMedia() {
         releasePlayer()
         contentContainer?.let { floatingView.removeView(it) }
         contentContainer = null
         imageView = null
-        textureView = null
+        surfaceView = null
         mediaView = null
-        resetScale()
+        mediaWidth = 0
+        mediaHeight = 0
+        currentScale = 1.0f
+        panX = 0f
+        panY = 0f
+        baseScale = 1.0f
     }
 
-    private fun applyScale(factor: Float, focusX: Float, focusY: Float) {
-        val view = mediaView ?: return
-        val newScale = currentScale * factor
-        val minScale = 0.2f
-        val maxScale = 5.0f
-        if (newScale !in minScale..maxScale) return
-
-        // 焦点相对于 View 左上角的坐标
-        val viewX = focusX - params.x
-        val viewY = focusY - params.y
-        view.pivotX = viewX
-        view.pivotY = viewY
-        view.scaleX = newScale
-        view.scaleY = newScale
-        currentScale = newScale
-    }
-
-    // ---------- 自定义角标 View ----------
+    // ---------- 角标 ----------
     private class CornerHandleView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
+            color = Color.WHITE
             style = Paint.Style.STROKE
-            strokeWidth = 6f * resources.displayMetrics.density  // 加粗
+            strokeWidth = 6f * resources.displayMetrics.density
         }
         private val cornerSize = 30f * resources.displayMetrics.density
 
@@ -322,18 +452,17 @@ class DisplayOverlayService : Service() {
             val h = height.toFloat()
             val size = cornerSize
 
-            // 左上角
             canvas.drawLine(0f, 0f, size, 0f, paint)
             canvas.drawLine(0f, 0f, 0f, size, paint)
-            // 右上角
             canvas.drawLine(w - size, 0f, w, 0f, paint)
             canvas.drawLine(w, 0f, w, size, paint)
-            // 左下角
             canvas.drawLine(0f, h - size, 0f, h, paint)
             canvas.drawLine(0f, h, size, h, paint)
-            // 右下角
             canvas.drawLine(w - size, h, w, h, paint)
             canvas.drawLine(w, h - size, w, h, paint)
+
+            val centerX = w / 2
+            canvas.drawLine(centerX - size, 0f, centerX + size, 0f, paint)
         }
     }
 }
