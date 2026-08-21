@@ -68,6 +68,7 @@ class DisplayOverlayService : Service() {
                 service.params.height = height
                 service.windowManager.updateViewLayout(service.floatingView, service.params)
                 service.cornerHandleView?.invalidate()
+                service.refreshContent()
             }
         }
 
@@ -235,7 +236,11 @@ class DisplayOverlayService : Service() {
             )
         }
         val channel =
-            NotificationChannel(channelId, Auxiliary.getRandomString((20..30).random()), NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(
+                channelId,
+                Auxiliary.getRandomString((20..30).random()),
+                NotificationManager.IMPORTANCE_LOW
+            )
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(channel)
         return NotificationCompat.Builder(this, channelId)
@@ -419,6 +424,12 @@ class DisplayOverlayService : Service() {
     private fun releasePlayer() {
         mediaPlayer?.release()
         mediaPlayer = null
+    }
+
+    private fun refreshContent() {
+        if (mediaView is ImageView) {
+            updateImageMatrix()
+        }
     }
 
     // ---------- 清理 ----------
