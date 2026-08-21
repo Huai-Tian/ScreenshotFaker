@@ -45,6 +45,8 @@
     <string name="display_overlay_service_description">此服务用于展示内容且不会被屏幕捕获</string>
     <string name="control_overlay_service_description">此服务用于控制无法与用户互动的展示悬浮窗</string>
     <string name="enable_control">启用控制</string>
+    <string name="video_mute">视频静音</string>
+    <string name="opacity">不透明度</string>
     <string name="select_media_files">选择媒体文件</string>
     <string name="select_media_files_to_be_displayed">选择需要显示的媒体文件</string>
     <string name="overlay_permission_required">此功能需要被授予 悬浮窗 权限</string>

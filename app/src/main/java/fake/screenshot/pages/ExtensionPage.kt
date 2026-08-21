@@ -32,6 +32,7 @@ import fake.screenshot.DaemonManager
 import fake.screenshot.EncryptManager
 import fake.screenshot.OverlayServiceManager
 import fake.screenshot.R
+import fake.screenshot.services.DisplayOverlayService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -192,11 +193,16 @@ fun ExtensionCompose() {
     val mediaList by OverlayServiceManager.mediaList.collectAsState()
     var stealthOverlayConfigDialog by remember { mutableStateOf(false) }
     var overlayPermissionRequireDialog by remember { mutableStateOf(false) }
+    var isMuted by remember { mutableStateOf(DisplayOverlayService.isMuted()) }
+    var overlayAlpha by remember { mutableFloatStateOf(DisplayOverlayService.getDisplayAlpha()) }
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
         if (uris.isNotEmpty()) {
             OverlayServiceManager.setMediaList(uris)
+            if (isDisplayRunning) {
+                DisplayOverlayService.reloadMediaList()
+            }
         }
     }
     //ScreenShare
@@ -1013,6 +1019,22 @@ fun ExtensionCompose() {
             )
         }
         if (stealthOverlayConfigDialog) {
+            LaunchedEffect(Unit) {
+                val saved = withContext(Dispatchers.IO) {
+                    ConfigManager.getDataOnce(context, "overlay_display_alpha", 1.0f)
+                }
+                val muted = withContext(Dispatchers.IO) {
+                    ConfigManager.getDataOnce(context, "overlay_video_muted", false)
+                }
+                overlayAlpha = saved
+                isMuted = muted
+                if (isDisplayRunning) {
+                    DisplayOverlayService.setDisplayAlpha(saved)
+                }
+                if (isDisplayRunning) {
+                    DisplayOverlayService.setMuted(muted)
+                }
+            }
             CenteredAlertDialog(
                 onDismissRequest = { stealthOverlayConfigDialog = false },
                 title = { Text(stringResource(R.string.stealth_overlay)) },
@@ -1033,6 +1055,44 @@ fun ExtensionCompose() {
                                 enabled = isDisplayRunning
                             )
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = stringResource(R.string.video_mute))
+                            Switch(
+                                checked = isMuted,
+                                onCheckedChange = {
+                                    isMuted = it
+                                    DisplayOverlayService.setMuted(it)
+                                },
+                                enabled = isDisplayRunning
+                            )
+                        }
+                        Text(
+                            text = stringResource(R.string.opacity) + ": ${(overlayAlpha * 100).toInt()}%",
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                        Slider(
+                            value = overlayAlpha,
+                            onValueChange = { newAlpha ->
+                                overlayAlpha = newAlpha
+                                if (isDisplayRunning) {
+                                    DisplayOverlayService.setDisplayAlpha(newAlpha)
+                                }
+                                scope.launch {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "overlay_display_alpha",
+                                        newAlpha
+                                    )
+                                }
+                            },
+                            valueRange = 0.0f..1.0f,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = isDisplayRunning
+                        )
                         PreferenceItemEx(
                             icon = Icons.Default.PermMedia,
                             title = stringResource(R.string.select_media_files),

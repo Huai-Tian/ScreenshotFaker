@@ -118,6 +118,50 @@ class DisplayOverlayService : Service() {
             return instanceRef?.get()?.mediaView is SurfaceView
         }
 
+        @JvmStatic
+        fun setDisplayAlpha(alpha: Float) {
+            instanceRef?.get()?.let { service ->
+                val clamped = alpha.coerceIn(0.0f, 1.0f)
+                service.currentAlpha = clamped
+                service.floatingView.alpha = clamped
+            }
+        }
+
+        @JvmStatic
+        fun getDisplayAlpha(): Float {
+            return instanceRef?.get()?.currentAlpha ?: 1.0f
+        }
+
+        @JvmStatic
+        fun reloadMediaList() {
+            instanceRef?.get()?.let { service ->
+                service.mediaList = OverlayServiceManager.mediaList.value
+                if (service.mediaList.isNotEmpty()) {
+                    service.currentIndex = 0
+                    service.showMedia(0)
+                } else {
+                    service.floatingView.setBackgroundColor(Color.RED)
+                    service.clearMedia()
+                }
+            }
+        }
+
+        @JvmStatic
+        fun setMuted(muted: Boolean) {
+            instanceRef?.get()?.let { service ->
+                service.isMuted = muted
+                service.applyMuteState()
+                runBlocking {
+                    ConfigManager.saveData(service.applicationContext, "overlay_video_muted", muted)
+                }
+            }
+        }
+
+        @JvmStatic
+        fun isMuted(): Boolean {
+            return instanceRef?.get()?.isMuted ?: false
+        }
+
     }
 
     private lateinit var windowManager: WindowManager
@@ -145,6 +189,11 @@ class DisplayOverlayService : Service() {
     private var baseScale = 1.0f
     private var mediaWidth = 0
     private var mediaHeight = 0
+
+    //透明度
+    private var currentAlpha = 1.0f
+
+    private var isMuted = false
 
     private var cornerHandleView: CornerHandleView? = null
 
@@ -200,6 +249,18 @@ class DisplayOverlayService : Service() {
 
         windowManager.addView(floatingView, params)
 
+        val savedAlpha = runBlocking {
+            ConfigManager.getDataOnce(applicationContext, "overlay_display_alpha", 1.0f)
+        }
+        currentAlpha = savedAlpha
+        floatingView.alpha = savedAlpha
+
+        val savedMuted = runBlocking {
+            ConfigManager.getDataOnce(applicationContext, "overlay_video_muted", false)
+        }
+        isMuted = savedMuted
+
+
         floatingView.post {
             floatingView.enableScreenshotExclusion()
         }
@@ -226,6 +287,10 @@ class DisplayOverlayService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun applyMuteState() {
+        mediaPlayer?.setVolume(if (isMuted) 0f else 1f, if (isMuted) 0f else 1f)
+    }
 
     private fun createNotification(): Notification {
         val channelId = runBlocking {
@@ -408,6 +473,7 @@ class DisplayOverlayService : Service() {
                 setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
                 isLooping = true
                 setOnPreparedListener {
+                    applyMuteState()
                     start()
                 }
                 setOnErrorListener { _, _, _ ->

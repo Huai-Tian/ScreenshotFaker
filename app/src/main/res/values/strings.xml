@@ -120,6 +120,8 @@
     <string name="display_overlay_service_description">This service is used to display contents with screen capture exclusion.</string>
     <string name="control_overlay_service_description">This service is used to control display overlay which cannot interact with user.</string>
     <string name="enable_control">Enable control</string>
+    <string name="video_mute">Video Mute</string>
+    <string name="opacity">Opacity</string>
     <string name="select_media_files">Select media files</string>
     <string name="select_media_files_to_be_displayed">Select the media files to be displayed</string>
     <string name="overlay_permission_required">Overlay permission is required for this function.</string>
