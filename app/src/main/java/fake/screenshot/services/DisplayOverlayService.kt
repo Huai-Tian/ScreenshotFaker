@@ -220,6 +220,13 @@ class DisplayOverlayService : Service() {
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
+        val metrics = windowManager.currentWindowMetrics
+        val bounds = metrics.bounds
+        val screenWidth = bounds.width()
+        val screenHeight = bounds.height()
+        val initWidth = (screenWidth * 0.6).toInt().coerceIn(300, 1000)
+        val initHeight = (screenHeight * 0.4).toInt().coerceIn(200, 800)
+
         floatingView = FrameLayout(this).apply {
             setBackgroundColor(Color.RED)
             cornerHandleView = CornerHandleView(this@DisplayOverlayService).apply {
@@ -236,7 +243,7 @@ class DisplayOverlayService : Service() {
         }
 
         params = WindowManager.LayoutParams(
-            200, 200,
+            initWidth, initHeight,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,

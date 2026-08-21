@@ -64,6 +64,7 @@
             android:name=".services.ControlOverlayService"
             android:enabled="true"
             android:exported="false"
+            android:configChanges="orientation|screenSize"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

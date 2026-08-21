@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
@@ -217,6 +218,14 @@ class ControlOverlayService : Service() {
                 else -> false
             }
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val metrics = windowManager.currentWindowMetrics
+        val bounds = metrics.bounds
+        screenWidth = bounds.width()
+        screenHeight = bounds.height()
     }
 
     private fun detectMode(event: MotionEvent): Mode {
