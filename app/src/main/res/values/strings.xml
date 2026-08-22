@@ -31,6 +31,7 @@
     <string name="software_hardware_encryption_warnings">This feature uses both software and hardware encryption. Before uninstalling, you must decrypt all hardware‑encrypted files; otherwise they will be permanently undecryptable, and reinstalling won\'t recover them. Software‑encrypted files are not subject to this limitation—as long as you remember the password, you can still decrypt them even after reinstalling this software.</string>
     <string name="hide_application_icon">Hide application icon</string>
     <string name="hide_application_icon_description">Open this application via Settings-Apps-ScreenshotFaker-SettingsInApplication</string>
+    <string name="hide_application_icon_warnings">This operation will hide desktop icon (Some devices require reboot to hide completely). You can open this application via Settings-Apps-ScreenshotFaker-SettingsInApplication</string>
     <string name="hide_from_recent">Hide from recent tasks</string>
     <string name="hide_this_application_from_recent_tasks">Hide this application from recent tasks</string>
     <string name="start_daemon">Start daemon</string>

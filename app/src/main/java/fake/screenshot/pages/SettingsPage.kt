@@ -116,6 +116,7 @@ fun SettingsCompose(navController: NavController) {
     var daemonConfigDialog by remember { mutableStateOf(false) }
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
+    var hideIconWarnings by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
     LaunchedEffect(daemonSocketPort) {
         isDaemonRunning = DaemonManager.isDaemonRunning()
@@ -200,17 +201,21 @@ fun SettingsCompose(navController: NavController) {
                         checked = hideIcon,
                         onCheckedChange = {
                             scope.launch {
-                                context.apply {
-                                    packageManager.setComponentEnabledSetting(
-                                        ComponentName(
-                                            packageName,
-                                            "$packageName.MainActivityAlias"
-                                        ),
-                                        if (it) PackageManager.COMPONENT_ENABLED_STATE_DISABLED else PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                        PackageManager.DONT_KILL_APP
-                                    )
+                                if (it) {
+                                    hideIconWarnings = true
+                                } else {
+                                    context.apply {
+                                        packageManager.setComponentEnabledSetting(
+                                            ComponentName(
+                                                packageName,
+                                                "$packageName.MainActivityAlias"
+                                            ),
+                                            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                            PackageManager.DONT_KILL_APP
+                                        )
+                                    }
+                                    ConfigManager.saveData(context, "hide_icon", false)
                                 }
-                                ConfigManager.saveData(context, "hide_icon", it)
                             }
                         }
                     )
@@ -593,6 +598,44 @@ fun SettingsCompose(navController: NavController) {
                 },
                 dismissButton = {
                     TextButton(onClick = { fileEncryptionWarnings = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (hideIconWarnings) {
+            CenteredAlertDialog(
+                onDismissRequest = { },
+                title = {
+                    Text(text = stringResource(R.string.warning))
+                },
+                text = {
+                    Text(stringResource(R.string.hide_application_icon_warnings))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                context.apply {
+                                    packageManager.setComponentEnabledSetting(
+                                        ComponentName(
+                                            packageName,
+                                            "$packageName.MainActivityAlias"
+                                        ),
+                                        PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                                        PackageManager.DONT_KILL_APP
+                                    )
+                                }
+                                ConfigManager.saveData(context, "hide_icon", true)
+                            }
+                            hideIconWarnings = false
+                        },
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { hideIconWarnings = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
