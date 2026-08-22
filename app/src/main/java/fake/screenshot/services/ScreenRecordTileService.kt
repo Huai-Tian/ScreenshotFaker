@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 class ScreenRecordTileService : TileService() {
+    private val tempPath = "/data/local/tmp/"
     private var clicked = false
     override fun onClick() {
         super.onClick()
@@ -76,20 +77,19 @@ class ScreenRecordTileService : TileService() {
                     key = "encrypt_outputs",
                     defaultValue = false
                 )
-                with(File(savePath)) {
+                File(savePath).apply {
                     if (!exists()) mkdirs()
                 }
-                val filePath = "${savePath}/${
-                    when {
-                        fullRandom -> Auxiliary.getRandomStringEx((1..12).random())
-                        customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
-                        else -> "${Auxiliary.getCurrentDateString()}_${
-                            Auxiliary.getRandomString(
-                                4
-                            )
-                        }$suffix"
-                    }
-                }"
+                val fileName = when {
+                    fullRandom -> Auxiliary.getRandomStringEx((16..24).random())
+                    customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
+                    else -> "${Auxiliary.getCurrentDateString()}_${
+                        Auxiliary.getRandomString(
+                            4
+                        )
+                    }$suffix"
+                }
+                val tempName = Auxiliary.getRandomStringEx((20..35).random())
                 val args = listOf(
                     "screenrecord",
                     "--time-limit", duration,
@@ -97,16 +97,19 @@ class ScreenRecordTileService : TileService() {
                     bitrate,
                     resolution,
                     bugreport,
-                    filePath
+                    if (encryptOutputs) tempPath + tempName else "$savePath/$fileName"
                 ).filter { it.isNotEmpty() }
                 Auxiliary.exec(args.joinToString(" "))
                 if (encryptOutputs) {
+                    Auxiliary.exec("chmod 444 ${tempPath + tempName}")
                     try {
-                        val originalFile = File(filePath)
-                        val (nonce, ciphertext) = EncryptManager.encryptByKeystore(originalFile.readBytes())
-                        val encryptedData = nonce + ciphertext
-                        originalFile.writeBytes(encryptedData)
+                        File(tempPath + tempName).apply {
+                            val encrypted = File("$savePath/$fileName")
+                            EncryptManager.encryptFileByKeystore(this, encrypted)
+                        }
                     } catch (_: Exception) {
+                    } finally {
+                        Auxiliary.exec("rm -f ${tempPath + tempName}")
                     }
                 }
             }
