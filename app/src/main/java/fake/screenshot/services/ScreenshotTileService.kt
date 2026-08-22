@@ -1,7 +1,9 @@
 package fake.screenshot.services
 
 import android.os.Environment
+import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import fake.screenshot.R
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.EncryptManager
@@ -13,13 +15,9 @@ import java.io.File
 class ScreenshotTileService : TileService() {
     private val tempPath = "/data/local/tmp/"
     private var clicked = false
-    override fun onClick() {
-        super.onClick()
-        clicked = true
-    }
+    private var showingNoPermission = false
 
-    override fun onStopListening() {
-        super.onStopListening()
+    private fun screenshot() {
         if (Auxiliary.isShellActivated && clicked) {
             CoroutineScope(Dispatchers.IO).launch {
                 val savePath = ConfigManager.getDataOnce(
@@ -91,6 +89,56 @@ class ScreenshotTileService : TileService() {
                 }
             }
         }
+    }
+
+    override fun onStartListening() {
+        super.onStartListening()
+        Auxiliary.refreshShellState()
         clicked = false
+        showingNoPermission = false
+        updateTileUI()
+    }
+
+    private fun updateTileUI() {
+        qsTile?.apply {
+            state = if (clicked) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+            label = when {
+                showingNoPermission -> getString(R.string.no_permission)
+                clicked -> getString(R.string.collapse_to_start)
+                else -> getString(R.string.stealth_screenshot)
+            }
+            updateTile()
+        }
+    }
+
+    override fun onClick() {
+        super.onClick()
+        Auxiliary.refreshShellState()
+
+        if (!Auxiliary.isShellActivated) {
+            clicked = false
+            showingNoPermission = !showingNoPermission
+            updateTileUI()
+            return
+        }
+
+        clicked = when (qsTile?.state) {
+            Tile.STATE_INACTIVE -> true
+            Tile.STATE_ACTIVE -> false
+            else -> false
+        }
+        updateTileUI()
+    }
+
+    override fun onStopListening() {
+        super.onStopListening()
+        Auxiliary.refreshShellState()
+        if (Auxiliary.isShellActivated && clicked) {
+            screenshot()
+        } else {
+            showingNoPermission = false
+        }
+        clicked = false
+        updateTileUI()
     }
 }
