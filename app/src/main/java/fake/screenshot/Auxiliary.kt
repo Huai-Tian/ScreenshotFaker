@@ -53,7 +53,8 @@ object Auxiliary {
     fun refreshShellState() {
         isShellActivated = try {
             val binder = Shizuku.getBinder()
-            val result = binder != null && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            val result =
+                binder != null && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
             result
         } catch (_: Exception) {
             false

@@ -30,6 +30,7 @@ It allows you to customize how your personal information is protected during scr
   Supports viewing screenshot and screen recording files in a floating window without being captured by screenshots.  
   Supports hiding this app from recent tasks.  
   Supports hiding the desktop icon and reopening the app through a reliable method.  
+  Supports reinstalling with a custom package name and app attributes.  
   Retains screen capture, recording, and sharing capabilities even after the software is uninstalled.
 
 - **Extreme privacy protection**  
@@ -53,13 +54,16 @@ This project is currently in an early development stage. Bugs, incomplete featur
 
 ---
 
-## ⚙️ Technical Dependencies
+## ⚙️ Privilege Dependencies
 
 This project's core functionality relies on **LSPosed** and **Shizuku**:
 
 **LSPosed**
 - Protects private content from being captured in screenshots.
+- Supports taking screenshots on pages where screenshots are not allowed.
 - Bypasses screenshot detection by specific apps.
+- Supports preventing specific apps from detecting floating windows.
+- Supports setting floating windows for specific apps to enable screen capture passthrough.
 
 **Shizuku**
 - Enables stealthy screen capture, recording, and sharing.
@@ -67,7 +71,15 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 - Retains screen capture, recording, and sharing capabilities even after uninstallation.
 
 **Root**
-- Rooted users can grant Root permission directly, providing the same functionality as Shizuku — **choose either one**.
+- Provides the same functionality as Shizuku, **but with stronger concealment**.
+- The floating window cannot be detected or blocked by underlying apps.
+
+**No privileges needed**
+- Hardware-level and software-level strong file encryption and decryption.
+- View screenshot and screen recording files in a floating window that cannot be captured by screenshots.
+- Hide this app from recent tasks.
+- Hide the desktop icon and reopen the app through a reliable method.
+- Reinstall with a custom package name and app attributes.
 
 ---
 
@@ -84,11 +96,11 @@ This project is initiated by the developer out of personal interest and for tech
 - **Non-Profit Purpose**:  
   This project involves no commercial operations, and the author derives no direct or indirect financial benefit from it.
 
-- **Resale Prohibited**:  
-  Resale, redistribution for profit, or commercial use of this project is strictly prohibited. Please obtain it only from this repository (GitHub) or other officially designated channels. The developer assumes no responsibility for any issues arising from unofficial sources.
-
 - **Research-Oriented**:  
   This project is consistently positioned for **security research, privacy protection, and software testing** — providing a research tool for the community, not a commercial product. Any commercial use of this project is the user's own initiative and is unrelated to this project.
+
+- **Resale Prohibited**:  
+  Resale, redistribution for profit, or commercial use of this project is strictly prohibited. Please obtain it only from this repository (GitHub) or other officially designated channels. The developer assumes no responsibility for any issues arising from unofficial sources.
 
 ---
 
@@ -96,10 +108,17 @@ This project is initiated by the developer out of personal interest and for tech
 
 - **Purpose Limitation**:  
   This project is intended for **privacy protection, security research, software testing, and educational purposes** only.  
-  Do not use this project for any illegal purposes (including but not limited to exam cheating and data falsification).
+  Do not use this project for any illegal purposes (including but not limited to exam cheating, data falsification, and financial fraud).
+
+- **Consequences Warning**:  
+  Bypassing screenshot detection with this software **may violate the terms of service of third-party applications**, and may result in account suspension, device restrictions, or other losses.  
+  You should assess the risks before using it. The developer and contributors **are not responsible for any account bans, device restrictions, asset losses, or other consequences** arising from such use.
 
 - **No Warranty**:  
   This software is provided under the terms of its license, **without any express or implied warranties**, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
+
+- **Compatibility Disclaimer**:  
+  This software **does not guarantee full compatibility with all OS versions, device models, or third-party applications**. The developer assumes no responsibility for functional issues or losses caused by system differences, application updates, or other uncontrollable factors.
 
 - **Limitation of Liability**:  
   To the fullest extent permitted by applicable law, **in no event shall the author or contributors be liable** for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with the use or inability to use this software, even if advised of the possibility of such damages.
