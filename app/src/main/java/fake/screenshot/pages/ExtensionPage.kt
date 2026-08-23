@@ -821,7 +821,7 @@ fun ExtensionCompose() {
                             onValueChange = {
                                 screenRecordConfigDialogDurationInputText = it
                             }, // 可编辑
-                            label = { Text(stringResource(R.string.stealth_screenRecord_duration)) },
+                            label = { Text(stringResource(R.string.stealth_screenRecord_limit)) },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

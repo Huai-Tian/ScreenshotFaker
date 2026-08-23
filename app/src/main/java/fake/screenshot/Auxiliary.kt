@@ -3,7 +3,6 @@ package fake.screenshot
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import android.view.View
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,15 +36,26 @@ object Auxiliary {
         1 to it.stackTraceToString()
     }
 
+    fun execGetPid(cmd: String): Int? {
+        val (exitCode, output) = exec(cmd)
+        return if (exitCode == 0) {
+            output.trim().toIntOrNull()
+        } else {
+            null
+        }
+    }
+
+    fun killProcess(pid: Int): Boolean {
+        val (exitCode, _) = exec("kill -2 $pid")
+        return exitCode == 0
+    }
+
     fun refreshShellState() {
-        val oldState = isShellActivated
         isShellActivated = try {
             val binder = Shizuku.getBinder()
             val result = binder != null && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-            Log.d("MyAuxiliary", "refreshShellState: binder=${binder != null}, result=$result, old=$oldState")
             result
-        } catch (e: Exception) {
-            Log.e("MyAuxiliary", "refreshShellState exception", e)
+        } catch (_: Exception) {
             false
         }
     }

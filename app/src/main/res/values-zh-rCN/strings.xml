@@ -55,6 +55,7 @@
     <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>
     <string name="click_to_config_stealth_screenshot">点击配置无痕截图</string>
+    <string name="recording">录屏中</string>
     <string name="click_to_config_stealth_screen_recording">点击配置无痕录屏</string>
     <string name="stealth_overlay_description">点击启动无痕悬浮窗</string>
     <string name="stealth_screen_sharing">无痕屏幕共享</string>
@@ -66,7 +67,7 @@
     <string name="config_stealth_screenRecord">配置无痕录屏</string>
     <string name="stealth_screenRecord_save_path">录屏保存目录</string>
     <string name="stealth_screenRecord_bugreport">启用报告模式</string>
-    <string name="stealth_screenRecord_duration">录屏时长（秒）</string>
+    <string name="stealth_screenRecord_limit">录屏最大时长（秒，0为无限制）</string>
     <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
     <string name="stealth_screenShare_port">屏幕共享本地端口</string>

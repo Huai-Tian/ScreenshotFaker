@@ -67,11 +67,12 @@
     <string name="physical_display_id">Physical display id</string>
     <!--ScreenRecord-->
     <string name="stealth_screen_recording">Stealth screen recording</string>
+    <string name="recording">Recording</string>
     <string name="click_to_config_stealth_screen_recording">Click to config stealth screen recording</string>
     <string name="config_stealth_screenRecord">Config stealth screenRecord</string>
     <string name="stealth_screenRecord_save_path">ScreenRecord save path</string>
     <string name="stealth_screenRecord_bugreport">Enable Bugreport</string>
-    <string name="stealth_screenRecord_duration">ScreenRecord duration (seconds)</string>
+    <string name="stealth_screenRecord_limit">ScreenRecord time limit (seconds, 0 means no limit)</string>
     <string name="stealth_screenRecord_bitrate">Bitrate (bps)</string>
     <string name="stealth_screenRecord_size">Resolution (WIDTHxHEIGHT)</string>
     <!--Overlay-->
