@@ -75,6 +75,7 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 - The floating window cannot be detected or blocked by underlying apps.
 
 **No privileges needed**
+- Receive screen sharing from this app.
 - Hardware-level and software-level strong file encryption and decryption.
 - View screenshot and screen recording files in a floating window that cannot be captured by screenshots.
 - Hide this app from recent tasks.
