@@ -24,6 +24,7 @@ It allows you to customize how your personal information is protected during scr
   Bypasses application-layer malicious detection via direct system-level calls.
 
 - **Custom trigger methods**  
+  Most configurations are user‑customizable;  
   Supports system-log-based triggering for screen capture, recording, and sharing — not limited to conventional gestures.
 
 - **Extreme stealth support**  
@@ -34,12 +35,12 @@ It allows you to customize how your personal information is protected during scr
   Retains screen capture, recording, and sharing capabilities even after the software is uninstalled.
 
 - **Extreme privacy protection**  
-  Most configurations are user‑customizable;  
   All configuration data is stored with strong encryption;  
   Page protection against screenshot‑based configuration leakage;  
   Supports automatic high‑strength encryption for screenshot and screen recording files;  
   Filenames support full randomization;  
-  All port communications are secured with high‑strength encryption.
+  All port communications are secured with high‑strength encryption;  
+  Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.
 
 - **Comprehensive screen sharing**  
   Supports receiving screen sharing, initiating LAN screen sharing, and remote sharing via SSH.
