@@ -77,6 +77,7 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 
 **No privileges needed**
 - Receive screen sharing from this app.
+- In-app password and a duress password support.
 - Hardware-level and software-level strong file encryption and decryption.
 - View screenshot and screen recording files in a floating window that cannot be captured by screenshots.
 - Hide this app from recent tasks.
