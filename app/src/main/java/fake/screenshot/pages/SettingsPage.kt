@@ -8,37 +8,34 @@ import android.content.pm.PackageManager
 import android.os.Environment
 import android.provider.Settings
 import android.view.WindowManager
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
 import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
+import fake.screenshot.styles.*
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 import androidx.core.net.toUri
+import fake.screenshot.RepackIdentity
+import androidx.core.graphics.scale
+import fake.screenshot.RepackManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,7 +114,51 @@ fun SettingsCompose(navController: NavController) {
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var hideIconWarnings by remember { mutableStateOf(false) }
+    var installPackageRequireDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
+    //Repack
+    var repackConfigDialog by remember { mutableStateOf(false) }
+    var repackPackageNameInputText by remember { mutableStateOf("") }
+    var repackAppNameEnInputText by remember { mutableStateOf("") }
+    var repackAppNameZhInputText by remember { mutableStateOf("") }
+    var repackDescriptionEnInputText by remember { mutableStateOf("") }
+    var repackDescriptionZhInputText by remember { mutableStateOf("") }
+    var repackIcon by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var repackRepacking by remember { mutableStateOf(false) }
+    var repackMessage by remember { mutableStateOf<String?>(null) }
+    val repackIconPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    android.graphics.BitmapFactory.decodeStream(input)?.let { bitmap ->
+                        val max = 512
+                        val scale = max.toFloat() / maxOf(bitmap.width, bitmap.height)
+                        repackIcon = if (scale < 1f) {
+                            bitmap.let {
+                                it.scale(
+                                    (it.width * scale).toInt().coerceAtLeast(1),
+                                    (it.height * scale).toInt().coerceAtLeast(1)
+                                )
+                            }
+                        } else bitmap
+                    }
+                }
+            }
+        }
+    }
+    val isRepackInputValid by remember {
+        derivedStateOf {
+            RepackIdentity(
+                packageName = repackPackageNameInputText,
+                appNameEn = repackAppNameEnInputText,
+                appNameZh = repackAppNameZhInputText,
+                descriptionEn = repackDescriptionEnInputText,
+                descriptionZh = repackDescriptionZhInputText
+            ).validate() == null
+        }
+    }
     LaunchedEffect(daemonSocketPort) {
         isDaemonRunning = DaemonManager.isDaemonRunning()
     }
@@ -195,52 +236,6 @@ fun SettingsCompose(navController: NavController) {
             item {
                 CommonCard {
                     TwoStatePreference(
-                        icon = Icons.Default.VisibilityOff,
-                        title = stringResource(R.string.hide_application_icon),
-                        subtitle = stringResource(R.string.hide_application_icon_description),
-                        checked = hideIcon,
-                        onCheckedChange = {
-                            scope.launch {
-                                if (it) {
-                                    hideIconWarnings = true
-                                } else {
-                                    context.apply {
-                                        packageManager.setComponentEnabledSetting(
-                                            ComponentName(
-                                                packageName,
-                                                "$packageName.MainActivityAlias"
-                                            ),
-                                            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                            PackageManager.DONT_KILL_APP
-                                        )
-                                    }
-                                    ConfigManager.saveData(context, "hide_icon", false)
-                                }
-                            }
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    TwoStatePreference(
-                        icon = Icons.Default.LayersClear,
-                        title = stringResource(R.string.hide_from_recent),
-                        subtitle = stringResource(R.string.hide_this_application_from_recent_tasks),
-                        checked = hideFromRecent,
-                        onCheckedChange = {
-                            scope.launch {
-                                context.getSystemService(ActivityManager::class.java)
-                                    .appTasks.forEach { task -> task.setExcludeFromRecents(it) }
-                                ConfigManager.saveData(context, "hide_from_recent", it)
-                            }
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    TwoStatePreference(
                         icon = Icons.Default.Shield,
                         title = stringResource(R.string.start_daemon),
                         subtitle = stringResource(R.string.start_daemon_to_work_background),
@@ -305,6 +300,52 @@ fun SettingsCompose(navController: NavController) {
             }
             item {
                 CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.VisibilityOff,
+                        title = stringResource(R.string.hide_application_icon),
+                        subtitle = stringResource(R.string.hide_application_icon_description),
+                        checked = hideIcon,
+                        onCheckedChange = {
+                            scope.launch {
+                                if (it) {
+                                    hideIconWarnings = true
+                                } else {
+                                    context.apply {
+                                        packageManager.setComponentEnabledSetting(
+                                            ComponentName(
+                                                packageName,
+                                                "$packageName.MainActivityAlias"
+                                            ),
+                                            PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                                            PackageManager.DONT_KILL_APP
+                                        )
+                                    }
+                                    ConfigManager.saveData(context, "hide_icon", false)
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    TwoStatePreference(
+                        icon = Icons.Default.LayersClear,
+                        title = stringResource(R.string.hide_from_recent),
+                        subtitle = stringResource(R.string.hide_this_application_from_recent_tasks),
+                        checked = hideFromRecent,
+                        onCheckedChange = {
+                            scope.launch {
+                                context.getSystemService(ActivityManager::class.java)
+                                    .appTasks.forEach { task -> task.setExcludeFromRecents(it) }
+                                ConfigManager.saveData(context, "hide_from_recent", it)
+                            }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
                     PreferenceItemEx(
                         icon = Icons.Default.CastConnected,
                         title = stringResource(R.string.receive_stealth_screen_sharing),
@@ -316,6 +357,26 @@ fun SettingsCompose(navController: NavController) {
                             )
                         },
                         onClick = { navController.navigate("receive_screen_sharing") }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.DesignServices,
+                        title = stringResource(R.string.custom_application_features),
+                        subtitle = stringResource(R.string.custom_application_features_description),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            if (!context.packageManager.canRequestPackageInstalls()) installPackageRequireDialog =
+                                true
+                            else repackConfigDialog = true
+                        }
                     )
                 }
             }
@@ -641,189 +702,183 @@ fun SettingsCompose(navController: NavController) {
                 }
             )
         }
-    }
-}
-
-@Composable
-fun CommonCard(content: @Composable () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(
-                alpha = 0.3f
-            )
-        ),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-    ) {
-        content()
-    }
-}
-
-@Composable
-fun PreferenceItemEx(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    trailingContent: @Composable () -> Unit,
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(72.dp)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = ripple(),   // ← 关键：启用波纹
-                onClick = onClick
-            )
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(24.dp))
-        Spacer(modifier = Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(text = subtitle, fontSize = 13.sp, color = Color.Gray)
-        }
-        trailingContent()
-    }
-}
-
-@Composable
-fun PreferenceItem(
-    icon: ImageVector,
-    title: String,
-    trailingContent: @Composable () -> Unit,
-    onClick: () -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = ripple(),   // ← 关键：启用波纹
-                onClick = onClick
-            )
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(24.dp))
-        Spacer(modifier = Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-        }
-        trailingContent()
-    }
-}
-
-// 开关项
-@Composable
-fun TwoStatePreference(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(72.dp)
-            .clickable(
-                interactionSource = interactionSource,
-                indication = ripple(),
-                onClick = { onCheckedChange(!checked) }
-            )
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(24.dp))
-        Spacer(modifier = Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(text = subtitle, fontSize = 13.sp, color = Color.Gray)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = null,        // 禁用 Switch 自身的点击
-            enabled = true,               // 视觉上不可交互，避免叠加波纹
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = Color.Blue,
-                uncheckedThumbColor = Color.White,
-                uncheckedTrackColor = Color.Gray.copy(alpha = 0.5f)
-            )
-        )
-    }
-}
-
-@Composable
-fun CenteredAlertDialog(
-    onDismissRequest: () -> Unit,
-    confirmButton: @Composable () -> Unit,
-    modifier: Modifier = Modifier,
-    dismissButton: @Composable (() -> Unit)? = null,
-    title: @Composable (() -> Unit)? = null,
-    text: @Composable (() -> Unit)? = null,
-    shape: Shape = RoundedCornerShape(28.dp),
-    containerColor: Color = MaterialTheme.colorScheme.surface
-) {
-    Dialog(
-        onDismissRequest = onDismissRequest,
-        properties = DialogProperties(
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        Surface(
-            shape = shape,
-            color = containerColor,
-            modifier = modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(24.dp)
-            ) {
-                if (title != null) {
-                    ProvideTextStyle(value = MaterialTheme.typography.titleLarge) {
-                        title()
-                    }
-                    Spacer(modifier = Modifier.height(if (text != null) 16.dp else 24.dp))
-                }
-                if (text != null) {
-                    ProvideTextStyle(value = MaterialTheme.typography.bodyMedium) {
-                        text()
-                    }
-                    Spacer(modifier = Modifier.height(24.dp))
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    if (dismissButton != null) {
-                        Box(
-                            modifier = Modifier.weight(1f),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            dismissButton()
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.weight(1f))
-                    }
-                    Box(
-                        modifier = Modifier.weight(1f),
-                        contentAlignment = Alignment.Center
+        if (installPackageRequireDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { installPackageRequireDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.tips))
+                },
+                text = {
+                    Text(stringResource(R.string.install_package_permission_required))
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent =
+                                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                                    data = "package:${context.packageName}".toUri()
+                                }
+                            context.startActivity(intent)
+                            installPackageRequireDialog = false
+                        },
                     ) {
-                        confirmButton()
+                        Text(stringResource(R.string.go_to_settings))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { installPackageRequireDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
                     }
                 }
-            }
+            )
+        }
+        if (repackConfigDialog) {
+            val cannotInstall = stringResource(R.string.cannot_install)
+            val packagingFailed = stringResource(R.string.packaging_failed)
+            val packagingSuccess = stringResource(R.string.packaging_success)
+            CenteredAlertDialog(
+                onDismissRequest = {
+                    if (!repackRepacking) repackConfigDialog = false
+                },
+                title = { Text(stringResource(R.string.custom_application_features)) },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = repackPackageNameInputText,
+                            onValueChange = { repackPackageNameInputText = it.trim() },
+                            label = { Text(stringResource(R.string.new_package_name)) },
+                            placeholder = { Text("com.example.notes") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = !repackRepacking
+                        )
+                        OutlinedTextField(
+                            value = repackAppNameEnInputText,
+                            onValueChange = { repackAppNameEnInputText = it },
+                            label = { Text(stringResource(R.string.application_name_english)) },
+                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = !repackRepacking
+                        )
+                        OutlinedTextField(
+                            value = repackAppNameZhInputText,
+                            onValueChange = { repackAppNameZhInputText = it },
+                            label = { Text(stringResource(R.string.application_name_chinese_simplified)) },
+                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            enabled = !repackRepacking
+                        )
+                        OutlinedTextField(
+                            value = repackDescriptionEnInputText,
+                            onValueChange = { repackDescriptionEnInputText = it },
+                            label = { Text(stringResource(R.string.application_description_english)) },
+                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !repackRepacking
+                        )
+                        OutlinedTextField(
+                            value = repackDescriptionZhInputText,
+                            onValueChange = { repackDescriptionZhInputText = it },
+                            label = { Text(stringResource(R.string.application_description_chinese_simplified)) },
+                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !repackRepacking
+                        )
+                        PreferenceItemEx(
+                            icon = Icons.Default.Image,
+                            title = if (repackIcon == null) stringResource(R.string.choose_new_icon) else stringResource(R.string.icon_selected),
+                            subtitle = stringResource(R.string.retain_if_not_selected),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                if (!repackRepacking) repackIconPicker.launch("image/*")
+                            }
+                        )
+                        if (repackIcon != null) {
+                            repackIcon?.let {
+                                androidx.compose.foundation.Image(
+                                    bitmap = it.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .padding(top = 8.dp)
+                                        .size(72.dp)
+                                )
+                            }
+                        }
+                        if (repackRepacking) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        }
+                        repackMessage?.let {
+                            Text(
+                                text = it,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val identity = RepackIdentity(
+                                packageName = repackPackageNameInputText,
+                                appNameEn = repackAppNameEnInputText,
+                                appNameZh = repackAppNameZhInputText,
+                                descriptionEn = repackDescriptionEnInputText,
+                                descriptionZh = repackDescriptionZhInputText
+                            )
+                            val invalid = identity.validate()
+                            if (invalid != null) {
+                                repackMessage = invalid
+                                return@TextButton
+                            }
+                            repackRepacking = true
+                            repackMessage = null
+                            scope.launch {
+                                RepackManager.repack(context, identity, repackIcon).fold(
+                                    onSuccess = { apk ->
+                                        repackRepacking = false
+                                        runCatching {
+                                            RepackManager.install(context, apk, identity.packageName)
+                                        }.onFailure {
+                                            repackMessage = "$cannotInstall${it.message ?: it.javaClass.simpleName}"
+                                        }.onSuccess {
+                                            repackMessage = packagingSuccess
+                                        }
+                                    },
+                                    onFailure = {
+                                        repackMessage = "$packagingFailed${it.message ?: it.javaClass.simpleName}"
+                                        repackRepacking = false
+                                    }
+                                )
+                            }
+                        },
+                        enabled = !repackRepacking && isRepackInputValid
+                    ) {
+                        Text(stringResource(R.string.packge_and_install))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { repackConfigDialog = false },
+                        enabled = !repackRepacking
+                    ) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
         }
     }
 }

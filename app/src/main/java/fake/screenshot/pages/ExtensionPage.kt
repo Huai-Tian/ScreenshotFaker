@@ -31,6 +31,7 @@ import fake.screenshot.ConfigManager
 import fake.screenshot.DaemonManager
 import fake.screenshot.EncryptManager
 import fake.screenshot.OverlayServiceManager
+import fake.screenshot.styles.*
 import fake.screenshot.R
 import fake.screenshot.services.DisplayOverlayService
 import kotlinx.coroutines.Dispatchers

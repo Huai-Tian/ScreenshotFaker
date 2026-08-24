@@ -92,6 +92,7 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.material3)
+    implementation(libs.apksig)
     implementation(libs.androidx.datastore.tink)
     implementation(libs.tink.android)
     implementation(libs.androidx.documentfile)

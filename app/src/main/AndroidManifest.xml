@@ -10,6 +10,9 @@
         android:name="android.permission.FOREGROUND_SERVICE"
         tools:ignore="ForegroundServicesPolicy" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission
+        android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:ignore="RequestInstallPackagesPolicy" />
 
     <application
         android:name=".LSPosedServiceManager"
@@ -62,9 +65,9 @@
         </service>
         <service
             android:name=".services.ControlOverlayService"
+            android:configChanges="orientation|screenSize"
             android:enabled="true"
             android:exported="false"
-            android:configChanges="orientation|screenSize"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

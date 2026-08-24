@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.DaemonManager
+import fake.screenshot.styles.*
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 

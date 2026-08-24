@@ -50,6 +50,22 @@
     <string name="receive_screen_sharing_from_ScreenshotFaker">Receive stealth screen sharing from ScreenshotFaker</string>
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
     <string name="filter_content_observer">Filter monitoring of screenshot files from the target app</string>
+    <!--Custom application features-->
+    <string name="custom_application_features">Custom application features</string>
+    <string name="custom_application_features_description">Custom application features to bypass detection</string>
+    <string name="install_package_permission_required">Package installation permission is required for this function.</string>
+    <string name="new_package_name">New package name</string>
+    <string name="application_name_english">Application name (English)</string>
+    <string name="application_name_chinese_simplified">Application name (Simplified Chinese)</string>
+    <string name="application_description_english">Application description (English)</string>
+    <string name="application_description_chinese_simplified">Application description (Simplified Chinese)</string>
+    <string name="choose_new_icon">Choose new icon</string>
+    <string name="icon_selected">Icon selected (tap to reselect)</string>
+    <string name="retain_if_not_selected">If no new icon is selected, the original icon will be retained.</string>
+    <string name="cannot_install">Cannot install: </string>
+    <string name="packaging_success">Packaging complete. Please confirm installation in the system dialog.</string>
+    <string name="packaging_failed">Packaging failed: </string>
+    <string name="packge_and_install">Package and install</string>
     <string name="backup">Backup</string>
     <string name="backup_config">Backup Config</string>
     <string name="restore">Restore</string>
@@ -113,6 +129,7 @@
     <!--Others-->
     <string name="default_if_empty">Default if empty</string>
     <string name="disable_if_empty">Disable if empty</string>
+    <string name="keep_current_if_blank">Leave blank to keep the current value</string>
     <string name="stealth_file_prefix">File prefix</string>
     <string name="stealth_file_suffix">File suffix</string>
     <string name="custom_file_prefix">Custom file prefix</string>
