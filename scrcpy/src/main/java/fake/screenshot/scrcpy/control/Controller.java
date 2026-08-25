@@ -113,6 +113,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private ClipboardManager clipboardManager;
     private android.content.ClipboardManager.OnPrimaryClipChangedListener clipboardListener;
 
+    // 诊断：本会话是否已记录过首条控制消息
+    private boolean firstControlMessage = true;
+
     // Used for resetting video encoding on RESET_VIDEO message or for sending camera controls
     private SurfaceCapture surfaceCapture;
 
@@ -348,6 +351,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
 
         int type = msg.getType();
+        // 诊断日志：首条控制消息到达即记录（控制无效问题时据此判断消息是否到达服务端）
+        if (firstControlMessage) {
+            firstControlMessage = false;
+            Ln.i("First control message received: type=" + type);
+        }
 
         // Events for all sources (display or camera)
         switch (type) {

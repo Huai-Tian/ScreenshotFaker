@@ -293,10 +293,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 val id = readChannelId(socket)
                 when {
                     id in 0..2 && !channels.containsKey(id) -> channels[id] = socket
-                    // 旧版 server 兼容：audio/control 的 dummy byte 均为 0，
-                    // 第一条之后再次读到 0 说明对端是旧版（发送端 APK 未更新），
-                    // 标识字节实际是 dummy byte，按规范顺序回退配对
-                    id == 0 && channels.containsKey(CHANNEL_VIDEO) && channels.size == 1 -> {
+                    // 旧版 server 兼容：旧版在 audio/control 通道也发 dummy byte 0，
+                    // video 已确认后再读到 0 说明对端是旧版（发送端 APK 未更新），
+                    // 该字节实际是 dummy byte，按规范顺序回退配对下一通道。
+                    // 新版 server 各通道标识唯一，不会重复发 0，此分支不触发
+                    id == 0 && channels.containsKey(CHANNEL_VIDEO) -> {
                         val fallback = canonicalOrder.first { it !in channels }
                         channels[fallback] = socket
                     }

@@ -85,6 +85,9 @@ public final class Server {
     }
 
     private static void scrcpy(Options options) throws IOException, ConfigurationException {
+        // 构建标记：logcat 中据此确认设备上运行的 server 是否为会话循环版本
+        // （排查 APK 打包过期 server 二进制的问题）
+        Ln.i("Server build: session-loop");
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
@@ -214,6 +217,8 @@ public final class Server {
     /** 运行单个会话（含内部错误处理，不向外传播异常） */
     private static void runSession(Options options, CleanUp cleanUp, DesktopConnection connection) {
         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
+        // 诊断日志：确认各通道是否协商成功（控制无效问题时据此定位）
+        Ln.i("Session start: video=" + options.getVideo() + " audio=" + options.getAudio() + " control=" + options.getControl());
         try {
             if (options.getSendDeviceMeta()) {
                 connection.sendDeviceMeta(Device.getDeviceName());
