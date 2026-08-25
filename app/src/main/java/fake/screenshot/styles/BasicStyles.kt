@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -190,8 +192,16 @@ fun CenteredAlertDialog(
                     Spacer(modifier = Modifier.height(if (text != null) 16.dp else 24.dp))
                 }
                 if (text != null) {
-                    ProvideTextStyle(value = MaterialTheme.typography.bodyMedium) {
-                        text()
+                    // 内容过长时可滚动：weight(fill=false) 取"所需高度与剩余可用高度"
+                    // 的较小值，超出部分滚动显示，标题与底部按钮始终可见
+                    Box(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        ProvideTextStyle(value = MaterialTheme.typography.bodyMedium) {
+                            text()
+                        }
                     }
                     Spacer(modifier = Modifier.height(24.dp))
                 }

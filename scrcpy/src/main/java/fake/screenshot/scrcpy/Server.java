@@ -85,9 +85,11 @@ public final class Server {
     }
 
     private static void scrcpy(Options options) throws IOException, ConfigurationException {
-        // 构建标记：logcat 中据此确认设备上运行的 server 是否为会话循环版本
-        // （排查 APK 打包过期 server 二进制的问题）
-        Ln.i("Server build: session-loop");
+        // 构建标记：logcat 中据此确认设备上运行的 server 是否为最新版本。
+        // 若日志中出现的不是本字符串（或完全没有），说明 APK 打包了过期的
+        // server 二进制——检查 app/build.gradle.kts 的 injectScrcpyAsLib
+        // 构建接线（必须直接依赖 :scrcpy:packageRelease，不可用嵌套 gradlew）
+        Ln.i("Server build: serial-proxy-v2");
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
@@ -122,19 +124,37 @@ public final class Server {
                 String socketName = DesktopConnection.getSocketName(scid);
                 try (ServerSocket serverSocket = createServerSocket(tcpPort, tcpLocalOnly)) {
                     Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
-                    // abstract socket 连接顺序控制：proxy 线程必须按 TCP accept 的先后
-                    // 顺序连接 abstract socket。server 端按 video → audio → control 顺序
-                    // accept，若各转发线程并发抢连 abstract，连接到达顺序与客户端连接
-                    // 顺序不一致时会产生通道错位配对（控制消息被写进 server 永不读取的
-                    // 通道，表现为控制完全失效且服务端无任何日志）
-                    final Object orderLock = new Object();
-                    final int[] nextConnectSeq = {0};
-                    int acceptSeq = 0;
+                    // 认证与 abstract socket 连接必须在 accept 线程内按序完成：
+                    // server 端按 video → audio → control 顺序 accept abstract 连接，
+                    // 若在各转发线程内并发连接，连接到达顺序可能与客户端连接顺序不一致，
+                    // 导致通道错位配对（控制消息被写进 server 永不读取的通道，控制完全失效）。
+                    // 在 accept 线程内串行处理则天然保序，且无需任何锁，不存在死锁可能
+                    // （此前按序放行的"顺序门"方案在认证失败分支不推进计数器，
+                    // 会让后续所有连接永久阻塞，表现为完全连不上）
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
-                        final int seq = acceptSeq++;
-                        Thread connThread = new Thread(() ->
-                                proxyConnection(clientSocket, socketName, authPassword, seq, orderLock, nextConnectSeq));
+                        LocalSocket localSocket = null;
+                        boolean ok = false;
+                        try {
+                            clientSocket.setTcpNoDelay(true);
+                            // 客户端异常掉线（无 FIN/RST）时依靠 keepalive 探测，避免连接长期泄漏
+                            clientSocket.setKeepAlive(true);
+                            ok = authenticate(clientSocket, authPassword);
+                            if (ok) {
+                                localSocket = new LocalSocket();
+                                localSocket.connect(new LocalSocketAddress(socketName));
+                            }
+                        } catch (IOException e) {
+                            ok = false;
+                        }
+                        if (!ok) {
+                            closeQuietly(clientSocket);
+                            closeQuietly(localSocket);
+                            continue;
+                        }
+                        final Socket relayClient = clientSocket;
+                        final LocalSocket relayLocal = localSocket;
+                        Thread connThread = new Thread(() -> relayConnection(relayClient, relayLocal));
                         connThread.setName("tcp_proxy_conn");
                         connThread.setDaemon(true);
                         connThread.start();
@@ -378,65 +398,28 @@ public final class Server {
         }
     }
 
-    private static void proxyConnection(Socket clientSocket, String socketName, String authPassword, int seq,
-                                        Object orderLock, int[] nextConnectSeq) {
-        LocalSocket localSocket = new LocalSocket();
-
-        try {
-            clientSocket.setTcpNoDelay(true);
-            // 客户端异常掉线（无 FIN/RST）时依靠 keepalive 探测，避免连接长期泄漏
-            clientSocket.setKeepAlive(true);
-        } catch (IOException ignored) {
-        }
-
-        // 共享密码握手：认证通过前不触碰 abstract socket。
-        // 对探测者的表现是"接受后短暂等待即断开"，不会暴露转发行为。
-        if (authPassword != null && !authPassword.isEmpty()) {
-            try {
-                clientSocket.setSoTimeout(AUTH_TIMEOUT_MS);
-                String received = readPasswordLine(clientSocket);
-                clientSocket.setSoTimeout(0);
-                if (received == null || !passwordMatches(received, authPassword)) {
-                    closeQuietly(clientSocket);
-                    closeQuietly(localSocket);
-                    return;
-                }
-            } catch (IOException e) {
-                closeQuietly(clientSocket);
-                closeQuietly(localSocket);
-                return;
-            }
-        }
-
-        // 等待轮到本连接（按 TCP accept 顺序）再连接 abstract socket，
-        // 保证 server 端通道配对顺序与客户端连接顺序一致
-        synchronized (orderLock) {
-            while (nextConnectSeq[0] != seq) {
-                try {
-                    orderLock.wait();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    closeQuietly(clientSocket);
-                    closeQuietly(localSocket);
-                    return;
-                }
-            }
+    /**
+     * 共享密码握手：认证通过前不触碰 abstract socket。
+     * 对探测者的表现是"接受后短暂等待即断开"，不会暴露转发行为。
+     * 返回 false 表示认证失败或连接已断开。
+     * 在 proxy accept 线程内串行调用，单个坏连接最多阻塞 [AUTH_TIMEOUT_MS]。
+     */
+    private static boolean authenticate(Socket clientSocket, String authPassword) {
+        if (authPassword == null || authPassword.isEmpty()) {
+            return true;
         }
         try {
-            localSocket.connect(new LocalSocketAddress(socketName));
+            clientSocket.setSoTimeout(AUTH_TIMEOUT_MS);
+            String received = readPasswordLine(clientSocket);
+            clientSocket.setSoTimeout(0);
+            return received != null && passwordMatches(received, authPassword);
         } catch (IOException e) {
-            // 连接失败立即关闭，不保留半开连接，减少端口指纹
-            closeQuietly(clientSocket);
-            closeQuietly(localSocket);
-            return;
-        } finally {
-            // 无论成功失败都放行下一个连接，避免后续连接永久等待
-            synchronized (orderLock) {
-                nextConnectSeq[0] = seq + 1;
-                orderLock.notifyAll();
-            }
+            return false;
         }
+    }
 
+    /** 双向转发一条已配对完成的连接（认证与 abstract 连接已由 accept 线程完成） */
+    private static void relayConnection(Socket clientSocket, LocalSocket localSocket) {
         try {
             InputStream clientIn = clientSocket.getInputStream();
             OutputStream clientOut = clientSocket.getOutputStream();

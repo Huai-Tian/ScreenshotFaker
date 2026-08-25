@@ -6,6 +6,7 @@ import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
+import android.util.Log
 import android.view.Surface
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -88,6 +89,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     }
 
     companion object {
+        private const val TAG = "ScreenShareReceiver"
+
         /** scrcpy Codec id（名称的 4 字节 ASCII 大端表示） */
         const val CODEC_H264 = 0x68323634
         const val CODEC_H265 = 0x68323635
@@ -124,6 +127,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
         /** 等待通道标识字节的超时；超时视为旧版 server（无标识字节）按规范顺序回退 */
         const val CHANNEL_ID_TIMEOUT_MS = 3000
+
+        /**
+         * 通道协商完成后等待设备元数据（设备名 + codec id）的超时。
+         * server 正常时元数据紧随其后到达；超时说明通道配对异常或 server 无响应，
+         * 快速失败交给重试循环，避免永久阻塞在"连接中"
+         */
+        const val NEGOTIATION_TIMEOUT_MS = 10_000
 
         /**
          * 连接/会话失败自动重试次数与间隔。
@@ -178,6 +188,21 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     @Volatile
     private var controlOut: java.io.OutputStream? = null
     private val controlLock = Any()
+
+    /**
+     * 诊断：本会话首条控制消息是否已记录。
+     * 首条消息发出后 server 端应有 "First control message received" 日志，
+     * 两边对照可精确定位控制链路断点
+     */
+    @Volatile
+    private var firstSendLogged = false
+
+    private fun logFirstSend(what: String) {
+        if (!firstSendLogged) {
+            firstSendLogged = true
+            Log.i(TAG, "first control send: $what (controlOut=${controlOut != null})")
+        }
+    }
 
     /** viewer 提供的渲染 Surface（null 表示暂无可渲染目标） */
     @Volatile
@@ -291,6 +316,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             while (channels.size < 3) {
                 val socket = openSocket()
                 val id = readChannelId(socket)
+                // 诊断日志：每条连接读到的通道标识（-1=EOF，-2=超时回退）
+                Log.i(TAG, "negotiate: channel id read = $id")
                 when {
                     id in 0..2 && !channels.containsKey(id) -> channels[id] = socket
                     // 旧版 server 兼容：旧版在 audio/control 通道也发 dummy byte 0，
@@ -322,6 +349,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
         val video = channels[CHANNEL_VIDEO]
             ?: throw IOException("sender did not provide a video channel")
+        // 诊断日志：协商最终结果（control 缺失时工具栏不显示，据此定位配对问题）
+        Log.i(
+            TAG, "negotiated: video=yes audio=${channels.containsKey(CHANNEL_AUDIO)} " +
+                    "control=${channels.containsKey(CHANNEL_CONTROL)}"
+        )
         return Channels(video, channels[CHANNEL_AUDIO], channels[CHANNEL_CONTROL])
     }
 
@@ -410,8 +442,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val videoIn = DataInputStream(
             BufferedInputStream(channels.videoSocket.getInputStream(), 64 * 1024)
         )
+        // 协商后元数据读取加超时：server 异常/通道错位时快速失败走重试，
+        // 否则 readFully 无超时会永久阻塞在"连接中"
+        channels.videoSocket.soTimeout = NEGOTIATION_TIMEOUT_MS
         val deviceName = readDeviceName(videoIn)
         val videoCodecId = videoIn.readInt()
+        channels.videoSocket.soTimeout = 0
         val videoMime = videoMimeFor(videoCodecId)
             ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
 
@@ -423,6 +459,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
         channels.controlSocket?.let { controlOut = it.getOutputStream() }
         controlAvailable.value = channels.controlSocket != null
+        firstSendLogged = false
 
         // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
         val audioJob = channels.audioSocket?.let {
@@ -739,8 +776,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     ) {
         val out = controlOut ?: return
         val buffer = java.io.DataOutputStream(out)
+        logFirstSend("touch action=$action")
         synchronized(controlLock) {
-            runCatching {
+            try {
                 buffer.writeByte(TYPE_INJECT_TOUCH_EVENT)
                 buffer.writeByte(action)
                 buffer.writeLong(pointerId)
@@ -753,6 +791,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 buffer.writeInt(0) // actionButton
                 buffer.writeInt(0) // buttons（手指事件下 server 强制清零）
                 buffer.flush()
+            } catch (e: Exception) {
+                // 写失败（socket 已断等）不再静默：记录日志便于定位控制链路断点
+                Log.w(TAG, "sendTouch failed", e)
             }
         }
     }
@@ -765,8 +806,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     fun sendScroll(x: Int, y: Int, screenWidth: Int, screenHeight: Int, hScroll: Float, vScroll: Float) {
         val out = controlOut ?: return
         val buffer = java.io.DataOutputStream(out)
+        logFirstSend("scroll")
         synchronized(controlLock) {
-            runCatching {
+            try {
                 buffer.writeByte(TYPE_INJECT_SCROLL_EVENT)
                 buffer.writeInt(x)
                 buffer.writeInt(y)
@@ -777,6 +819,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 buffer.writeShort(toI16FixedPoint(vScroll / 16))
                 buffer.writeInt(0) // buttons
                 buffer.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "sendScroll failed", e)
             }
         }
     }
@@ -788,14 +832,17 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     fun sendKeycode(action: Int, keycode: Int, repeat: Int = 0, metaState: Int = 0) {
         val out = controlOut ?: return
         val buffer = java.io.DataOutputStream(out)
+        logFirstSend("keycode=$keycode action=$action")
         synchronized(controlLock) {
-            runCatching {
+            try {
                 buffer.writeByte(TYPE_INJECT_KEYCODE)
                 buffer.writeByte(action)
                 buffer.writeInt(keycode)
                 buffer.writeInt(repeat)
                 buffer.writeInt(metaState)
                 buffer.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "sendKeycode failed", e)
             }
         }
     }
@@ -809,10 +856,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     /** 无载荷控制消息（展开通知栏、收起面板、旋转设备等） */
     fun sendEmptyEvent(type: Int) {
         val out = controlOut ?: return
+        logFirstSend("emptyEvent type=$type")
         synchronized(controlLock) {
-            runCatching {
+            try {
                 out.write(type)
                 out.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "sendEmptyEvent failed", e)
             }
         }
     }
@@ -826,7 +876,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.isEmpty()) return
         synchronized(controlLock) {
-            runCatching {
+            try {
                 var offset = 0
                 while (offset < bytes.size) {
                     // 从上限处回退到 UTF-8 字符边界，避免拆出非法序列
@@ -841,6 +891,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                     out.flush()
                     offset = end
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "sendText failed", e)
             }
         }
     }
@@ -854,7 +906,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val out = controlOut ?: return
         val bytes = text.toByteArray(Charsets.UTF_8)
         synchronized(controlLock) {
-            runCatching {
+            try {
                 out.write(TYPE_SET_CLIPBOARD)
                 // sequence 无效，不请求 ack
                 for (shift in 56 downTo 0 step 8) out.write(0)
@@ -862,6 +914,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 writeIntBE(out, bytes.size)
                 out.write(bytes)
                 out.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "sendSetClipboard failed", e)
             }
         }
     }
@@ -873,10 +927,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     fun sendGetClipboard() {
         val out = controlOut ?: return
         synchronized(controlLock) {
-            runCatching {
+            try {
                 out.write(TYPE_GET_CLIPBOARD)
                 out.write(0) // COPY_KEY_NONE
                 out.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "sendGetClipboard failed", e)
             }
         }
     }

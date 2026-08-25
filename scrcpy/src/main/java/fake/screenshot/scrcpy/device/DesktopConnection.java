@@ -2,6 +2,7 @@ package fake.screenshot.scrcpy.device;
 
 import fake.screenshot.scrcpy.control.ControlChannel;
 import fake.screenshot.scrcpy.util.IO;
+import fake.screenshot.scrcpy.util.Ln;
 import fake.screenshot.scrcpy.util.StringUtils;
 
 import android.net.LocalServerSocket;
@@ -69,6 +70,8 @@ public final class DesktopConnection implements Closeable {
                     // 消除 TCP proxy 多线程转发时 abstract socket 的配对竞态。
                     if (video) {
                         videoSocket = localServerSocket.accept();
+                        // 诊断日志：确认各通道 accept 顺序与标识字节写入（控制失效排查）
+                        Ln.d("Channel connected: video");
                         if (sendDummyByte) {
                             // send one byte so the client may read() to detect a connection error
                             videoSocket.getOutputStream().write(0);
@@ -76,12 +79,14 @@ public final class DesktopConnection implements Closeable {
                     }
                     if (audio) {
                         audioSocket = localServerSocket.accept();
+                        Ln.d("Channel connected: audio");
                         if (sendDummyByte) {
                             audioSocket.getOutputStream().write(1);
                         }
                     }
                     if (control) {
                         controlSocket = localServerSocket.accept();
+                        Ln.d("Channel connected: control");
                         if (sendDummyByte) {
                             controlSocket.getOutputStream().write(2);
                         }
