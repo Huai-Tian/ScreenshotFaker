@@ -44,6 +44,7 @@ import java.util.List;
 public final class Server {
 
     public static final String SERVER_PATH;
+    private static final int AUTH_TIMEOUT_MS = 3000;
 
     static {
         String[] classPaths = System.getProperty("java.class.path").split(File.pathSeparator);
@@ -109,6 +110,7 @@ public final class Server {
 
         if (tcpPort != -1) {
             final boolean tcpLocalOnly = options.getTcpLocalOnly();
+            final String authPassword = options.getAuthPassword();
             Thread proxyThread = new Thread(() -> {
                 String socketName = DesktopConnection.getSocketName(scid);
                 try (ServerSocket serverSocket = tcpLocalOnly
@@ -117,7 +119,7 @@ public final class Server {
                     Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
-                        Thread connThread = new Thread(() -> proxyConnection(clientSocket, socketName));
+                        Thread connThread = new Thread(() -> proxyConnection(clientSocket, socketName, authPassword));
                         connThread.setName("tcp_proxy_conn");
                         connThread.setDaemon(true);
                         connThread.start();
@@ -301,6 +303,102 @@ public final class Server {
             socket.close();
         } catch (IOException ignored) {
         }
+    }
+
+    private static void proxyConnection(Socket clientSocket, String socketName, String authPassword) {
+        LocalSocket localSocket = new LocalSocket();
+
+        try {
+            clientSocket.setTcpNoDelay(true);
+            // 客户端异常掉线（无 FIN/RST）时依靠 keepalive 探测，避免连接长期泄漏
+            clientSocket.setKeepAlive(true);
+        } catch (IOException ignored) {
+        }
+
+        // 共享密码握手：认证通过前不触碰 abstract socket。
+        // 对探测者的表现是"接受后短暂等待即断开"，不会暴露转发行为。
+        if (authPassword != null && !authPassword.isEmpty()) {
+            try {
+                clientSocket.setSoTimeout(AUTH_TIMEOUT_MS);
+                String received = readPasswordLine(clientSocket);
+                clientSocket.setSoTimeout(0);
+                if (received == null || !passwordMatches(received, authPassword)) {
+                    closeQuietly(clientSocket);
+                    closeQuietly(localSocket);
+                    return;
+                }
+            } catch (IOException e) {
+                closeQuietly(clientSocket);
+                closeQuietly(localSocket);
+                return;
+            }
+        }
+
+        try {
+            localSocket.connect(new LocalSocketAddress(socketName));
+        } catch (IOException e) {
+            // 连接失败立即关闭，不保留半开连接，减少端口指纹
+            closeQuietly(clientSocket);
+            closeQuietly(localSocket);
+            return;
+        }
+
+        try {
+            InputStream clientIn = clientSocket.getInputStream();
+            OutputStream clientOut = clientSocket.getOutputStream();
+            InputStream localIn = localSocket.getInputStream();
+            OutputStream localOut = localSocket.getOutputStream();
+
+            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket));
+            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket));
+            toLocal.setName("tcp_proxy_up");
+            toClient.setName("tcp_proxy_down");
+            toLocal.setDaemon(true);
+            toClient.setDaemon(true);
+            toLocal.start();
+            toClient.start();
+
+            toLocal.join();
+            toClient.join();
+        } catch (IOException | InterruptedException e) {
+            if (!Thread.currentThread().isInterrupted()) {
+                Ln.e("Proxy connection error: " + e.getMessage());
+            }
+        } finally {
+            closeQuietly(clientSocket);
+            closeQuietly(localSocket);
+        }
+    }
+
+    /**
+     * 逐字节读取密码行（以 \n 结尾）。
+     * 不使用缓冲流：避免 read-ahead 把属于后续转发的数据吞进缓冲区。
+     */
+    private static String readPasswordLine(Socket socket) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        InputStream in = socket.getInputStream();
+        while (bos.size() < 256) {
+            int b = in.read();
+            if (b == -1) {
+                return null;
+            }
+            if (b == '\n') {
+                return new String(bos.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+            }
+            if (b != '\r') {
+                bos.write(b);
+            }
+        }
+        return null; // 超长，视为非法
+    }
+
+    /**
+     * 常数时间比较，避免时序侧信道逐字节泄露密码
+     */
+    private static boolean passwordMatches(String received, String expected) {
+        return java.security.MessageDigest.isEqual(
+                received.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                expected.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static void prepareMainLooper() {

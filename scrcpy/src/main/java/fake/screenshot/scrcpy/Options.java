@@ -40,6 +40,7 @@ public class Options {
     private boolean tunnelForward;
     private int tcpPort = -1;
     private boolean tcpLocalOnly = false;
+    private String authPassword;
     private Rect crop;
     private boolean control = true;
     private int displayId;
@@ -429,6 +430,9 @@ public class Options {
                 case "tcp_local_only":
                     options.tcpLocalOnly = Boolean.parseBoolean(value);
                     break;
+                case "auth_password":
+                    options.authPassword = value;
+                    break;
                 case "crop":
                     if (!value.isEmpty()) {
                         options.crop = parseCrop(value);
@@ -587,6 +591,9 @@ public class Options {
                     Ln.w("Unknown server option: " + key);
                     break;
             }
+            if (options.scid == -1) {
+                options.scid = new java.security.SecureRandom().nextInt() & 0x7FFFFFFF;
+            }
         }
 
         if (options.newDisplay != null) {
@@ -722,5 +729,9 @@ public class Options {
 
     public boolean getTcpLocalOnly() {
         return tcpLocalOnly;
+    }
+
+    public String getAuthPassword() {
+        return authPassword;
     }
 }
