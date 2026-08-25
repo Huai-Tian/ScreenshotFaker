@@ -108,87 +108,19 @@ public final class Server {
         Workarounds.apply();
 
         if (tcpPort != -1) {
+            final boolean tcpLocalOnly = options.getTcpLocalOnly();
             Thread proxyThread = new Thread(() -> {
                 String socketName = DesktopConnection.getSocketName(scid);
-                try (ServerSocket serverSocket = new ServerSocket(tcpPort)) {
+                try (ServerSocket serverSocket = tcpLocalOnly
+                        ? new ServerSocket(tcpPort, 50, java.net.InetAddress.getLoopbackAddress())
+                        : new ServerSocket(tcpPort)) {
                     Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
-                        LocalSocket localSocket = null; // 声明在外层，以便 catch 块访问
-                        try {
-                            clientSocket.setTcpNoDelay(true);
-
-                            try {
-                                localSocket = new LocalSocket();
-                                localSocket.connect(new LocalSocketAddress(socketName));
-                            } catch (IOException e) {
-                                Ln.w("Failed to connect to abstract socket " + socketName + ": " + e.getMessage());
-                                clientSocket.close();
-                                continue;
-                            }
-
-                            final InputStream clientIn = clientSocket.getInputStream();
-                            final OutputStream clientOut = clientSocket.getOutputStream();
-                            final InputStream localIn = localSocket.getInputStream();
-                            final OutputStream localOut = localSocket.getOutputStream();
-
-                            final byte[] buffer1 = new byte[256 * 1024];
-                            final byte[] buffer2 = new byte[256 * 1024];
-
-                            Thread t1 = new Thread(() -> {
-                                try {
-                                    int len;
-                                    while ((len = clientIn.read(buffer1)) != -1) {
-                                        localOut.write(buffer1, 0, len);
-                                        localOut.flush();
-                                    }
-                                } catch (IOException ignored) {}
-                            });
-
-                            Thread t2 = new Thread(() -> {
-                                try {
-                                    int len;
-                                    while ((len = localIn.read(buffer2)) != -1) {
-                                        clientOut.write(buffer2, 0, len);
-                                        clientOut.flush();
-                                    }
-                                } catch (IOException ignored) {}
-                            });
-
-                            t1.start();
-                            t2.start();
-
-                            while (t1.isAlive() && t2.isAlive()) {
-                                try {
-                                    Thread.sleep(50);
-                                } catch (InterruptedException e) {
-                                    Thread.currentThread().interrupt();
-                                    break;
-                                }
-                            }
-
-                            t1.interrupt();
-                            t2.interrupt();
-                            clientIn.close();
-                            clientOut.close();
-                            localIn.close();
-                            localOut.close();
-                            t1.join(1000);
-                            t2.join(1000);
-
-                            // 正常关闭
-                            localSocket.close();
-                            clientSocket.close();
-
-                        } catch (Exception e) {
-                            if (!Thread.currentThread().isInterrupted()) {
-                                Ln.e("Proxy connection error: " + e.getMessage());
-                            }
-                            try { clientSocket.close(); } catch (IOException ignored) {}
-                            if (localSocket != null) {
-                                try { localSocket.close(); } catch (IOException ignored) {}
-                            }
-                        }
+                        Thread connThread = new Thread(() -> proxyConnection(clientSocket, socketName));
+                        connThread.setName("tcp_proxy_conn");
+                        connThread.setDaemon(true);
+                        connThread.start();
                     }
                 } catch (IOException e) {
                     if (!Thread.currentThread().isInterrupted()) {
@@ -293,6 +225,81 @@ public final class Server {
             }
 
             connection.close();
+        }
+    }
+
+    private static void proxyConnection(Socket clientSocket, String socketName) {
+        LocalSocket localSocket = new LocalSocket();
+
+        try {
+            clientSocket.setTcpNoDelay(true);
+            // 客户端异常掉线（无 FIN/RST）时依靠 keepalive 探测，避免连接长期泄漏
+            clientSocket.setKeepAlive(true);
+        } catch (IOException ignored) {
+        }
+
+        try {
+            localSocket.connect(new LocalSocketAddress(socketName));
+        } catch (IOException e) {
+            Ln.w("Failed to connect to abstract socket " + socketName + ": " + e.getMessage());
+            closeQuietly(clientSocket);
+            closeQuietly(localSocket);
+            return;
+        }
+
+        try {
+            InputStream clientIn = clientSocket.getInputStream();
+            OutputStream clientOut = clientSocket.getOutputStream();
+            InputStream localIn = localSocket.getInputStream();
+            OutputStream localOut = localSocket.getOutputStream();
+
+            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket));
+            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket));
+            toLocal.setName("tcp_proxy_up");
+            toClient.setName("tcp_proxy_down");
+            toLocal.setDaemon(true);
+            toClient.setDaemon(true);
+            toLocal.start();
+            toClient.start();
+
+            toLocal.join();
+            toClient.join();
+        } catch (IOException | InterruptedException e) {
+            if (!Thread.currentThread().isInterrupted()) {
+                Ln.e("Proxy connection error: " + e.getMessage());
+            }
+        } finally {
+            closeQuietly(clientSocket);
+            closeQuietly(localSocket);
+        }
+    }
+
+    private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket) {
+        byte[] buffer = new byte[64 * 1024];
+        try {
+            int len;
+            while ((len = in.read(buffer)) != -1) {
+                out.write(buffer, 0, len);
+                out.flush();
+            }
+        } catch (IOException ignored) {
+        } finally {
+            closeQuietly(clientSocket);
+            closeQuietly(localSocket);
+        }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static void closeQuietly(LocalSocket socket) {
+        try {
+            socket.close();
+        } catch (IOException ignored) {
         }
     }
 

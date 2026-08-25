@@ -96,6 +96,8 @@ object ScreenShareManager {
                     .let { if (it) "audio_source=output" else "" }
             val audioMic = ConfigManager.getDataOnce(appContext, "screenShare_audio_mic", false)
                 .let { if (it) "audio_source=mic" else "" }
+            val tcpLocalOnly =
+                if (sshSession != null) "tcp_local_only=true" else ""
             val base =
                 "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.scrcpy.Server $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
@@ -111,8 +113,18 @@ object ScreenShareManager {
                 videoCameraTorch,
                 enableAudio,
                 audioOutput,
-                audioMic
+                audioMic,
+                tcpLocalOnly
             ).filter { it.isNotEmpty() }
+
+            sshSession?.let { session ->
+                val configuredRemotePort =
+                    ConfigManager.getDataOnce(appContext, "ssh_tunnel_remote_port", 0)
+                val remotePort =
+                    if (configuredRemotePort in 1024..65535) configuredRemotePort else localPort
+                runCatching { session.setPortForwardingR(remotePort, "127.0.0.1", localPort) }
+            }
+
             Auxiliary.exec(args.joinToString(" "))
             scrcpyRunning = false
         }

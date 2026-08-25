@@ -39,6 +39,7 @@ public class Options {
     private float angle;
     private boolean tunnelForward;
     private int tcpPort = -1;
+    private boolean tcpLocalOnly = false;
     private Rect crop;
     private boolean control = true;
     private int displayId;
@@ -425,6 +426,9 @@ public class Options {
                         throw new IllegalArgumentException("Invalid tcp_port");
                     }
                     break;
+                case "tcp_local_only":
+                    options.tcpLocalOnly = Boolean.parseBoolean(value);
+                    break;
                 case "crop":
                     if (!value.isEmpty()) {
                         options.crop = parseCrop(value);
@@ -714,5 +718,9 @@ public class Options {
             default:
                 throw new IllegalArgumentException("Invalid display IME policy: " + value);
         }
+    }
+
+    public boolean getTcpLocalOnly() {
+        return tcpLocalOnly;
     }
 }
