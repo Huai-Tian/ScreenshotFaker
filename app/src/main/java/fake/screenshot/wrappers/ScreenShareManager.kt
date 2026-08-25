@@ -13,7 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CopyOnWriteArrayList
 
 object ScreenShareManager {
     private const val VERSION = "4.1"
@@ -26,16 +26,23 @@ object ScreenShareManager {
     var scrcpyRunning = false
         private set
 
-    /**
-     * 最近一次失败原因（字符串资源 id），null 表示无错误。
-     * 磁贴读取它显示在副标题上；成功启动后清除。
-     */
     @Volatile
-    var lastErrorResId: Int? = null
+    var lastError: String? = null
         private set
 
-    /** 请求系统刷新磁贴（触发其 onStartListening 重新读取状态） */
-    private fun requestTileUpdate() {
+    private val tileListeners = CopyOnWriteArrayList<() -> Unit>()
+
+    fun addTileListener(listener: () -> Unit) {
+        tileListeners.add(listener)
+        listener()
+    }
+
+    fun removeTileListener(listener: () -> Unit) {
+        tileListeners.remove(listener)
+    }
+
+    private fun notifyStateChanged() {
+        tileListeners.forEach { runCatching(it) }
         if (::appContext.isInitialized) {
             runCatching {
                 TileService.requestListeningState(
@@ -46,46 +53,49 @@ object ScreenShareManager {
         }
     }
 
-    /**
-     * 初始化：复制 server 到 /data/local/tmp 并（如启用）建立 SSH 隧道。
-     * 含网络与文件 IO，必须在 IO 线程调用（磁贴 onClick 在主线程，勿直接调用）。
-     */
-    private fun initializeInternal(): Boolean {
-        if (initialized) return true
-        if (runBlocking {
-                if (!ConfigManager.getDataOnce(
-                        appContext,
-                        "ssh_tunnel_enabled",
-                        false
-                    )
-                ) return@runBlocking true
-                val address =
-                    ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_address", "127.0.0.1")
-                val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
-                val name = ConfigManager.getDataOnce(
-                    appContext, "ssh_tunnel_user_name",
-                    "ScreenshotFaker"
+    private sealed interface InitResult {
+        data object Ok : InitResult
+        data class SshFailed(val reason: String) : InitResult
+        data class CopyFailed(val reason: String) : InitResult
+    }
+
+
+    private suspend fun initializeInternal(): InitResult {
+        if (initialized) return InitResult.Ok
+        if (ConfigManager.getDataOnce(appContext, "ssh_tunnel_enabled", false)) {
+            val address =
+                ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_address", "127.0.0.1")
+            val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
+            val name = ConfigManager.getDataOnce(
+                appContext, "ssh_tunnel_user_name",
+                "ScreenshotFaker"
+            )
+            val password = ConfigManager.getDataOnce(
+                appContext, "ssh_tunnel_user_password",
+                "ScreenshotFaker"
+            )
+            try {
+                val jsch = JSch()
+                val session = jsch.getSession(name, address, port)
+                session.setPassword(password.toByteArray(Charsets.UTF_8))
+                session.setConfig("StrictHostKeyChecking", "no")
+                session.connect(8000)
+                sshSession = session
+            } catch (e: Exception) {
+                sshSession = null
+                return InitResult.SshFailed(
+                    e.message ?: e.javaClass.simpleName
                 )
-                val password = ConfigManager.getDataOnce(
-                    appContext, "ssh_tunnel_user_password",
-                    "ScreenshotFaker"
-                )
-                try {
-                    val jsch = JSch()
-                    val session = jsch.getSession(name, address, port)
-                    session.setPassword(password.toByteArray(Charsets.UTF_8))
-                    session.setConfig("StrictHostKeyChecking", "no")
-                    session.connect(8000)
-                    sshSession = session
-                    true
-                } catch (_: Exception) {
-                    false
-                }
-            }) return false
-        scrcpyName = Auxiliary.getRandomStringEx((1..12).random())
-        if (Auxiliary.exec("cp ${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so /data/local/tmp/$scrcpyName").first != 0) return false
+            }
+        }
+        scrcpyName = Auxiliary.getRandomStringEx((20..35).random())
+        val src = "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
+        val (exitCode, output) = Auxiliary.exec("cp $src /data/local/tmp/$scrcpyName")
+        if (exitCode != 0) {
+            return InitResult.CopyFailed(output.take(80))
+        }
         initialized = true
-        return true
+        return InitResult.Ok
     }
 
     private fun startScreenShareInternal(): Boolean {
@@ -127,10 +137,9 @@ object ScreenShareManager {
                 .let { if (it) "audio_source=mic" else "" }
             val tcpLocalOnly =
                 if (sshSession != null) "tcp_local_only=true" else ""
-            // 共享密码：启用后接收端连接时需先完成密码握手（直连模式的访问控制）
             val authPassword =
                 ConfigManager.getDataOnce(appContext, "screenShare_password", "")
-                    .let { if (it.isEmpty()) "" else "auth_password=$it" }
+                    .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
             val base =
                 "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.scrcpy.Server $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
@@ -162,51 +171,54 @@ object ScreenShareManager {
             Auxiliary.exec(args.joinToString(" "))
             scrcpyRunning = false
             initialized = false
+            notifyStateChanged()
         }
         scrcpyRunning = true
         return true
     }
 
     /**
-     * 磁贴/页面统一入口：异步初始化并启动共享。
-     * 可安全地在主线程调用；失败原因写入 [lastErrorResId] 并刷新磁贴。
+     * 磁贴/页面统一入口：异步初始化并启动/停止共享。
+     * 可安全地在主线程调用；失败原因写入 [lastError] 并刷新磁贴副标题。
      */
     fun toggleScreenShare(context: Context) {
+        appContext = context.applicationContext
+        Auxiliary.refreshShellState()
         if (scrcpyRunning) {
-            stopScreenShare()
-            requestTileUpdate()
+            scope.launch {
+                stopScreenShare()
+                notifyStateChanged()
+            }
             return
         }
-        appContext = context.applicationContext
         scope.launch {
-            val ok = initializeInternal() && startScreenShareInternal()
-            if (!ok) {
-                lastErrorResId =
-                    if (Auxiliary.isShellActivated) R.string.initialize_failed
-                    else R.string.no_permission
+            lastError = if (!Auxiliary.isShellActivated) {
+                context.getString(R.string.no_permission)
             } else {
-                lastErrorResId = null
+                when (initializeInternal()) {
+                    is InitResult.SshFailed -> "ssh_connect_failed"
+                    is InitResult.CopyFailed -> "copy_server_failed"
+                    InitResult.Ok -> {
+                        if (startScreenShareInternal()) null
+                        else context.getString(R.string.initialize_failed)
+                    }
+                }
             }
-            requestTileUpdate()
+            notifyStateChanged()
         }
     }
-
-    /** 兼容旧入口：同步初始化（仅限已在 IO 线程的调用方） */
-    fun initialize(context: Context): Boolean {
-        appContext = context.applicationContext
-        return initializeInternal()
-    }
-
-    /** 兼容旧入口：同步启动（仅限已在 IO 线程的调用方） */
-    fun startScreenShare(): Boolean = startScreenShareInternal()
 
     fun stopScreenShare() {
         if (!scrcpyRunning) return
-        Auxiliary.exec("pkill -f $scrcpyName")
+        Auxiliary.exec("pkill -f /data/local/tmp/$scrcpyName")
         scrcpyJob.cancel()
         scrcpyRunning = false
         sshSession?.disconnect()
         sshSession = null
         initialized = false
     }
+
+    /** sh 安全引用：单引号包裹，内部单引号转义为 '\'' */
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
 }

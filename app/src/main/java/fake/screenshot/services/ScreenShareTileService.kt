@@ -1,11 +1,19 @@
 package fake.screenshot.services
 
+import android.os.Handler
+import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.R
 import fake.screenshot.wrappers.ScreenShareManager
 
 class ScreenShareTileService : TileService() {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val stateListener: () -> Unit = {
+        mainHandler.post { updateUI() }
+    }
 
     override fun onClick() {
         super.onClick()
@@ -26,11 +34,7 @@ class ScreenShareTileService : TileService() {
             else -> {
                 tile.state = Tile.STATE_INACTIVE
                 tile.label = getString(R.string.stealth_screencast)
-                ScreenShareManager.lastErrorResId?.let { resId ->
-                    tile.subtitle = getString(resId)
-                } ?: run {
-                    tile.subtitle = null
-                }
+                tile.subtitle = ScreenShareManager.lastError
             }
         }
         tile.updateTile()
@@ -38,11 +42,11 @@ class ScreenShareTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
-        updateUI()
+        ScreenShareManager.addTileListener(stateListener)
     }
 
     override fun onStopListening() {
+        ScreenShareManager.removeTileListener(stateListener)
         super.onStopListening()
-        updateUI()
     }
 }
