@@ -1,6 +1,5 @@
 package fake.screenshot.wrappers
 
-import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -23,7 +22,6 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -486,91 +484,4 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     private fun ByteBufferWrap(buffer: ByteArray, size: Int): ByteBuffer =
         ByteBuffer.wrap(buffer.copyOf(size))
-}
-
-/**
- * 接收端实例与配置的管理器。
- * 配置以分隔符序列化存储于加密 DataStore（ConfigManager），
- * 支持保存任意多个接收配置（对应多部发送设备）。
- */
-object ScreenShareReceiverManager {
-
-    private const val IDS_KEY = "receive_screen_share_config_ids"
-    private const val CONFIG_PREFIX = "receive_screen_share_config_"
-    private const val SEPARATOR = "\u001F"
-
-    private val receivers = ConcurrentHashMap<Int, ScreenShareReceiver>()
-
-    suspend fun loadConfigs(context: Context): List<ScreenShareReceiverConfig> {
-        return loadIds(context).mapNotNull { loadConfig(context, it) }
-    }
-
-    suspend fun loadConfig(
-        context: Context,
-        id: Int
-    ): ScreenShareReceiverConfig? {
-        val raw = ConfigManager.getDataOnce(context, CONFIG_PREFIX + id, "")
-        if (raw.isEmpty()) return null
-        val parts = raw.split(SEPARATOR)
-        if (parts.size < 9) return null
-        return runCatching {
-            ScreenShareReceiverConfig(
-                id = id,
-                name = parts[0],
-                address = parts[1],
-                port = parts[2].toInt(),
-                useSsh = parts[3].toBoolean(),
-                sshPort = parts[4].toInt(),
-                sshUserName = parts[5],
-                sshPassword = parts[6],
-                enableAudio = parts[7].toBoolean(),
-                enableControl = parts[8].toBoolean(),
-                password = parts.getOrElse(9) { "" }
-            )
-        }.getOrNull()
-    }
-
-    suspend fun saveConfig(
-        context: Context,
-        config: ScreenShareReceiverConfig
-    ) {
-        val raw = listOf(
-            config.name, config.address, config.port.toString(), config.useSsh.toString(),
-            config.sshPort.toString(), config.sshUserName, config.sshPassword,
-            config.enableAudio.toString(), config.enableControl.toString(),
-            config.password
-        ).joinToString(SEPARATOR)
-        ConfigManager.saveData(context, CONFIG_PREFIX + config.id, raw)
-        val ids = loadIds(context).toMutableSet()
-        ids.add(config.id)
-        ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
-    }
-
-    suspend fun deleteConfig(context: Context, id: Int) {
-        ConfigManager.saveData(context, CONFIG_PREFIX + id, "")
-        val ids = loadIds(context).toMutableSet()
-        ids.remove(id)
-        ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
-        receivers.remove(id)?.stop()
-    }
-
-    suspend fun nextId(context: Context): Int {
-        return (loadIds(context).maxOrNull() ?: 0) + 1
-    }
-
-    private suspend fun loadIds(context: Context): List<Int> {
-        return ConfigManager.getDataOnce(context, IDS_KEY, "")
-            .split(",")
-            .filter { it.isNotBlank() }
-            .mapNotNull { it.toIntOrNull() }
-    }
-
-    fun getOrCreate(config: ScreenShareReceiverConfig): ScreenShareReceiver =
-        receivers.getOrPut(config.id) { ScreenShareReceiver(config) }
-
-    fun get(id: Int): ScreenShareReceiver? = receivers[id]
-
-    fun stopAll() {
-        receivers.values.forEach { it.stop() }
-    }
 }

@@ -1,177 +1,95 @@
 package fake.screenshot.wrappers
 
-import com.jcraft.jsch.JSch
-import com.jcraft.jsch.Session
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
+import android.content.Context
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 屏幕共享接收端代理管理器（每个实例对应一部发送设备）。
+ * 接收端实例与配置的管理器（单例）。
  *
- * 在本机 [localPort] 上开启监听，把接入的每条 TCP 连接转发到发送端：
- * - 直连模式：手动中继，转发到 [address]:[targetPort]；
- * - SSH 模式：登录 SSH 服务器（[address]:[sshPort]）建立本地端口转发
- *   （localhost:localPort → SSH 服务器 127.0.0.1:targetPort），
- *   适用于发送端通过远程转发把共享端口暴露在 SSH 服务器上的场景。
- *
- * 设计为普通类而非单例：可同时创建多个实例分别对接多部发送设备，
- * 各实例的监听端口、SSH 会话与转发连接完全独立。
- *
- * 监听地址固定为回环（127.0.0.1）：转发的目的端口可能带有共享密码认证，
- * 仅供本机客户端（内置查看器或 adb 转发的外部 scrcpy 客户端）接入，
- * 不对局域网暴露。
+ * [ScreenShareReceiver] 是普通类，每个实例接收一路共享（对应一部发送设备），
+ * 本管理器以单例形式统一管理：
+ * - 配置持久化：以分隔符序列化存储于加密 DataStore（ConfigManager），
+ *   支持保存任意多个接收配置；
+ * - 实例生命周期：按配置 id 缓存活跃的接收端实例。
  */
-class ScreenShareReceiveManager(
-    private val address: String,
-    private val localPort: Int,
-    private val targetPort: Int,
-    private val useSSH: Boolean,
-    private val sshPort: Int?,
-    private val name: String?,
-    private val password: ByteArray?
-) {
-    private val isRunning = AtomicBoolean(false)
-    private var scope: CoroutineScope? = null
-    private var serverSocket: ServerSocket? = null
-    private var sshSession: Session? = null
+object ScreenShareReceiverManager {
 
-    /** 当前会话的全部活跃 socket，stop 时统一关闭以中断阻塞读 */
-    private val sockets = CopyOnWriteArrayList<Socket>()
+    private const val IDS_KEY = "receive_screen_share_config_ids"
+    private const val CONFIG_PREFIX = "receive_screen_share_config_"
+    private const val SEPARATOR = "\u001F"
 
-    init {
-        if (useSSH) {
-            require(sshPort != null) { "sshPort must be provided when useSSH is true" }
-            require(name != null) { "name must be provided when useSSH is true" }
-            require(password != null) { "password must be provided when useSSH is true" }
-        }
+    private val receivers = ConcurrentHashMap<Int, ScreenShareReceiver>()
+
+    suspend fun loadConfigs(context: Context): List<ScreenShareReceiverConfig> {
+        return loadIds(context).mapNotNull { loadConfig(context, it) }
     }
 
-    /**
-     * 启动本地代理。
-     * @return 已在运行返回 true；启动成功返回 true；失败返回 false
-     */
-    fun startProxy(): Boolean {
-        if (!isRunning.compareAndSet(false, true)) return true
-        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-        if (useSSH) {
-            // init 块已保证 useSSH 时这三个参数非空
-            val session = runCatching {
-                JSch().getSession(name!!, address, sshPort!!).apply {
-                    setPassword(password!!)
-                    setConfig("StrictHostKeyChecking", "no")
-                    connect(SSH_TIMEOUT_MS)
-                }
-            }.getOrElse {
-                release()
-                return false
-            }
-            // JSch 直接在本机建立 localPort 的监听，无需手动中继
-            val ok = runCatching {
-                session.setPortForwardingL(localPort, "127.0.0.1", targetPort)
-            }.isSuccess
-            if (!ok) {
-                runCatching { session.disconnect() }
-                release()
-                return false
-            }
-            sshSession = session
-            return true
-        }
-
-        // 直连模式：本地监听 + 手动双向中继
-        val server = runCatching {
-            ServerSocket(localPort, 50, InetAddress.getLoopbackAddress())
-        }.getOrElse {
-            release()
-            return false
-        }
-        serverSocket = server
-        scope?.launch {
-            while (isActive && isRunning.get()) {
-                val client = runCatching { server.accept() }.getOrNull() ?: break
-                sockets.add(client)
-                launch { relayConnection(client) }
-            }
-        }
-        return true
+    suspend fun loadConfig(
+        context: Context,
+        id: Int
+    ): ScreenShareReceiverConfig? {
+        val raw = ConfigManager.getDataOnce(context, CONFIG_PREFIX + id, "")
+        if (raw.isEmpty()) return null
+        val parts = raw.split(SEPARATOR)
+        if (parts.size < 9) return null
+        return runCatching {
+            ScreenShareReceiverConfig(
+                id = id,
+                name = parts[0],
+                address = parts[1],
+                port = parts[2].toInt(),
+                useSsh = parts[3].toBoolean(),
+                sshPort = parts[4].toInt(),
+                sshUserName = parts[5],
+                sshPassword = parts[6],
+                enableAudio = parts[7].toBoolean(),
+                enableControl = parts[8].toBoolean(),
+                password = parts.getOrElse(9) { "" }
+            )
+        }.getOrNull()
     }
 
-    /** 停止代理：关闭监听、全部转发连接与 SSH 会话 */
-    fun stopProxy() {
-        if (!isRunning.compareAndSet(true, false)) return
-        runCatching { serverSocket?.close() }
-        sockets.forEach { runCatching { it.close() } }
-        sockets.clear()
-        runCatching { sshSession?.disconnect() }
-        sshSession = null
-        release()
+    suspend fun saveConfig(
+        context: Context,
+        config: ScreenShareReceiverConfig
+    ) {
+        val raw = listOf(
+            config.name, config.address, config.port.toString(), config.useSsh.toString(),
+            config.sshPort.toString(), config.sshUserName, config.sshPassword,
+            config.enableAudio.toString(), config.enableControl.toString(),
+            config.password
+        ).joinToString(SEPARATOR)
+        ConfigManager.saveData(context, CONFIG_PREFIX + config.id, raw)
+        val ids = loadIds(context).toMutableSet()
+        ids.add(config.id)
+        ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
     }
 
-    private fun release() {
-        scope?.cancel()
-        scope = null
-        serverSocket = null
+    suspend fun deleteConfig(context: Context, id: Int) {
+        ConfigManager.saveData(context, CONFIG_PREFIX + id, "")
+        val ids = loadIds(context).toMutableSet()
+        ids.remove(id)
+        ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
+        receivers.remove(id)?.stop()
     }
 
-    /**
-     * 直连模式下中继一条客户端连接：连接目标并双向转发。
-     * 任一方向结束即关闭两个 socket，解除另一方向的阻塞读。
-     */
-    private suspend fun relayConnection(client: Socket) = coroutineScope {
-        val target = runCatching {
-            Socket().apply {
-                tcpNoDelay = true
-                connect(InetSocketAddress(address, targetPort), CONNECT_TIMEOUT_MS)
-            }
-        }.getOrNull() ?: run {
-            runCatching { client.close() }
-            sockets.remove(client)
-            return@coroutineScope
-        }
-        sockets.add(target)
-
-        // coroutineScope 会等待两个方向都结束后才返回
-        launch { relay(client.getInputStream(), target.getOutputStream(), client, target) }
-        launch { relay(target.getInputStream(), client.getOutputStream(), client, target) }
-
-        sockets.remove(client)
-        sockets.remove(target)
+    suspend fun nextId(context: Context): Int {
+        return (loadIds(context).maxOrNull() ?: 0) + 1
     }
 
-    private fun relay(input: InputStream, output: OutputStream, a: Socket, b: Socket) {
-        val buffer = ByteArray(BUFFER_SIZE)
-        try {
-            var len: Int
-            while (input.read(buffer).also { len = it } != -1) {
-                output.write(buffer, 0, len)
-                output.flush()
-            }
-        } catch (_: IOException) {
-        } finally {
-            // 关闭两个 socket，让另一方向退出
-            runCatching { a.close() }
-            runCatching { b.close() }
-        }
+    private suspend fun loadIds(context: Context): List<Int> {
+        return ConfigManager.getDataOnce(context, IDS_KEY, "")
+            .split(",")
+            .filter { it.isNotBlank() }
+            .mapNotNull { it.toIntOrNull() }
     }
 
-    private companion object {
-        const val SSH_TIMEOUT_MS = 8000
-        const val CONNECT_TIMEOUT_MS = 8000
-        const val BUFFER_SIZE = 64 * 1024
+    fun getOrCreate(config: ScreenShareReceiverConfig): ScreenShareReceiver =
+        receivers.getOrPut(config.id) { ScreenShareReceiver(config) }
+
+    fun get(id: Int): ScreenShareReceiver? = receivers[id]
+
+    fun stopAll() {
+        receivers.values.forEach { it.stop() }
     }
 }
