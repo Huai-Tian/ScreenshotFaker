@@ -53,10 +53,12 @@ public final class Server {
     }
 
     private static class Completion {
+        private final int initial;
         private int running;
         private boolean fatalError;
 
         Completion(int running) {
+            this.initial = running;
             this.running = running;
         }
 
@@ -65,9 +67,16 @@ public final class Server {
             if (fatalError) {
                 this.fatalError = true;
             }
-            if (running == 0 || this.fatalError) {
-                Looper.getMainLooper().quitSafely();
+            if (running < initial) {
+                // 任一 processor 结束即会话结束：video/audio/control 共享同一客户端
+                // 连接，任一断开（含正常断开产生的 broken pipe）都意味着客户端已离开，
+                // 立即唤醒会话线程收尾，无需等待其余 processor 自行超时
+                notifyAll();
             }
+        }
+
+        synchronized boolean isFinished() {
+            return running < initial;
         }
     }
 
@@ -100,11 +109,6 @@ public final class Server {
 
         int scid = options.getScid();
         int tcpPort = options.getTcpPort();
-        boolean tunnelForward = options.isTunnelForward();
-        boolean control = options.getControl();
-        boolean video = options.getVideo();
-        boolean audio = options.getAudio();
-        boolean sendDummyByte = options.getSendDummyByte();
 
         Workarounds.apply();
 
@@ -113,9 +117,7 @@ public final class Server {
             final String authPassword = options.getAuthPassword();
             Thread proxyThread = new Thread(() -> {
                 String socketName = DesktopConnection.getSocketName(scid);
-                try (ServerSocket serverSocket = tcpLocalOnly
-                        ? new ServerSocket(tcpPort, 50, java.net.InetAddress.getLoopbackAddress())
-                        : new ServerSocket(tcpPort)) {
+                try (ServerSocket serverSocket = createServerSocket(tcpPort, tcpLocalOnly)) {
                     Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
@@ -136,9 +138,82 @@ public final class Server {
             proxyThread.start();
         }
 
-        List<AsyncProcessor> asyncProcessors = new ArrayList<>();
+        // 会话循环在独立线程运行，主线程 Looper 持续处理系统消息（display monitor 等）。
+        // 一个会话结束（接收端断开/锁屏/切后台）后，server 不再退出，
+        // 而是等待下一个接收端连接，进程常驻直到被外部终止（磁贴停止共享）
+        // 或发生致命错误。这消除了"接收端重进时 server 正在重启"的连接拒绝窗口。
+        final CleanUp sessionCleanUp = cleanUp;
+        final Options sessionOptions = options;
+        Thread sessionThread = new Thread(() -> sessionLoop(sessionOptions, sessionCleanUp), "session");
+        sessionThread.start();
 
-        DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
+        Looper.loop(); // 常驻；仅在致命错误（sessionLoop 调用 quitSafely）时返回
+    }
+
+    /**
+     * 会话循环：逐个接受接收端连接并运行会话。
+     * 会话结束（接收端断开/锁屏/切后台）或会话内部错误（编码器异常等）
+     * 都不退出进程：前者是常态，后者通过重新建会话自愈。
+     * 仅当连续多次快速失败（无法建立可用会话）才退出，交由外部守护重启。
+     */
+    private static void sessionLoop(Options options, CleanUp cleanUp) {
+        int scid = options.getScid();
+        boolean tunnelForward = options.isTunnelForward();
+        boolean control = options.getControl();
+        boolean video = options.getVideo();
+        boolean audio = options.getAudio();
+        boolean sendDummyByte = options.getSendDummyByte();
+
+        int fastFailures = 0;
+        while (true) {
+            long sessionStart = System.currentTimeMillis();
+            try {
+                DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
+                runSession(options, cleanUp, connection);
+                Ln.i("Session ended, waiting for next client");
+            } catch (IOException | RuntimeException e) {
+                // 接收端在协商中途断开、abstract socket 未及时释放等：
+                // 视为一次失败的会话，继续等待下一个接收端
+                Ln.i("Session failed, waiting for next client: " + e.getMessage());
+            }
+
+            // 保险阀：会话持续超 3s 视为正常（含阻塞等待客户端连接的时间），
+            // 连续 5 次快速失败说明环境异常（socket 无法创建等），退出进程
+            if (System.currentTimeMillis() - sessionStart > 3000) {
+                fastFailures = 0;
+            } else {
+                fastFailures++;
+                if (fastFailures >= 5) {
+                    Ln.e("Too many consecutive session failures, exiting");
+                    break;
+                }
+            }
+
+            // 会话结束：稍等旧连接排干，避免新客户端立刻连上时
+            // 配对到尚未完全关闭的 abstract socket
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+
+        // 退出路径（正常停止由外部 kill，不经过这里）
+        if (cleanUp != null) {
+            cleanUp.interrupt();
+            try {
+                cleanUp.join();
+            } catch (InterruptedException e) {
+                // ignore
+            }
+        }
+        Looper.getMainLooper().quitSafely();
+    }
+
+    /** 运行单个会话（含内部错误处理，不向外传播异常） */
+    private static void runSession(Options options, CleanUp cleanUp, DesktopConnection connection) {
+        List<AsyncProcessor> asyncProcessors = new ArrayList<>();
         try {
             if (options.getSendDeviceMeta()) {
                 connection.sendDeviceMeta(Device.getDeviceName());
@@ -146,13 +221,13 @@ public final class Server {
 
             Controller controller = null;
 
-            if (control) {
+            if (options.getControl()) {
                 ControlChannel controlChannel = connection.getControlChannel();
                 controller = new Controller(controlChannel, cleanUp, options);
                 asyncProcessors.add(controller);
             }
 
-            if (audio) {
+            if (options.getAudio()) {
                 AudioCodec audioCodec = options.getAudioCodec();
                 AudioSource audioSource = options.getAudioSource();
                 AudioCapture audioCapture;
@@ -172,7 +247,7 @@ public final class Server {
                 asyncProcessors.add(audioRecorder);
             }
 
-            if (video) {
+            if (options.getVideo()) {
                 Streamer videoStreamer = new Streamer(connection.getVideoFd(), options.getVideoCodec(), options.getSendStreamMeta(),
                         options.getSendFrameMeta());
                 SurfaceCapture surfaceCapture;
@@ -197,26 +272,35 @@ public final class Server {
 
             Completion completion = new Completion(asyncProcessors.size());
             for (AsyncProcessor asyncProcessor : asyncProcessors) {
-                asyncProcessor.start((fatalError) -> {
-                    completion.addCompleted(fatalError);
-                });
+                asyncProcessor.start(completion::addCompleted);
             }
 
-            Looper.loop(); // interrupted by the Completion implementation
-        } finally {
-            if (cleanUp != null) {
-                cleanUp.interrupt();
+            // 等待会话结束：任一 processor 完成（接收端断开，含正常断开的 broken pipe）
+            synchronized (completion) {
+                while (!completion.isFinished()) {
+                    try {
+                        completion.wait(10_000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
             }
+        } catch (IOException | RuntimeException e) {
+            // 处理器内部错误（编码器崩溃等）已由各处理器自行记录；
+            // 这里吞掉异常：会话循环会建立新会话自愈
+            Ln.e("Session error", e);
+        } finally {
             for (AsyncProcessor asyncProcessor : asyncProcessors) {
                 asyncProcessor.stop();
             }
 
-            connection.shutdown();
+            try {
+                connection.shutdown();
+            } catch (IOException ignored) {
+            }
 
             try {
-                if (cleanUp != null) {
-                    cleanUp.join();
-                }
                 for (AsyncProcessor asyncProcessor : asyncProcessors) {
                     asyncProcessor.join();
                 }
@@ -226,8 +310,28 @@ public final class Server {
                 // ignore
             }
 
-            connection.close();
+            try {
+                connection.close();
+            } catch (IOException ignored) {
+            }
         }
+    }
+
+    /**
+     * 创建 TCP proxy 监听 socket。显式启用 SO_REUSEADDR：
+     * 接收端断开后 server 会被守护循环重新拉起，旧会话的连接可能仍处于
+     * TIME_WAIT 状态，无 SO_REUSEADDR 时重新 bind 会失败（Address already in use），
+     * 导致重启失败、接收端连接被拒绝。
+     */
+    private static ServerSocket createServerSocket(int tcpPort, boolean tcpLocalOnly) throws IOException {
+        ServerSocket serverSocket = new ServerSocket();
+        serverSocket.setReuseAddress(true);
+        if (tcpLocalOnly) {
+            serverSocket.bind(new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), tcpPort), 50);
+        } else {
+            serverSocket.bind(new java.net.InetSocketAddress(tcpPort), 50);
+        }
+        return serverSocket;
     }
 
     private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket) {

@@ -12,10 +12,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
-import kotlin.time.Duration.Companion.milliseconds
 
 object ScreenShareManager {
     private const val VERSION = "4.1"
@@ -182,26 +180,45 @@ object ScreenShareManager {
                 runCatching { session.setPortForwardingR(remotePort, "127.0.0.1", localPort) }
             }
 
-            // 自动重启循环：接收端断开（锁屏/切后台/网络波动）会使 scrcpy server
-            // 进程退出，只要共享未被停止就重新拉起，让接收端总能重新连上
-            val command = args.joinToString(" ")
-            var fastExits = 0
-            while (scrcpyRunning) {
-                val startTime = System.currentTimeMillis()
-                Auxiliary.exec(command)
-                if (!scrcpyRunning) break // 用户主动停止
-                // 会话持续超过 30s 视为正常结束，重置快速退出计数
-                if (System.currentTimeMillis() - startTime > 30_000) {
-                    fastExits = 0
-                } else {
-                    fastExits++
-                }
-                // 连续快速退出说明 server 无法正常启动（端口占用等），放弃重启
-                if (fastExits >= 3) {
-                    lastError = "server_exited_repeatedly"
-                    break
-                }
-                delay(1000.milliseconds)
+            // 清理残留：app 进程被杀后重启时，上一会话的守护循环与 server
+            // 仍在系统里运行（守护循环独立于 app 进程），必须先清理再启动，
+            // 否则新 server 会因端口被占用而启动失败
+            Auxiliary.exec(
+                "pkill -f scrcpy_watch_ ; pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; " +
+                        "pkill -KILL -f fake.screenshot.scrcpy.Server; " +
+                        "rm -f /data/local/tmp/scrcpy_stop_* /data/local/tmp/scrcpy_watch_*.sh"
+            )
+
+            // 守护循环：接收端断开（锁屏/切后台/网络波动）会使 server 进程退出，
+            // 由 sh 循环在 1s 后自动重新拉起。放在独立 shell 进程中运行而不是
+            // Kotlin 协程：发送端 app 退到后台被冻结/被杀时重启依然继续工作。
+            // 连续 3 次快速退出（<30s）说明 server 无法正常启动（端口占用等），放弃。
+            // server 输出重定向 /dev/null：防止 stdout 管道写满阻塞 server。
+            val serverCmd = args.joinToString(" ")
+            val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
+            val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
+            val script = listOf(
+                "STOP=$stopFlag",
+                "rm -f \"\$STOP\"",
+                "n=0",
+                "while [ ! -f \"\$STOP\" ]; do",
+                "  s=\$(date +%s)",
+                "  $serverCmd >/dev/null 2>&1",
+                "  e=\$(date +%s)",
+                "  d=\$((e - s))",
+                "  if [ \$d -ge 30 ]; then n=0; else n=\$((n + 1)); fi",
+                "  if [ \$n -ge 3 ]; then break; fi",
+                "  sleep 1",
+                "done",
+                "rm -f \"\$STOP\" \"$watchPath\" 2>/dev/null"
+            ).joinToString("\n")
+            // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开
+            Auxiliary.exec("cat > $watchPath <<'SCRCPY_EOF'\n$script\nSCRCPY_EOF")
+
+            // 阻塞运行守护循环：用户停止或连续快速退出时返回
+            Auxiliary.exec("sh $watchPath")
+            if (scrcpyRunning) {
+                lastError = "server_exited_repeatedly"
             }
             scrcpyRunning = false
             initialized = false
@@ -244,10 +261,20 @@ object ScreenShareManager {
 
     fun stopScreenShare() {
         if (!scrcpyRunning) return
+        // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
         scrcpyRunning = false
+        val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
+        val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
+        // 1) 写停止标记：守护循环醒来后退出，不再重启 server
+        Auxiliary.exec("touch $stopFlag")
+        // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
+        //    必须按 app_process 的实际命令行（含 fake.screenshot.scrcpy.Server）匹配。
+        //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
         Auxiliary.exec(
             "pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; pkill -KILL -f fake.screenshot.scrcpy.Server"
         )
+        // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
+        Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
         scrcpyJob.cancel()
         sshSession?.disconnect()
         sshSession = null

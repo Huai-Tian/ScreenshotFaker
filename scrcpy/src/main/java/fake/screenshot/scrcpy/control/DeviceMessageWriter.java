@@ -39,6 +39,13 @@ public class DeviceMessageWriter {
                 dos.writeShort(data.length);
                 dos.write(data);
                 break;
+            case DeviceMessage.TYPE_INJECT_ERROR:
+                String errText = msg.getText();
+                byte[] errRaw = errText.getBytes(StandardCharsets.UTF_8);
+                int errLen = StringUtils.getUtf8TruncationIndex(errRaw, CLIPBOARD_TEXT_MAX_LENGTH);
+                dos.writeInt(errLen);
+                dos.write(errRaw, 0, errLen);
+                break;
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }

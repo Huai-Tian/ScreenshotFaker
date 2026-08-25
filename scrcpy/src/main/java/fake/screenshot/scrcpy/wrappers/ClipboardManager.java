@@ -40,4 +40,8 @@ public final class ClipboardManager {
     public void addPrimaryClipChangedListener(android.content.ClipboardManager.OnPrimaryClipChangedListener listener) {
         manager.addPrimaryClipChangedListener(listener);
     }
+
+    public void removePrimaryClipChangedListener(android.content.ClipboardManager.OnPrimaryClipChangedListener listener) {
+        manager.removePrimaryClipChangedListener(listener);
+    }
 }

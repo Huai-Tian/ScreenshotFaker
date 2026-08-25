@@ -125,8 +125,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         /** 等待通道标识字节的超时；超时视为旧版 server（无标识字节）按规范顺序回退 */
         const val CHANNEL_ID_TIMEOUT_MS = 3000
 
-        /** 连接/会话失败自动重试次数与间隔（发送端自动重启 server 需要约 1s） */
-        const val RETRY_COUNT = 5
+        /**
+         * 连接/会话失败自动重试次数与间隔。
+         * 发送端 server 重启涉及进程退出检测（最长约 1s）+ 守护循环唤醒 + app_process
+         * 冷启动（可能 2-4s），且发送端 app 后台时调度可能进一步延迟，重试窗口需足够长
+         */
+        const val RETRY_COUNT = 12
         const val RETRY_DELAY_MS = 1000L
 
         /**
@@ -195,6 +199,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 发送端 clipboard_autosync 自动同步），viewer 监听后写入本机剪贴板。
      */
     val clipboardContent = MutableStateFlow<String?>(null)
+
+    /**
+     * 发送端注入失败标记（DeviceMessage type 3）：发送端无法注入输入事件
+     * （如 INJECT_EVENTS 权限被拒）时上报，viewer 提示用户而非静默无反应。
+     * 每次 Toast 后由 viewer 置回 null。
+     */
+    val injectError = MutableStateFlow<String?>(null)
 
     fun setSurface(surface: Surface?) {
         this.surface = surface
@@ -282,7 +293,14 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 val id = readChannelId(socket)
                 when {
                     id in 0..2 && !channels.containsKey(id) -> channels[id] = socket
-                    // 旧版 server 无标识字节：按规范顺序回退（连接顺序即配对顺序）
+                    // 旧版 server 兼容：audio/control 的 dummy byte 均为 0，
+                    // 第一条之后再次读到 0 说明对端是旧版（发送端 APK 未更新），
+                    // 标识字节实际是 dummy byte，按规范顺序回退配对
+                    id == 0 && channels.containsKey(CHANNEL_VIDEO) && channels.size == 1 -> {
+                        val fallback = canonicalOrder.first { it !in channels }
+                        channels[fallback] = socket
+                    }
+                    // 旧版 server 无标识字节（超时）：按规范顺序回退（连接顺序即配对顺序）
                     id == -2 -> {
                         val fallback = canonicalOrder.first { it !in channels }
                         channels[fallback] = socket
@@ -684,6 +702,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 }
                 1 -> skipFully(8)                     // ack clipboard
                 2 -> { skipFully(2); skipFully(input.readUnsignedShort()) } // uhid output
+                3 -> {
+                    // 注入失败上报：发送端无法注入输入事件（权限被拒等）
+                    val length = input.readInt()
+                    val data = ByteArray(length)
+                    input.readFully(data)
+                    injectError.value = String(data, Charsets.UTF_8)
+                }
                 else -> throw IOException("unknown device message type: $type")
             }
         }

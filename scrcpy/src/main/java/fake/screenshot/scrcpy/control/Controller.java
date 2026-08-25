@@ -109,6 +109,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     private boolean keepDisplayPowerOff;
 
+    // 会话循环下跨会话注销剪贴板监听器用
+    private ClipboardManager clipboardManager;
+    private android.content.ClipboardManager.OnPrimaryClipChangedListener clipboardListener;
+
     // Used for resetting video encoding on RESET_VIDEO message or for sending camera controls
     private SurfaceCapture surfaceCapture;
 
@@ -146,7 +150,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (clipboardAutosync) {
             // If control and autosync are enabled, synchronize Android clipboard to the computer automatically
             if (clipboardManager != null) {
-                clipboardManager.addPrimaryClipChangedListener(() -> {
+                // 进程常驻（会话循环）后每个会话都会创建新的 Controller，
+                // 必须持有监听器引用并在 stop 时注销，避免跨会话累积泄漏
+                clipboardListener = () -> {
                     if (isSettingClipboard.get()) {
                         // This is a notification for the change we are currently applying, ignore it
                         return;
@@ -156,7 +162,9 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                         DeviceMessage msg = DeviceMessage.createClipboard(text);
                         sender.send(msg);
                     }
-                });
+                };
+                clipboardManager.addPrimaryClipChangedListener(clipboardListener);
+                this.clipboardManager = clipboardManager;
             } else {
                 Ln.w("No clipboard manager, copy-paste between device and computer will not work");
             }
@@ -306,6 +314,15 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         if (sender != null) {
             sender.stop();
         }
+        // 注销剪贴板监听：server 进程常驻（会话循环）时防止跨会话累积
+        if (clipboardManager != null && clipboardListener != null) {
+            try {
+                clipboardManager.removePrimaryClipChangedListener(clipboardListener);
+            } catch (Exception e) {
+                Ln.w("Could not remove clipboard listener", e);
+            }
+            clipboardListener = null;
+        }
     }
 
     @Override
@@ -345,7 +362,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             switch (type) {
                 case ControlMessage.TYPE_INJECT_KEYCODE:
                     if (supportsInputEvents) {
-                        injectKeycode(msg.getAction(), msg.getKeycode(), msg.getRepeat(), msg.getMetaState());
+                        reportIfFailed(injectKeycode(msg.getAction(), msg.getKeycode(), msg.getRepeat(), msg.getMetaState()));
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_TEXT:
@@ -355,13 +372,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     return true;
                 case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
                     if (supportsInputEvents) {
-                        injectTouch(
-                                msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
+                        reportIfFailed(injectTouch(
+                                msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons()));
                     }
                     return true;
                 case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
                     if (supportsInputEvents) {
-                        injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
+                        reportIfFailed(injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons()));
                     }
                     return true;
                 case ControlMessage.TYPE_BACK_OR_SCREEN_ON:
@@ -438,6 +455,28 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
 
         throw new AssertionError("Unexpected message type: " + type);
+    }
+
+    private long lastInjectErrorReportDate;
+
+    /**
+     * 注入失败上报：把静默失败（权限被拒、displayId 关联失败等）回传给接收端，
+     * 否则接收端只能看到"按钮没反应"而无从得知原因。
+     * 限流为每 3 秒一条，避免触摸 MOVE 流失败时刷屏。
+     */
+    private void reportIfFailed(boolean success) {
+        if (success) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (lastInjectErrorReportDate > now - 3000) {
+            return;
+        }
+        lastInjectErrorReportDate = now;
+        Ln.e("Input injection failed (check INJECT_EVENTS permission / \"USB debugging (Security Settings)\" on MIUI)");
+        if (sender != null) {
+            sender.send(DeviceMessage.createInjectError("input_injection_failed"));
+        }
     }
 
     private boolean injectKeycode(int action, int keycode, int repeat, int metaState) {

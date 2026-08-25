@@ -188,6 +188,8 @@
     <string name="receiver_shared_password_hint">Must match the sender, empty if auth disabled</string>
     <string name="receiver_connecting">Connecting…</string>
     <string name="receiver_connection_failed">Connection failed: </string>
+    <string name="retry">Retry</string>
+    <string name="receiver_inject_failed">Sender failed to inject input: </string>
     <string name="receiver_back">Back</string>
     <string name="receiver_home">Home</string>
     <string name="receiver_recents">Recents</string>

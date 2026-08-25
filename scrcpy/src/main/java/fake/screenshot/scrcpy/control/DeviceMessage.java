@@ -5,6 +5,7 @@ public final class DeviceMessage {
     public static final int TYPE_CLIPBOARD = 0;
     public static final int TYPE_ACK_CLIPBOARD = 1;
     public static final int TYPE_UHID_OUTPUT = 2;
+    public static final int TYPE_INJECT_ERROR = 3;
 
     private int type;
     private String text;
@@ -34,6 +35,13 @@ public final class DeviceMessage {
         event.type = TYPE_UHID_OUTPUT;
         event.id = id;
         event.data = data;
+        return event;
+    }
+
+    public static DeviceMessage createInjectError(String text) {
+        DeviceMessage event = new DeviceMessage();
+        event.type = TYPE_INJECT_ERROR;
+        event.text = text;
         return event;
     }
 

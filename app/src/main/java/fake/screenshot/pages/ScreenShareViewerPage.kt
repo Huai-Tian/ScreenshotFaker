@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -115,6 +118,19 @@ fun ScreenShareViewerCompose(configId: Int) {
                 }
             }
 
+            // 发送端注入失败上报 → Toast 提示（不再静默无反应）
+            val injectError by r.injectError.collectAsState()
+            LaunchedEffect(injectError) {
+                injectError?.let { err ->
+                    Toast.makeText(
+                        context,
+                        "inject_failed: $err",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    r.injectError.value = null
+                }
+            }
+
             Scaffold(
                 topBar = { TopAppBar(title = { Text(cfg.name) }) },
                 containerColor = Color.Black
@@ -186,9 +202,22 @@ fun ScreenShareViewerCompose(configId: Int) {
                                 StatusOverlay(stringResource(R.string.receiver_connecting))
 
                             is ScreenShareReceiver.State.Failed ->
-                                StatusOverlay(
-                                    stringResource(R.string.receiver_connection_failed) + s.message
-                                )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(16.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Text(
+                                        text = stringResource(R.string.receiver_connection_failed) + s.message,
+                                        color = Color.White.copy(alpha = 0.8f)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Button(onClick = { r.start() }) {
+                                        Text(stringResource(R.string.retry))
+                                    }
+                                }
 
                             is ScreenShareReceiver.State.Stopped ->
                                 StatusOverlay(stringResource(R.string.not_running))
