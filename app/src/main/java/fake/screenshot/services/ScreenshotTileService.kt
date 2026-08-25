@@ -5,8 +5,8 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.R
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
-import fake.screenshot.EncryptManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.EncryptManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

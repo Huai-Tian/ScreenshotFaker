@@ -1,4 +1,4 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
 import android.annotation.SuppressLint
 import android.app.PendingIntent
@@ -25,6 +25,7 @@ import java.util.Locale
 import java.util.zip.ZipFile
 import androidx.core.graphics.scale
 import androidx.core.net.toUri
+import fake.screenshot.Auxiliary
 
 /**
  * 重打包身份配置。

@@ -1,8 +1,9 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
 import android.content.Context
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import fake.screenshot.Auxiliary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,7 +50,7 @@ object ScreenShareManager {
                     session.connect(8000)
                     sshSession = session
                     true
-                }catch (_: Exception){
+                } catch (_: Exception) {
                     false
                 }
             }) return false
@@ -98,6 +99,10 @@ object ScreenShareManager {
                 .let { if (it) "audio_source=mic" else "" }
             val tcpLocalOnly =
                 if (sshSession != null) "tcp_local_only=true" else ""
+            // 共享密码：启用后接收端连接时需先完成密码握手（直连模式的访问控制）
+            val authPassword =
+                ConfigManager.getDataOnce(appContext, "screenShare_password", "")
+                    .let { if (it.isEmpty()) "" else "auth_password=$it" }
             val base =
                 "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.scrcpy.Server $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
@@ -114,7 +119,8 @@ object ScreenShareManager {
                 enableAudio,
                 audioOutput,
                 audioMic,
-                tcpLocalOnly
+                tcpLocalOnly,
+                authPassword
             ).filter { it.isNotEmpty() }
 
             sshSession?.let { session ->

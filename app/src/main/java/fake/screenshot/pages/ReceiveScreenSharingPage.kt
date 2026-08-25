@@ -1,14 +1,334 @@
 package fake.screenshot.pages
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.navigation.NavController
 import fake.screenshot.R
+import fake.screenshot.wrappers.ScreenShareReceiverConfig
+import fake.screenshot.wrappers.ScreenShareReceiverManager
+import fake.screenshot.styles.CommonCard
+import fake.screenshot.styles.PreferenceItem
+import fake.screenshot.styles.PreferenceItemEx
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReceiveScreenSharingCompose(){
-    TopAppBar(title = { Text(stringResource(R.string.receive_stealth_screen_sharing)) })
+fun ReceiveScreenSharingCompose(navController: NavController) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var configs by remember { mutableStateOf<List<ScreenShareReceiverConfig>>(emptyList()) }
+    var addDialog by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<ScreenShareReceiverConfig?>(null) }
+
+    fun refresh() {
+        scope.launch { configs = ScreenShareReceiverManager.loadConfigs(context) }
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(title = { Text(stringResource(R.string.receive_stealth_screen_sharing)) })
+        },
+        containerColor = MaterialTheme.colorScheme.background
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 20.dp)
+        ) {
+            items(configs.size, key = { configs[it].id }) { index ->
+                val config = configs[index]
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.Cast,
+                        title = config.name,
+                        subtitle = buildString {
+                            append(if (config.useSsh) "SSH " else "")
+                            append(config.address)
+                            append(":")
+                            append(config.port)
+                        },
+                        trailingContent = {
+                            IconButton(onClick = { deleteTarget = config }) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = stringResource(R.string.delete)
+                                )
+                            }
+                        },
+                        onClick = { navController.navigate("receive_viewer/${config.id}") }
+                    )
+                }
+            }
+            if (configs.isEmpty()) {
+                item {
+                    CommonCard {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(text = stringResource(R.string.no_receivers))
+                        }
+                    }
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItem(
+                        icon = Icons.Default.Add,
+                        title = stringResource(R.string.add_receiver),
+                        trailingContent = {},
+                        onClick = { addDialog = true }
+                    )
+                }
+            }
+        }
+    }
+
+    if (addDialog) {
+        AddReceiverDialog(
+            onDismiss = { addDialog = false },
+            onConfirm = { config ->
+                scope.launch {
+                    ScreenShareReceiverManager.saveConfig(context, config)
+                    refresh()
+                }
+                addDialog = false
+            }
+        )
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text(stringResource(R.string.delete)) },
+            text = { Text(stringResource(R.string.delete_receiver_confirm, target.name)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        ScreenShareReceiverManager.deleteConfig(context, target.id)
+                        refresh()
+                    }
+                    deleteTarget = null
+                }) {
+                    Text(stringResource(R.string.Confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) {
+                    Text(stringResource(R.string.Cancel))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SwitchRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = title)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun AddReceiverDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (ScreenShareReceiverConfig) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var nameInput by remember { mutableStateOf("") }
+    var addressInput by remember { mutableStateOf("") }
+    var portInput by remember { mutableStateOf("") }
+    var useSsh by remember { mutableStateOf(false) }
+    var sshPortInput by remember { mutableStateOf("22") }
+    var sshUserNameInput by remember { mutableStateOf("") }
+    var sshPasswordInput by remember { mutableStateOf("") }
+    var enableAudio by remember { mutableStateOf(true) }
+    var enableControl by remember { mutableStateOf(true) }
+    var passwordInput by remember { mutableStateOf("") }
+
+    val portValid = portInput.toIntOrNull()?.let { it in 1024..65535 } == true
+    val addressValid = addressInput.isNotEmpty()
+    val sshPortValid = sshPortInput.toIntOrNull()?.let { it in 1..65535 } == true
+    val sshValid = !useSsh || (sshUserNameInput.isNotEmpty() && sshPortValid)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.add_receiver)) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = nameInput,
+                    onValueChange = { nameInput = it },
+                    label = { Text(stringResource(R.string.receiver_name)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = addressInput,
+                    onValueChange = { addressInput = it },
+                    label = {
+                        Text(
+                            stringResource(
+                                if (useSsh) R.string.ssh_server_address
+                                else R.string.receiver_address
+                            )
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = portInput,
+                    onValueChange = { portInput = it },
+                    label = {
+                        Text(
+                            stringResource(
+                                if (useSsh) R.string.ssh_tunnel_remote_port
+                                else R.string.receiver_port
+                            )
+                        )
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                SwitchRow(
+                    title = stringResource(R.string.receiver_use_ssh),
+                    checked = useSsh,
+                    onCheckedChange = { useSsh = it }
+                )
+
+                if (useSsh) {
+                    OutlinedTextField(
+                        value = sshPortInput,
+                        onValueChange = { sshPortInput = it },
+                        label = { Text(stringResource(R.string.ssh_server_port)) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = sshUserNameInput,
+                        onValueChange = { sshUserNameInput = it },
+                        label = { Text(stringResource(R.string.ssh_server_user_name)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = sshPasswordInput,
+                        onValueChange = { sshPasswordInput = it },
+                        label = { Text(stringResource(R.string.ssh_server_user_password)) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+
+                OutlinedTextField(
+                    value = passwordInput,
+                    onValueChange = { passwordInput = it },
+                    label = { Text(stringResource(R.string.receiver_shared_password)) },
+                    placeholder = { Text(stringResource(R.string.receiver_shared_password_hint)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                SwitchRow(
+                    title = stringResource(R.string.receiver_enable_audio),
+                    checked = enableAudio,
+                    onCheckedChange = { enableAudio = it }
+                )
+                SwitchRow(
+                    title = stringResource(R.string.receiver_enable_control),
+                    checked = enableControl,
+                    onCheckedChange = { enableControl = it }
+                )
+                Text(
+                    text = stringResource(R.string.receiver_channel_match_hint),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        val id = ScreenShareReceiverManager.nextId(context)
+                        onConfirm(
+                            ScreenShareReceiverConfig(
+                                id = id,
+                                name = nameInput,
+                                address = addressInput,
+                                port = portInput.toInt(),
+                                useSsh = useSsh,
+                                sshPort = sshPortInput.toIntOrNull() ?: 22,
+                                sshUserName = sshUserNameInput,
+                                sshPassword = sshPasswordInput,
+                                enableAudio = enableAudio,
+                                enableControl = enableControl,
+                                password = passwordInput
+                            )
+                        )
+                    }
+                },
+                enabled = portValid && addressValid && sshValid && nameInput.isNotEmpty()
+            ) {
+                Text(stringResource(R.string.Confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.Cancel))
+            }
+        }
+    )
 }

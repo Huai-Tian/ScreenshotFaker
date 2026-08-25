@@ -39,7 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fake.screenshot.Auxiliary
-import fake.screenshot.DaemonManager
+import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.R
 import rikka.shizuku.Shizuku
 

@@ -27,10 +27,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.net.toUri
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
-import fake.screenshot.DaemonManager
-import fake.screenshot.EncryptManager
-import fake.screenshot.OverlayServiceManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.DaemonManager
+import fake.screenshot.wrappers.EncryptManager
+import fake.screenshot.wrappers.OverlayServiceManager
 import fake.screenshot.styles.*
 import fake.screenshot.R
 import fake.screenshot.services.DisplayOverlayService
@@ -278,6 +278,8 @@ fun ExtensionCompose() {
     var screenShareConfigDialogEnableAudio by remember { mutableStateOf(screenShareAudio) }
     var screenShareConfigDialogAudioOutput by remember { mutableStateOf(screenShareAudioOutput) }
     var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
+    val screenSharePassword by ConfigManager.rememberValue(context, "screenShare_password", "")
+    var screenShareConfigDialogPassword by remember { mutableStateOf(screenSharePassword) }
     val isScreenShareConfigValid by remember {
         derivedStateOf {
             val portValid = screenShareConfigDialogLocalPort.toIntOrNull()
@@ -316,6 +318,12 @@ fun ExtensionCompose() {
     var sshTunnelConfigDialogServerPort by remember { mutableStateOf(sshTunnelServerPort.toString()) }
     var sshTunnelConfigDialogUserName by remember { mutableStateOf(sshTunnelUserName) }
     var sshTunnelConfigDialogUserPassword by remember { mutableStateOf(sshTunnelUserPassword) }
+    val sshTunnelRemotePort by ConfigManager.rememberValue(context, "ssh_tunnel_remote_port", 0)
+    var sshTunnelConfigDialogRemotePort by remember {
+        mutableStateOf(
+            if (sshTunnelRemotePort in 1024..65535) sshTunnelRemotePort.toString() else ""
+        )
+    }
     val isSshTunnelConfigValid by remember {
         derivedStateOf {
             val addressValid = sshTunnelConfigDialogServerAddress.let {
@@ -1184,6 +1192,15 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        OutlinedTextField(
+                            value = screenShareConfigDialogPassword,
+                            onValueChange = { screenShareConfigDialogPassword = it },
+                            label = { Text(stringResource(R.string.screenShare_password)) },
+                            placeholder = { Text(stringResource(R.string.screenShare_password_hint)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1443,6 +1460,14 @@ fun ExtensionCompose() {
                                 )
                                 configChanged = true
                             }
+                            if (screenSharePassword != screenShareConfigDialogPassword) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_password",
+                                    screenShareConfigDialogPassword
+                                )
+                                configChanged = true
+                            }
                             if (configChanged) {
                                 DaemonManager.syncConfig()
                             }
@@ -1513,6 +1538,19 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        OutlinedTextField(
+                            value = sshTunnelConfigDialogRemotePort,
+                            onValueChange = { sshTunnelConfigDialogRemotePort = it },
+                            label = { Text(stringResource(R.string.ssh_tunnel_remote_port)) },
+                            placeholder = {
+                                Text(
+                                    stringResource(R.string.ssh_tunnel_remote_port_hint)
+                                )
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
                     }
                 },
                 confirmButton = {
@@ -1557,6 +1595,16 @@ fun ExtensionCompose() {
                                         context,
                                         "ssh_tunnel_user_password",
                                         sshTunnelConfigDialogUserPassword
+                                    )
+                                    configChanged = true
+                                }
+                                val newRemotePort =
+                                    sshTunnelConfigDialogRemotePort.toIntOrNull() ?: 0
+                                if (sshTunnelRemotePort != newRemotePort) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "ssh_tunnel_remote_port",
+                                        newRemotePort
                                     )
                                     configChanged = true
                                 }

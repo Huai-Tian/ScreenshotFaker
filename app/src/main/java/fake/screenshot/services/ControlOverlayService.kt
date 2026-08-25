@@ -19,8 +19,8 @@ import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
-import fake.screenshot.OverlayServiceManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.OverlayServiceManager
 import kotlinx.coroutines.runBlocking
 import kotlin.math.abs
 

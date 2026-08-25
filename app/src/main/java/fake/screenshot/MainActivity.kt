@@ -39,6 +39,7 @@ import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.ReceiveScreenSharingCompose
+import fake.screenshot.pages.ScreenShareViewerCompose
 import fake.screenshot.pages.SettingsCompose
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
@@ -50,6 +51,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.crypto.tink.aead.AeadConfig
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.DaemonManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -204,7 +207,12 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                     composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
                     composable("daemon_status") { DaemonStatusCompose() }
                     composable("about") { AboutCompose() }
-                    composable("receive_screen_sharing") { ReceiveScreenSharingCompose() }
+                    composable("receive_screen_sharing") { ReceiveScreenSharingCompose(navController) }
+                    composable("receive_viewer/{configId}") { entry ->
+                        ScreenShareViewerCompose(
+                            entry.arguments?.getString("configId")?.toIntOrNull() ?: -1
+                        )
+                    }
                 }
             }
         }

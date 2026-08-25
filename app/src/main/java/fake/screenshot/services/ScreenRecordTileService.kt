@@ -4,8 +4,8 @@ import android.os.Environment
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
-import fake.screenshot.EncryptManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.EncryptManager
 import fake.screenshot.R
 import kotlinx.coroutines.*
 import java.io.File

@@ -27,15 +27,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.navigation.NavController
 import fake.screenshot.Auxiliary
-import fake.screenshot.ConfigManager
-import fake.screenshot.DaemonManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.styles.*
 import fake.screenshot.R
 import kotlinx.coroutines.launch
 import androidx.core.net.toUri
-import fake.screenshot.RepackIdentity
+import fake.screenshot.wrappers.RepackIdentity
 import androidx.core.graphics.scale
-import fake.screenshot.RepackManager
+import fake.screenshot.wrappers.RepackManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

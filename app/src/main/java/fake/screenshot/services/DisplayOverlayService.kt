@@ -25,8 +25,8 @@ import android.widget.ImageView
 import androidx.core.app.NotificationCompat
 import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.enableScreenshotExclusion
-import fake.screenshot.ConfigManager
-import fake.screenshot.OverlayServiceManager
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.OverlayServiceManager
 import kotlinx.coroutines.runBlocking
 import java.lang.ref.WeakReference
 

@@ -167,4 +167,23 @@
     <string name="not_running">Not running</string>
     <string name="running">Running</string>
     <string name="permission_denied">Permission denied</string>
+    <string name="delete">Delete</string>
+    <string name="add_receiver">Add receiver</string>
+    <string name="no_receivers">No receivers yet. Add one to receive screen sharing from a sender device</string>
+    <string name="receiver_name">Name</string>
+    <string name="receiver_address">Sender address</string>
+    <string name="receiver_port">Sender sharing port</string>
+    <string name="receiver_use_ssh">Connect via SSH tunnel</string>
+    <string name="receiver_enable_audio">Enable audio</string>
+    <string name="receiver_enable_control">Enable control</string>
+    <string name="receiver_channel_match_hint">These switches must match the sender\'s audio/control settings, otherwise the connection will hang</string>
+    <string name="receiver_shared_password">Shared password</string>
+    <string name="receiver_shared_password_hint">Must match the sender, empty if auth disabled</string>
+    <string name="receiver_connecting">Connecting…</string>
+    <string name="receiver_connection_failed">Connection failed: </string>
+    <string name="delete_receiver_confirm">Delete receiver \"%1$s\"?</string>
+    <string name="screenShare_password">Shared password</string>
+    <string name="screenShare_password_hint">Empty disables authentication. Receiver must enter the same password</string>
+    <string name="ssh_tunnel_remote_port">SSH remote port</string>
+    <string name="ssh_tunnel_remote_port_hint">Port on the SSH server, defaults to the sharing port</string>
 </resources>

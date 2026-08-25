@@ -1,5 +1,6 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -14,12 +15,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -107,7 +111,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     @Volatile
     private var surface: Surface? = null
 
-    val state = kotlinx.coroutines.flow.MutableStateFlow<State>(State.Idle)
+    val state = MutableStateFlow<State>(State.Idle)
 
     fun setSurface(surface: Surface?) {
         this.surface = surface
@@ -480,8 +484,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 (buffer[offset + 3].toInt() and 0xFF)
     }
 
-    private fun ByteBufferWrap(buffer: ByteArray, size: Int): java.nio.ByteBuffer =
-        java.nio.ByteBuffer.wrap(buffer.copyOf(size))
+    private fun ByteBufferWrap(buffer: ByteArray, size: Int): ByteBuffer =
+        ByteBuffer.wrap(buffer.copyOf(size))
 }
 
 /**
@@ -495,14 +499,14 @@ object ScreenShareReceiverManager {
     private const val CONFIG_PREFIX = "receive_screen_share_config_"
     private const val SEPARATOR = "\u001F"
 
-    private val receivers = java.util.concurrent.ConcurrentHashMap<Int, ScreenShareReceiver>()
+    private val receivers = ConcurrentHashMap<Int, ScreenShareReceiver>()
 
-    suspend fun loadConfigs(context: android.content.Context): List<ScreenShareReceiverConfig> {
+    suspend fun loadConfigs(context: Context): List<ScreenShareReceiverConfig> {
         return loadIds(context).mapNotNull { loadConfig(context, it) }
     }
 
     suspend fun loadConfig(
-        context: android.content.Context,
+        context: Context,
         id: Int
     ): ScreenShareReceiverConfig? {
         val raw = ConfigManager.getDataOnce(context, CONFIG_PREFIX + id, "")
@@ -527,7 +531,7 @@ object ScreenShareReceiverManager {
     }
 
     suspend fun saveConfig(
-        context: android.content.Context,
+        context: Context,
         config: ScreenShareReceiverConfig
     ) {
         val raw = listOf(
@@ -542,7 +546,7 @@ object ScreenShareReceiverManager {
         ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
     }
 
-    suspend fun deleteConfig(context: android.content.Context, id: Int) {
+    suspend fun deleteConfig(context: Context, id: Int) {
         ConfigManager.saveData(context, CONFIG_PREFIX + id, "")
         val ids = loadIds(context).toMutableSet()
         ids.remove(id)
@@ -550,11 +554,11 @@ object ScreenShareReceiverManager {
         receivers.remove(id)?.stop()
     }
 
-    suspend fun nextId(context: android.content.Context): Int {
+    suspend fun nextId(context: Context): Int {
         return (loadIds(context).maxOrNull() ?: 0) + 1
     }
 
-    private suspend fun loadIds(context: android.content.Context): List<Int> {
+    private suspend fun loadIds(context: Context): List<Int> {
         return ConfigManager.getDataOnce(context, IDS_KEY, "")
             .split(",")
             .filter { it.isNotBlank() }

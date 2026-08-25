@@ -1,4 +1,4 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
 import android.content.Context
 import androidx.compose.runtime.Composable

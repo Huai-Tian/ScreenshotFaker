@@ -1,7 +1,8 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
 import android.content.Context
 import android.os.Environment
+import fake.screenshot.Auxiliary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex

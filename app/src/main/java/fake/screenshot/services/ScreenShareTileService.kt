@@ -3,7 +3,7 @@ package fake.screenshot.services
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.R
-import fake.screenshot.ScreenShareManager
+import fake.screenshot.wrappers.ScreenShareManager
 
 class ScreenShareTileService : TileService() {
 

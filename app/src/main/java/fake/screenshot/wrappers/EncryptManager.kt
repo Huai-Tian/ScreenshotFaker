@@ -1,4 +1,4 @@
-package fake.screenshot
+package fake.screenshot.wrappers
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
