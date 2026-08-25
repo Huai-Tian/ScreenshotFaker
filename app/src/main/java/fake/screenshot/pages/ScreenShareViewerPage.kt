@@ -1,10 +1,14 @@
 package fake.screenshot.pages
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,19 +19,28 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -40,8 +53,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -64,6 +78,9 @@ fun ScreenShareViewerCompose(configId: Int) {
     val context = LocalContext.current
     var config by remember { mutableStateOf<ScreenShareReceiverConfig?>(null) }
     var receiver by remember { mutableStateOf<ScreenShareReceiver?>(null) }
+    // 滚动模式：视频区单指拖动转为滚动事件（默认触摸模式直接注入触摸）
+    var scrollMode by remember { mutableStateOf(false) }
+    var showTextInput by remember { mutableStateOf(false) }
 
     LaunchedEffect(configId) {
         config = ScreenShareReceiverManager.loadConfig(context, configId)
@@ -79,6 +96,17 @@ fun ScreenShareViewerCompose(configId: Int) {
         receiver?.let { r ->
             val state by r.state.collectAsState()
             val videoSize by r.videoSize.collectAsState()
+            val clipboardContent by r.clipboardContent.collectAsState()
+
+            // 发送端剪贴板内容到达（自动同步或拉取响应）→ 写入本机剪贴板
+            LaunchedEffect(clipboardContent) {
+                clipboardContent?.let { text ->
+                    if (text.isNotEmpty()) {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("scrcpy", text))
+                    }
+                }
+            }
 
             Scaffold(
                 topBar = { TopAppBar(title = { Text(cfg.name) }) },
@@ -129,13 +157,20 @@ fun ScreenShareViewerCompose(configId: Int) {
                                 }
                             )
 
-                            // 触摸层：单指手势映射到视频坐标并注入发送端
                             if (cfg.enableControl) {
-                                TouchInputLayer(
-                                    receiver = r,
-                                    videoWidth = videoSize?.get(0),
-                                    videoHeight = videoSize?.get(1)
-                                )
+                                if (scrollMode) {
+                                    ScrollInputLayer(
+                                        receiver = r,
+                                        videoWidth = videoSize?.get(0),
+                                        videoHeight = videoSize?.get(1)
+                                    )
+                                } else {
+                                    TouchInputLayer(
+                                        receiver = r,
+                                        videoWidth = videoSize?.get(0),
+                                        videoHeight = videoSize?.get(1)
+                                    )
+                                }
                             }
                         }
 
@@ -156,10 +191,25 @@ fun ScreenShareViewerCompose(configId: Int) {
                     }
 
                     if (cfg.enableControl) {
-                        ControlToolbar(receiver = r)
+                        ControlToolbar(
+                            receiver = r,
+                            scrollMode = scrollMode,
+                            onToggleScrollMode = { scrollMode = !scrollMode },
+                            onShowTextInput = { showTextInput = true }
+                        )
                     }
                 }
             }
+        }
+
+        if (showTextInput) {
+            TextInputDialog(
+                onDismiss = { showTextInput = false },
+                onSend = { text ->
+                    receiver?.sendText(text)
+                    showTextInput = false
+                }
+            )
         }
     } ?: run {
         Scaffold(
@@ -181,7 +231,8 @@ fun ScreenShareViewerCompose(configId: Int) {
 }
 
 /**
- * 触摸转发层：把本机单指按下/移动/抬起点位映射到视频坐标后注入发送端。
+ * 触摸转发层：跟踪任意多根手指，每根手指分配独立 pointerId（-2 起递减，
+ * -1 为鼠标保留），按下/移动/抬起分别注入发送端，支持双指缩放等多指手势。
  * 视频尺寸未知时不转发（坐标无法映射）。
  */
 @Composable
@@ -196,54 +247,164 @@ private fun TouchInputLayer(
             .pointerInput(videoWidth, videoHeight) {
                 val vw = videoWidth ?: return@pointerInput
                 val vh = videoHeight ?: return@pointerInput
+                fun mapX(x: Float) = (x / size.width * vw).toInt().coerceIn(0, vw - 1)
+                fun mapY(y: Float) = (y / size.height * vh).toInt().coerceIn(0, vh - 1)
+
+                var nextPointerId = ScreenShareReceiver.POINTER_ID_FIRST_FINGER
                 awaitEachGesture {
-                    val down = awaitFirstDown()
-                    fun map(pos: androidx.compose.ui.geometry.Offset): Pair<Int, Int> {
-                        val x = (pos.x / size.width * vw).toInt().coerceIn(0, vw - 1)
-                        val y = (pos.y / size.height * vh).toInt().coerceIn(0, vh - 1)
-                        return x to y
+                    // 活跃手指：Compose pointerId → 发送到对端的 scrcpy pointerId
+                    val active = HashMap<PointerInputChange, Long>()
+
+                    fun inject(change: PointerInputChange, action: Int, pressure: Float) {
+                        receiver.sendTouch(
+                            action, active[change] ?: return,
+                            mapX(change.position.x), mapY(change.position.y),
+                            vw, vh, pressure
+                        )
                     }
 
-                    val (dx, dy) = map(down.position)
-                    receiver.sendTouch(ScreenShareReceiver.ACTION_DOWN, dx, dy, vw, vh, 1f)
-                    down.consume()
                     try {
                         while (true) {
                             val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (!change.pressed) {
-                                val (ux, uy) = map(change.position)
-                                receiver.sendTouch(ScreenShareReceiver.ACTION_UP, ux, uy, vw, vh, 0f)
-                                change.consume()
-                                break
+                            for (change in event.changes) {
+                                val newlyPressed = !change.previousPressed && change.pressed
+                                val released = change.previousPressed && !change.pressed
+                                when {
+                                    newlyPressed -> {
+                                        active[change] = nextPointerId--
+                                        inject(change, ScreenShareReceiver.ACTION_DOWN, 1f)
+                                        change.consume()
+                                    }
+                                    released -> {
+                                        inject(change, ScreenShareReceiver.ACTION_UP, 0f)
+                                        active.remove(change)
+                                        change.consume()
+                                    }
+                                    change.pressed && change.positionChanged() -> {
+                                        inject(change, ScreenShareReceiver.ACTION_MOVE, 1f)
+                                        change.consume()
+                                    }
+                                    else -> {}
+                                }
                             }
-                            if (change.positionChange() != androidx.compose.ui.geometry.Offset.Zero) {
-                                val (mx, my) = map(change.position)
-                                receiver.sendTouch(ScreenShareReceiver.ACTION_MOVE, mx, my, vw, vh, 1f)
-                                change.consume()
-                            }
+                            if (active.isEmpty()) break
                         }
                     } catch (_: Exception) {
-                        // 手势检测中断（如尺寸变化），发送抬起避免发送端触点悬死
-                        receiver.sendTouch(ScreenShareReceiver.ACTION_UP, 0, 0, vw, vh, 0f)
+                        // 手势流中断（尺寸变化/协程取消）：为残余手指补发抬起，
+                        // 避免发送端触点悬死
+                        active.forEach { (change, pid) ->
+                            receiver.sendTouch(
+                                ScreenShareReceiver.ACTION_UP, pid,
+                                mapX(change.position.x), mapY(change.position.y),
+                                vw, vh, 0f
+                            )
+                        }
                     }
                 }
             }
     )
 }
 
-/** 远程按键工具栏：返回 / 主页 / 最近任务 / 音量 / 旋转 */
+/**
+ * 滚动层：视频区单指垂直拖动转为滚动事件注入发送端，
+ * 适用于不方便精确滑动的长列表滚动。
+ */
 @Composable
-private fun ControlToolbar(receiver: ScreenShareReceiver) {
+private fun ScrollInputLayer(
+    receiver: ScreenShareReceiver,
+    videoWidth: Int?,
+    videoHeight: Int?
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(videoWidth, videoHeight) {
+                val vw = videoWidth ?: return@pointerInput
+                val vh = videoHeight ?: return@pointerInput
+                // 拖动像素 → 滚动单位的换算系数（约 40px = 1 次滚轮）
+                val SCROLL_PIXEL_UNIT = 40f
+                detectVerticalDragGestures { change, dragAmount ->
+                    val x = (change.position.x / size.width * vw).toInt().coerceIn(0, vw - 1)
+                    val y = (change.position.y / size.height * vh).toInt().coerceIn(0, vh - 1)
+                    // 向上拖 = 向下滚动（同触屏列表惯性方向）
+                    val vScroll = -dragAmount / SCROLL_PIXEL_UNIT
+                    receiver.sendScroll(x, y, vw, vh, 0f, vScroll)
+                    change.consume()
+                }
+            }
+    )
+}
+
+/**
+ * 远程控制工具栏：滚动模式切换 / 输入文字 / 剪贴板推拉 /
+ * 返回 / 主页 / 最近任务 / 音量 / 电源 / 通知栏 / 旋转
+ */
+@Composable
+private fun ControlToolbar(
+    receiver: ScreenShareReceiver,
+    scrollMode: Boolean,
+    onToggleScrollMode: () -> Unit,
+    onShowTextInput: () -> Unit
+) {
+    val context = LocalContext.current
+    val pulledMessage = stringResource(R.string.receiver_clipboard_pulled)
+    val pushedMessage = stringResource(R.string.receiver_clipboard_pushed)
+
+    fun localClipboardText(): String {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        return cm.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color.Black.copy(alpha = 0.6f))
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 6.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceEvenly
     ) {
         ToolbarButton(
-            icon = Icons.Default.KeyboardArrowLeft,
+            icon = Icons.Default.SwapVert,
+            description = stringResource(R.string.receiver_scroll_mode),
+            highlighted = scrollMode,
+            onClick = onToggleScrollMode
+        )
+
+        ToolbarButton(
+            icon = Icons.Default.Keyboard,
+            description = stringResource(R.string.receiver_keyboard),
+            onClick = onShowTextInput
+        )
+
+        ToolbarButton(
+            icon = Icons.Default.ContentPaste,
+            description = stringResource(R.string.receiver_clipboard_push),
+            onClick = {
+                receiver.sendSetClipboard(localClipboardText(), paste = false)
+                Toast.makeText(context, pushedMessage, Toast.LENGTH_SHORT).show()
+            }
+        )
+
+        ToolbarButton(
+            icon = Icons.Default.ContentCopy,
+            description = stringResource(R.string.receiver_clipboard_pull),
+            onClick = {
+                receiver.sendGetClipboard()
+                Toast.makeText(context, pulledMessage, Toast.LENGTH_SHORT).show()
+            }
+        )
+
+        ToolbarButton(
+            icon = Icons.Default.PowerSettingsNew,
+            description = stringResource(R.string.receiver_power)
+        ) { receiver.sendKey(ScreenShareReceiver.KEYCODE_POWER) }
+
+        ToolbarButton(
+            icon = Icons.Default.Notifications,
+            description = stringResource(R.string.receiver_notifications)
+        ) { receiver.sendEmptyEvent(ScreenShareReceiver.TYPE_EXPAND_NOTIFICATION_PANEL) }
+
+        ToolbarButton(
+            icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
             description = stringResource(R.string.receiver_back)
         ) { receiver.sendKey(ScreenShareReceiver.KEYCODE_BACK) }
 
@@ -274,21 +435,56 @@ private fun ControlToolbar(receiver: ScreenShareReceiver) {
     }
 }
 
+/** 文本注入对话框：输入任意文本（含中文）注入发送端当前焦点输入框 */
+@Composable
+private fun TextInputDialog(
+    onDismiss: () -> Unit,
+    onSend: (String) -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.receiver_keyboard)) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onSend(text) }, enabled = text.isNotEmpty()) {
+                Text(stringResource(R.string.receiver_keyboard_send))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.Cancel))
+            }
+        }
+    )
+}
+
 @Composable
 private fun ToolbarButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     description: String,
+    highlighted: Boolean = false,
     onClick: () -> Unit
 ) {
     FilledIconButton(
         onClick = onClick,
-        modifier = Modifier.size(44.dp),
+        modifier = Modifier.size(40.dp),
         colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = Color.White.copy(alpha = 0.15f),
+            containerColor = if (highlighted) {
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+            } else {
+                Color.White.copy(alpha = 0.15f)
+            },
             contentColor = Color.White
         )
     ) {
-        Icon(icon, contentDescription = description, modifier = Modifier.size(24.dp))
+        Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
     }
 }
 

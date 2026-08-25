@@ -173,6 +173,15 @@
     <string name="receiver_rotate">旋转</string>
     <string name="receiver_volume_up">音量加</string>
     <string name="receiver_volume_down">音量减</string>
+    <string name="receiver_power">电源</string>
+    <string name="receiver_notifications">通知栏</string>
+    <string name="receiver_keyboard">输入文字</string>
+    <string name="receiver_keyboard_send">发送</string>
+    <string name="receiver_clipboard_pull">拉取发送端剪贴板</string>
+    <string name="receiver_clipboard_push">推送本机剪贴板</string>
+    <string name="receiver_clipboard_pulled">发送端剪贴板已复制到本机</string>
+    <string name="receiver_clipboard_pushed">本机剪贴板已发送到发送端</string>
+    <string name="receiver_scroll_mode">滚动模式</string>
     <string name="delete_receiver_confirm">删除接收端“%1$s”？</string>
     <string name="screenShare_password">共享密码</string>
     <string name="screenShare_password_hint">留空则不启用认证，接收端需输入相同密码</string>

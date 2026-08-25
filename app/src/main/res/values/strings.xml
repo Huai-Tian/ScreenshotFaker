@@ -187,6 +187,15 @@
     <string name="receiver_rotate">Rotate</string>
     <string name="receiver_volume_up">Volume up</string>
     <string name="receiver_volume_down">Volume down</string>
+    <string name="receiver_power">Power</string>
+    <string name="receiver_notifications">Notifications</string>
+    <string name="receiver_keyboard">Type text</string>
+    <string name="receiver_keyboard_send">Send</string>
+    <string name="receiver_clipboard_pull">Pull sender clipboard</string>
+    <string name="receiver_clipboard_push">Push local clipboard</string>
+    <string name="receiver_clipboard_pulled">Sender clipboard copied to local</string>
+    <string name="receiver_clipboard_pushed">Local clipboard sent to sender</string>
+    <string name="receiver_scroll_mode">Scroll mode</string>
     <string name="delete_receiver_confirm">Delete receiver \"%1$s\"?</string>
     <string name="screenShare_password">Shared password</string>
     <string name="screenShare_password_hint">Empty disables authentication. Receiver must enter the same password</string>

@@ -62,7 +62,8 @@ data class ScreenShareReceiverConfig(
  *   DesktopConnection.open 的 accept 顺序一致）；
  * - video socket：1 字节 dummy byte + 64 字节设备名 + 4 字节 codec id + 帧流；
  * - audio socket：4 字节 codec id + 帧流；
- * - control socket：server → client 的 DeviceMessage（此处仅读取丢弃）。
+ * - control socket：client → server 的控制消息注入（触摸/滚动/按键/文本/剪贴板）；
+ *   server → client 的 DeviceMessage（剪贴板同步等）由 [controlLoop] 解析。
  * - 帧格式：12 字节 header（8 字节 ptsAndFlags + 4 字节 packetSize）+ 载荷。
  *   bit63 = session meta（宽高变化），bit62 = config/CSD 包，bit61 = 关键帧。
  *
@@ -98,14 +99,23 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
         // ControlMessage 类型（与服务端 ControlMessage 常量一致）
         const val TYPE_INJECT_KEYCODE = 0
+        const val TYPE_INJECT_TEXT = 1
         const val TYPE_INJECT_TOUCH_EVENT = 2
         const val TYPE_INJECT_SCROLL_EVENT = 3
         const val TYPE_EXPAND_NOTIFICATION_PANEL = 5
         const val TYPE_COLLAPSE_PANELS = 7
+        const val TYPE_GET_CLIPBOARD = 8
+        const val TYPE_SET_CLIPBOARD = 9
         const val TYPE_ROTATE_DEVICE = 11
 
-        /** 通用手指 pointerId（非 -1/POINTER_ID_MOUSE，服务端按手指注入） */
-        const val POINTER_ID_GENERIC_FINGER = -2L
+        /**
+         * 手指 pointerId 基数（-1 为 POINTER_ID_MOUSE 保留，服务端按鼠标注入），
+         * 多指时依次递减分配：-2、-3、-4…
+         */
+        const val POINTER_ID_FIRST_FINGER = -2L
+
+        /** 服务端 ControlMessageReader 对单条 INJECT_TEXT 的长度上限 */
+        const val INJECT_TEXT_MAX_LENGTH = 300
 
         // MotionEvent.ACTION_*（避免依赖 android.view.MotionEvent 也可读性更好）
         const val ACTION_DOWN = 0
@@ -142,6 +152,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     /** 视频尺寸（来自 session meta），viewer 用于宽高比适配与触摸坐标映射 */
     val videoSize = MutableStateFlow<IntArray?>(null)
+
+    /**
+     * 发送端剪贴板内容（来自 DeviceMessage type 0，含 GET_CLIPBOARD 响应与
+     * 发送端 clipboard_autosync 自动同步），viewer 监听后写入本机剪贴板。
+     */
+    val clipboardContent = MutableStateFlow<String?>(null)
 
     fun setSurface(surface: Surface?) {
         this.surface = surface
@@ -484,8 +500,10 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     // ---------------------------------------------------------------- 控制通道
 
     /**
-     * 读取并丢弃 server 下发的 DeviceMessage（剪贴板同步等）。
-     * 仅当发送端启用"允许控制"时该 socket 才存在；不读取会导致 server 端写阻塞。
+     * 读取 server 下发的 DeviceMessage（与 DeviceMessageReader 的线格式一致）：
+     * type 0 剪贴板文本（length + UTF-8）→ 写入 [clipboardContent]；
+     * type 1 ack clipboard（sequence）与 type 2 uhid output → 读取丢弃。
+     * 不读取会导致 server 端写阻塞。
      */
     private fun controlLoop(socket: Socket) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
@@ -502,7 +520,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         while (running.get()) {
             when (val type = input.read()) {
                 -1 -> return
-                0 -> skipFully(input.readInt())       // clipboard 文本
+                0 -> {
+                    val length = input.readInt()
+                    val data = ByteArray(length)
+                    input.readFully(data)
+                    clipboardContent.value = String(data, Charsets.UTF_8)
+                }
                 1 -> skipFully(8)                     // ack clipboard
                 2 -> { skipFully(2); skipFully(input.readUnsignedShort()) } // uhid output
                 else -> throw IOException("unknown device message type: $type")
@@ -519,18 +542,26 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      *
      * 坐标为视频坐标系；[screenWidth]/[screenHeight] 传视频尺寸，
      * server 端 PositionMapper 会映射到真实屏幕。
+     * 多指时每根手指传入不同的 [pointerId]（负数递减分配，-1 为鼠标保留）。
      *
      * @param action MotionEvent.ACTION_DOWN=0 / ACTION_UP=1 / ACTION_MOVE=2
      */
-    fun sendTouch(action: Int, x: Int, y: Int, screenWidth: Int, screenHeight: Int, pressure: Float) {
+    fun sendTouch(
+        action: Int,
+        pointerId: Long,
+        x: Int,
+        y: Int,
+        screenWidth: Int,
+        screenHeight: Int,
+        pressure: Float
+    ) {
         val out = controlOut ?: return
         val buffer = java.io.DataOutputStream(out)
         synchronized(controlLock) {
             runCatching {
                 buffer.writeByte(TYPE_INJECT_TOUCH_EVENT)
                 buffer.writeByte(action)
-                // 非 -1（POINTER_ID_MOUSE）即按手指事件注入（SOURCE_TOUCHSCREEN）
-                buffer.writeLong(POINTER_ID_GENERIC_FINGER)
+                buffer.writeLong(pointerId)
                 buffer.writeInt(x)
                 buffer.writeInt(y)
                 buffer.writeShort(screenWidth)
@@ -602,6 +633,77 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 out.flush()
             }
         }
+    }
+
+    /**
+     * 注入文本（与 parseInjectText 的线格式一致）：type(1) + length(4) + UTF-8 字节。
+     * 超过 [INJECT_TEXT_MAX_LENGTH] 时自动分段发送。
+     */
+    fun sendText(text: String) {
+        val out = controlOut ?: return
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.isEmpty()) return
+        synchronized(controlLock) {
+            runCatching {
+                var offset = 0
+                while (offset < bytes.size) {
+                    // 从上限处回退到 UTF-8 字符边界，避免拆出非法序列
+                    var end = minOf(offset + INJECT_TEXT_MAX_LENGTH, bytes.size)
+                    while (end > offset && end < bytes.size &&
+                        (bytes[end].toInt() and 0xC0) == 0x80
+                    ) end--
+
+                    out.write(TYPE_INJECT_TEXT)
+                    writeIntBE(out, end - offset)
+                    out.write(bytes, offset, end - offset)
+                    out.flush()
+                    offset = end
+                }
+            }
+        }
+    }
+
+    /**
+     * 把文本设置到发送端剪贴板（与 parseSetClipboard 的线格式一致）：
+     * type(1) + sequence(8) + paste(1) + length(4) + UTF-8 字节。
+     * sequence 传 0（无效）则发送端不会回 ack；[paste] 为 true 时发送端立即触发粘贴。
+     */
+    fun sendSetClipboard(text: String, paste: Boolean) {
+        val out = controlOut ?: return
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        synchronized(controlLock) {
+            runCatching {
+                out.write(TYPE_SET_CLIPBOARD)
+                // sequence 无效，不请求 ack
+                for (shift in 56 downTo 0 step 8) out.write(0)
+                out.write(if (paste) 1 else 0)
+                writeIntBE(out, bytes.size)
+                out.write(bytes)
+                out.flush()
+            }
+        }
+    }
+
+    /**
+     * 请求发送端剪贴板内容（与 parseGetClipboard 的线格式一致）：type(1) + copyKey(1)。
+     * 内容通过 DeviceMessage(type 0) 异步返回，见 [clipboardContent]。
+     */
+    fun sendGetClipboard() {
+        val out = controlOut ?: return
+        synchronized(controlLock) {
+            runCatching {
+                out.write(TYPE_GET_CLIPBOARD)
+                out.write(0) // COPY_KEY_NONE
+                out.flush()
+            }
+        }
+    }
+
+    private fun writeIntBE(out: java.io.OutputStream, value: Int) {
+        out.write(value ushr 24 and 0xFF)
+        out.write(value ushr 16 and 0xFF)
+        out.write(value ushr 8 and 0xFF)
+        out.write(value and 0xFF)
     }
 
     private fun toI16FixedPoint(value: Float): Int =
