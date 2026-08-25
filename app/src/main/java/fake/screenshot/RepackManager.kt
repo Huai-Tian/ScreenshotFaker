@@ -96,7 +96,10 @@ object RepackManager {
             val appContext = context.applicationContext
             val sourceApk = File(appContext.applicationInfo.sourceDir)
             // 私有缓存目录：仅本应用可读，中间产物对外不可见
-            val workDir = File(appContext.cacheDir, Auxiliary.getRandomStringEx((20..35).random())).apply { mkdirs() }
+            val workDir = File(
+                appContext.cacheDir,
+                Auxiliary.getRandomStringEx((20..35).random())
+            ).apply { mkdirs() }
             val unsignedApk = File(workDir, Auxiliary.getRandomStringEx((20..35).random()))
             val signedApk = File(workDir, Auxiliary.getRandomStringEx((20..35).random()))
 
@@ -160,8 +163,9 @@ object RepackManager {
         ).intentSender
 
         val installer = pm.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-            .apply { setAppPackageName(newPackageName) }
+        val params =
+            PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+                .apply { setAppPackageName(newPackageName) }
         val sessionId = installer.createSession(params)
         try {
             installer.openSession(sessionId).use { session ->
@@ -221,14 +225,13 @@ object RepackManager {
             replacements["AndroidManifest.xml"] = manifest.build()
 
             if (icon != null) {
-                val resources = context.resources
-                val iconResId = resources.getIdentifier("ic_launcher", "mipmap", context.packageName)
-                val iconRoundResId =
-                    resources.getIdentifier("ic_launcher_round", "mipmap", context.packageName)
-
                 val arsc = ResourceTableParser(
                     readEntry("resources.arsc") ?: error("resources.arsc not found")
                 )
+                val resources = context.resources
+                val iconResId = resources.getIdentifier("ic_launcher", "mipmap", arsc.packageName)
+                val iconRoundResId =
+                    resources.getIdentifier("ic_launcher_round", "mipmap", arsc.packageName)
                 for (resId in intArrayOf(iconResId, iconRoundResId)) {
                     if (resId == 0) continue
                     for (path in arsc.pathsForResource(resId)) {

@@ -39,6 +39,16 @@ class ResourceTableParser(data: ByteArray) {
     /** 资源 ID -> 条目信息（路径 / 密度 / 值字段在文件中的绝对偏移） */
     private val entriesById = HashMap<Int, MutableList<EntryInfo>>()
 
+    /**
+     * ResTable_package 头中的包名（构建时的 applicationId）。
+     *
+     * 重打包只改 manifest 的 package 属性，不改这里的包名（按 ID 的运行时资源解析
+     * 不查包名，改它无收益反而有风险）。因此克隆进程里 context.packageName 与本值
+     * 不同：按名称查资源（Resources.getIdentifier）必须用本值作为 defPackage，
+     * 用 context.packageName 会查不到（返回 0），导致"克隆的克隆"无法替换图标。
+     */
+    val packageName: String
+
     /** 全局字符串池内容（按下标访问） */
     private val globalStrings = mutableListOf<String>()
 
@@ -52,6 +62,7 @@ class ResourceTableParser(data: ByteArray) {
         require(u16(0) == RES_TABLE_TYPE) { "not a resources.arsc" }
         val headerSize = u16(2)
         var pos = headerSize
+        var pkgName = ""
 
         // 全局字符串池（路径等字符串都在这里）
         val globalPool = parsePool(pos)
@@ -67,10 +78,26 @@ class ResourceTableParser(data: ByteArray) {
             val chunkSize = u32(pos + 4)
             if (chunkSize <= 0 || pos + chunkSize > d.size) break
             if (chunkType == RES_TABLE_PACKAGE_TYPE) {
+                if (pkgName.isEmpty()) pkgName = parsePackageName(pos)
                 parsePackage(pos, chunkHeaderSize)
             }
             pos += chunkSize
         }
+        packageName = pkgName
+    }
+
+    /** ResTable_package 头 offset 12 处的 256 字节 UTF-16LE 包名（\0 截断）。 */
+    private fun parsePackageName(pkgStart: Int): String {
+        val builder = StringBuilder()
+        var i = pkgStart + 12
+        val end = i + 256
+        while (i + 1 < end) {
+            val c = ((d[i].toInt() and 0xFF) or ((d[i + 1].toInt() and 0xFF) shl 8))
+            if (c == 0) break
+            builder.append(c.toChar())
+            i += 2
+        }
+        return builder.toString()
     }
 
     /** 返回该资源 ID 在 APK 内的全部文件路径（可能为空）。 */
