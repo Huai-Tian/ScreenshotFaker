@@ -237,9 +237,12 @@ object RepackManager {
                     for (path in arsc.pathsForResource(resId)) {
                         val lower = path.lowercase()
                         val format = when {
-                            lower.endsWith(".webp") -> Bitmap.CompressFormat.WEBP_LOSSLESS
+                            lower.endsWith(".webp") -> Bitmap.CompressFormat.WEBP_LOSSY
                             lower.endsWith(".png") -> Bitmap.CompressFormat.PNG
-                            else -> continue
+                            lower.endsWith(".jpg") || lower.endsWith(".jpeg") ->
+                                Bitmap.CompressFormat.JPEG
+                            lower.endsWith(".xml") -> continue
+                            else -> Bitmap.CompressFormat.PNG
                         }
                         val original = readEntry(path) ?: continue
                         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -255,46 +258,11 @@ object RepackManager {
                     }
                 }
 
-                val primaryResId = if (iconResId != 0) iconResId else iconRoundResId
-                if (primaryResId != 0) {
-                    val primaryPaths = arsc.pathsForResource(primaryResId).toHashSet()
-                    val roundPaths =
-                        if (iconRoundResId != 0) arsc.pathsForResource(iconRoundResId).toHashSet()
-                        else hashSetOf()
-                    val hasBitmap = { paths: Set<String> ->
-                        paths.any { it.endsWith(".webp") || it.endsWith(".png") }
-                    }
-                    val carrierResId = if (primaryResId == iconResId && iconRoundResId != 0 &&
-                        hasBitmap(roundPaths)
-                    ) iconRoundResId else primaryResId
-                    val carrierPaths =
-                        if (carrierResId == primaryResId) primaryPaths else roundPaths
-                    val bestBitmap = arsc.bestBitmapPath(carrierResId)
-
-                    if (bestBitmap != null) {
-                        for (xmlPath in carrierPaths.filter { it.endsWith(".xml") }) {
-                            arsc.repointPath(carrierResId, xmlPath, bestBitmap)
-                        }
-
-                        if (carrierResId != primaryResId) {
-                            for (entry in zip.entries().asSequence()) {
-                                if (entry.name !in primaryPaths || !entry.name.endsWith(".xml")) continue
-                                val editor = runCatching {
-                                    AxmlEditor(zip.getInputStream(entry).readBytes())
-                                }.getOrNull() ?: continue
-                                if (editor.rootElementName != "adaptive-icon") continue
-                                editor.setAttributeReference("background", "drawable", carrierResId)
-                                editor.setAttributeReference("monochrome", "drawable", carrierResId)
-                                editor.setAttributeReference(
-                                    "foreground", "drawable", android.R.color.transparent
-                                )
-                                replacements[entry.name] = editor.build()
-                            }
-                        }
-
-                        arsc.buildIfPatched()?.let { replacements["resources.arsc"] = it }
-                    }
+                for (resId in intArrayOf(iconResId, iconRoundResId)) {
+                    if (resId == 0) continue
+                    arsc.removeAdaptiveIconEntries(resId)
                 }
+                arsc.buildIfPatched()?.let { replacements["resources.arsc"] = it }
             }
         }
         return replacements

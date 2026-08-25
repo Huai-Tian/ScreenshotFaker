@@ -9,9 +9,10 @@ import java.nio.ByteOrder
  * 重打包替换启动图标时不能假设资源文件路径固定（release 构建可能开启资源路径缩短/混淆），
  * 通过 arsc 拿到 [fake.screenshot.R.mipmap.ic_launcher] 等 ID 的真实路径后按路径替换才可靠。
  *
- * 除解析外还支持"条目改指向"（[repointPath]）：把某个资源配置项的值（全局字符串池中的
- * 文件路径索引）替换为池中已有的另一条路径。因为只改写 4 字节的索引值、不增删字符串，
- * 产物与原文件尺寸完全一致，不破坏任何偏移与对齐——这与 [AxmlEditor] 的补丁思路相同。
+ * 除解析外还支持"条目删除"（[removeAdaptiveIconEntries]）：在 TYPE chunk 的条目
+ * 偏移表中写入 NO_ENTRY，使资源配置项不再参与解析。因为只改写 2/4 字节的偏移值、
+ * 不增删任何 chunk，产物与原文件尺寸完全一致，不破坏偏移与对齐——这与
+ * [AxmlEditor] 的补丁思路相同。
  */
 class ResourceTableParser(data: ByteArray) {
 
@@ -34,9 +35,16 @@ class ResourceTableParser(data: ByteArray) {
 
     private val d = data
 
-    private class EntryInfo(val path: String, val density: Int, val valueOffset: Int)
+    private class EntryInfo(
+        val path: String,
+        val density: Int,
+        /** TYPE chunk 偏移表中本条目偏移字段的绝对位置（删除条目时写 NO_ENTRY） */
+        val offsetSlot: Int,
+        /** 偏移字段是否为 u32（dense 表）；false 表示 u16（sparse / offset16 表） */
+        val offsetSlotU32: Boolean,
+    )
 
-    /** 资源 ID -> 条目信息（路径 / 密度 / 值字段在文件中的绝对偏移） */
+    /** 资源 ID -> 条目信息（路径 / 密度 / 偏移表槽位） */
     private val entriesById = HashMap<Int, MutableList<EntryInfo>>()
 
     /**
@@ -52,11 +60,8 @@ class ResourceTableParser(data: ByteArray) {
     /** 全局字符串池内容（按下标访问） */
     private val globalStrings = mutableListOf<String>()
 
-    /** 全局字符串池：字符串 -> 首次出现的索引 */
-    private val stringIndex = HashMap<String, Int>()
-
-    /** 对原始字节的 u32 补丁：偏移 -> 新字符串索引 */
-    private val patches = HashMap<Int, Int>()
+    /** 对原始字节的补丁：偏移 -> (新值, 是否 u32 宽度) */
+    private val patches = HashMap<Int, Pair<Int, Boolean>>()
 
     init {
         require(u16(0) == RES_TABLE_TYPE) { "not a resources.arsc" }
@@ -66,10 +71,7 @@ class ResourceTableParser(data: ByteArray) {
 
         // 全局字符串池（路径等字符串都在这里）
         val globalPool = parsePool(pos)
-        globalPool.strings.forEachIndexed { index, s ->
-            globalStrings.add(s)
-            stringIndex.putIfAbsent(s, index)
-        }
+        globalPool.strings.forEachIndexed { _, s -> globalStrings.add(s) }
         pos += globalPool.chunkSize
 
         while (pos + 8 <= d.size) {
@@ -105,42 +107,42 @@ class ResourceTableParser(data: ByteArray) {
         entriesById[resourceId]?.map { it.path }?.distinct() ?: emptyList()
 
     /**
-     * 该资源 ID 最高密度的位图文件路径（webp/png）。
-     * 用作图标位图的"最佳变体"；密度为 0（无密度限定）按 mdpi 160 估算。
-     */
-    fun bestBitmapPath(resourceId: Int): String? =
-        entriesById[resourceId]
-            ?.filter { it.path.isBitmapFile() }
-            ?.maxByOrNull { if (it.density == 0 || it.density == DENSITY_ANY) 160 else it.density }
-            ?.path
-
-    /**
-     * 把 [resourceId] 当前值为 [fromPath] 的配置条目改指向 [toPath]。
-     * [toPath] 必须已存在于全局字符串池（通常是同一资源的某个位图变体路径）。
+     * 删除 [resourceId] 的自适应图标相关配置条目：
+     * - anydpi 配置（density == DENSITY_ANY）的全部条目，无论指向 XML 还是位图；
+     * - 任意密度下指向 .xml drawable 的条目。
      *
-     * @return 是否至少改写了一个条目
+     * 背景：绝不能让 anydpi 配置项解析到位图文件。anydpi 的密度是
+     * DENSITY_ANY(0xFFFE)，BitmapDrawable 绘制时按 targetDensity/65534 的比例
+     * （480dpi 设备约 1/136）缩放位图，192px 的图会被画成约 1.4 像素；启动器把
+     * 这个点放大铺满图标蒙版后，整个图标显示为位图中心像素的纯色。删除条目让
+     * 资源解析回退到 mdpi~xxxhdpi 的正常密度条目即可正确缩放。位图变体的文件
+     * 字节由调用方另行替换，互不影响。
+     *
+     * 同时兼容已被旧版本补丁处理过的基包（anydpi 已被改指向位图）：一并删除。
+     *
+     * @return 是否至少删除了一个条目
      */
-    fun repointPath(resourceId: Int, fromPath: String, toPath: String): Boolean {
-        val target = stringIndex[toPath] ?: return false
-        var repointed = false
+    fun removeAdaptiveIconEntries(resourceId: Int): Boolean {
+        var removed = false
         for (entry in entriesById[resourceId] ?: emptyList()) {
-            if (entry.path != fromPath) continue
-            patches[entry.valueOffset] = target
-            repointed = true
+            if (entry.density != DENSITY_ANY && !entry.path.endsWith(".xml")) continue
+            val noEntry = if (entry.offsetSlotU32) -1 else 0xFFFF
+            patches[entry.offsetSlot] = noEntry to entry.offsetSlotU32
+            removed = true
         }
-        return repointed
+        return removed
     }
 
     /** 应用补丁并输出新的 arsc 字节；无补丁时返回 null（调用方无需替换该条目）。 */
     fun buildIfPatched(): ByteArray? {
         if (patches.isEmpty()) return null
         val out = d.copyOf()
-        for ((offset, value) in patches) writeU32(out, offset, value)
+        for ((offset, patch) in patches) {
+            if (patch.second) writeU32(out, offset, patch.first)
+            else writeU16(out, offset, patch.first)
+        }
         return out
     }
-
-    private fun String.isBitmapFile(): Boolean =
-        endsWith(".webp") || endsWith(".png") || endsWith(".jpg") || endsWith(".jpeg")
 
     private fun parsePackage(pkgStart: Int, pkgHeaderSize: Int) {
         val pkgId = u32(pkgStart + 8)
@@ -163,14 +165,16 @@ class ResourceTableParser(data: ByteArray) {
 
     private fun parseTypeChunk(chunkStart: Int, headerSize: Int, pkgId: Int) {
         val typeId = d[chunkStart + 8].toInt() and 0xFF
-        val flags = d[chunkStart + 10].toInt() and 0xFF
+        val flags = d[chunkStart + 9].toInt() and 0xFF
         val entryCount = u32(chunkStart + 12)
         val entriesStart = u32(chunkStart + 16)
         val indicesStart = chunkStart + headerSize
         val entriesAbs = chunkStart + entriesStart
 
-        // ResTable_config 紧跟 type chunk 头，density 字段用于挑选最佳位图变体
-        val configStart = chunkStart + headerSize
+        // ResTable_type 固定字段（header(8)+id/flags/reserved(4)+entryCount(4)+entriesStart(4)）
+        // 之后紧跟 ResTable_config；注意 headerSize 已把 config 计入（= 20 + config.size），
+        // 因此 config 起始是固定偏移 20，不能用 headerSize，否则会读到条目偏移表。
+        val configStart = chunkStart + 20
         val density = if (configStart + CONFIG_DENSITY_OFFSET + 2 <= chunkStart + u32(chunkStart + 4)) {
             u16(configStart + CONFIG_DENSITY_OFFSET)
         } else {
@@ -185,7 +189,10 @@ class ResourceTableParser(data: ByteArray) {
                 val entryId = u16(indicesStart + i * 4)
                 val offset = u16(indicesStart + i * 4 + 2)
                 if (offset != 0xFFFF) {
-                    record(fullIdBase or entryId, entriesAbs + offset, density)
+                    record(
+                        fullIdBase or entryId, entriesAbs + offset, density,
+                        offsetSlot = indicesStart + i * 4 + 2, offsetSlotU32 = false
+                    )
                 }
             }
         } else {
@@ -198,13 +205,24 @@ class ResourceTableParser(data: ByteArray) {
                     u32(indicesStart + entryId * 4)
                 }
                 if (offset >= 0) {
-                    record(fullIdBase or entryId, entriesAbs + offset, density)
+                    record(
+                        fullIdBase or entryId, entriesAbs + offset, density,
+                        offsetSlot = if (offset16) indicesStart + entryId * 2
+                        else indicesStart + entryId * 4,
+                        offsetSlotU32 = !offset16
+                    )
                 }
             }
         }
     }
 
-    private fun record(resourceId: Int, entry: Int, density: Int) {
+    private fun record(
+        resourceId: Int,
+        entry: Int,
+        density: Int,
+        offsetSlot: Int,
+        offsetSlotU32: Boolean,
+    ) {
         // ResTable_entry: u16 size, u16 flags, u32 key；其后紧跟 Res_value
         val entryFlags = u16(entry + 2)
         if (entryFlags and ENTRY_FLAG_COMPLEX != 0) return // 数组等复杂条目没有文件路径
@@ -213,7 +231,7 @@ class ResourceTableParser(data: ByteArray) {
         val stringIndex = u32(entry + 12)
         val path = globalString(stringIndex) ?: return
         entriesById.getOrPut(resourceId) { mutableListOf() }
-            .add(EntryInfo(path, density, entry + 12))
+            .add(EntryInfo(path, density, offsetSlot, offsetSlotU32))
     }
 
     private fun globalString(index: Int): String? = globalStrings.getOrNull(index)
@@ -223,7 +241,6 @@ class ResourceTableParser(data: ByteArray) {
     private fun parsePool(start: Int): Pool {
         val chunkSize = u32(start + 4)
         val stringCount = u32(start + 8)
-        val styleCount = u32(start + 12)
         val flags = u32(start + 16)
         val stringsStart = u32(start + 20)
         val utf8 = (flags and UTF8_FLAG) != 0
@@ -278,5 +295,10 @@ class ResourceTableParser(data: ByteArray) {
         target[position + 1] = ((value ushr 8) and 0xFF).toByte()
         target[position + 2] = ((value ushr 16) and 0xFF).toByte()
         target[position + 3] = ((value ushr 24) and 0xFF).toByte()
+    }
+
+    private fun writeU16(target: ByteArray, position: Int, value: Int) {
+        target[position] = (value and 0xFF).toByte()
+        target[position + 1] = ((value ushr 8) and 0xFF).toByte()
     }
 }

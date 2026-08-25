@@ -124,6 +124,7 @@ fun SettingsCompose(navController: NavController) {
     var repackDescriptionEnInputText by remember { mutableStateOf("") }
     var repackDescriptionZhInputText by remember { mutableStateOf("") }
     var repackIcon by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var repackIconCropSource by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var repackRepacking by remember { mutableStateOf(false) }
     var repackMessage by remember { mutableStateOf<String?>(null) }
     val repackIconPicker = rememberLauncherForActivityResult(
@@ -135,7 +136,7 @@ fun SettingsCompose(navController: NavController) {
                     android.graphics.BitmapFactory.decodeStream(input)?.let { bitmap ->
                         val max = 512
                         val scale = max.toFloat() / maxOf(bitmap.width, bitmap.height)
-                        repackIcon = if (scale < 1f) {
+                        repackIconCropSource = if (scale < 1f) {
                             bitmap.let {
                                 it.scale(
                                     (it.width * scale).toInt().coerceAtLeast(1),
@@ -788,7 +789,9 @@ fun SettingsCompose(navController: NavController) {
                         )
                         PreferenceItemEx(
                             icon = Icons.Default.Image,
-                            title = if (repackIcon == null) stringResource(R.string.choose_new_icon) else stringResource(R.string.icon_selected),
+                            title = if (repackIcon == null) stringResource(R.string.choose_new_icon) else stringResource(
+                                R.string.icon_selected
+                            ),
                             subtitle = stringResource(R.string.retain_if_not_selected),
                             trailingContent = {
                                 Icon(
@@ -851,15 +854,21 @@ fun SettingsCompose(navController: NavController) {
                                     onSuccess = { apk ->
                                         repackRepacking = false
                                         runCatching {
-                                            RepackManager.install(context, apk, identity.packageName)
+                                            RepackManager.install(
+                                                context,
+                                                apk,
+                                                identity.packageName
+                                            )
                                         }.onFailure {
-                                            repackMessage = "$cannotInstall${it.message ?: it.javaClass.simpleName}"
+                                            repackMessage =
+                                                "$cannotInstall${it.message ?: it.javaClass.simpleName}"
                                         }.onSuccess {
                                             repackMessage = packagingSuccess
                                         }
                                     },
                                     onFailure = {
-                                        repackMessage = "$packagingFailed${it.message ?: it.javaClass.simpleName}"
+                                        repackMessage =
+                                            "$packagingFailed${it.message ?: it.javaClass.simpleName}"
                                         repackRepacking = false
                                     }
                                 )
@@ -878,6 +887,16 @@ fun SettingsCompose(navController: NavController) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
+            )
+        }
+        repackIconCropSource?.let { source ->
+            IconCropDialog(
+                image = source,
+                onConfirm = { cropped ->
+                    repackIcon = cropped
+                    repackIconCropSource = null
+                },
+                onDismiss = { repackIconCropSource = null }
             )
         }
     }

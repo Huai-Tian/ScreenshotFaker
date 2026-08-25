@@ -23,6 +23,7 @@ class AxmlEditor(private val data: ByteArray) {
         const val RES_XML_TYPE = 0x0003
         const val RES_STRING_POOL_TYPE = 0x0001
         const val RES_XML_START_ELEMENT_TYPE = 0x0102
+        const val RES_XML_END_ELEMENT_TYPE = 0x0103
         const val UTF8_FLAG = 0x100
         const val SORTED_FLAG = 0x1
         const val TYPE_REFERENCE = 0x01
@@ -54,6 +55,9 @@ class AxmlEditor(private val data: ByteArray) {
 
     /** 对 tail 的 u8 补丁：位置 -> 值 */
     private val bytePatches = HashMap<Int, Int>()
+
+    /** 要从 tail 中整体删除的元素区间（闭开区间，覆盖元素 START..END 的全部 chunk） */
+    private val removedRanges = mutableListOf<IntRange>()
 
     private val elements = mutableListOf<ElementInfo>()
 
@@ -146,6 +150,52 @@ class AxmlEditor(private val data: ByteArray) {
         return true
     }
 
+    /**
+     * 从文档中整体移除名为 [elementName] 的元素（含其子元素与属性）。
+     *
+     * 典型用途：把自适应图标中的 <monochrome> 层删掉。monochrome 指向彩色位图时，
+     * 开启"主题图标/单色图标"的启动器（Android 13+，HyperOS/ColorOS 等）会把整张
+     * 不透明图片染成单一颜色，表现为纯色图标；移除该层后启动器回退为显示全彩图标。
+     *
+     * AXML 各 chunk 顺序排列且互相之间没有绝对偏移引用，删除整个元素 chunk 区间
+     * 后其余 chunk 原样保留即可，字符串池中残留的元素名不会影响解析。
+     *
+     * @return 是否至少移除了一个元素
+     */
+    fun removeElement(elementName: String): Boolean {
+        var removed = false
+        var pos = 0
+        while (pos + 8 <= tail.size) {
+            val type = tailU16(pos)
+            val size = tailU32(pos + 4)
+            if (size <= 0 || pos + size > tail.size) break
+            if (type == RES_XML_START_ELEMENT_TYPE) {
+                val nameIndex = tailU32(pos + 20)
+                if (strings.getOrNull(nameIndex) == elementName) {
+                    // 深度扫描定位与该 START 配对的 END_ELEMENT
+                    var depth = 1
+                    var end = pos + size
+                    while (end + 8 <= tail.size && depth > 0) {
+                        val subType = tailU16(end)
+                        val subSize = tailU32(end + 4)
+                        if (subSize <= 0 || end + subSize > tail.size) break
+                        if (subType == RES_XML_START_ELEMENT_TYPE) depth++
+                        if (subType == RES_XML_END_ELEMENT_TYPE) depth--
+                        end += subSize
+                    }
+                    if (depth == 0) {
+                        removedRanges.add(pos until end)
+                        removed = true
+                        pos = end
+                        continue
+                    }
+                }
+            }
+            pos += size
+        }
+        return removed
+    }
+
     /** 读取属性值（字符串或 "@0x..." 形式的资源引用），用于测试与调试。 */
     fun getAttributeValue(element: String, attrName: String, androidNs: Boolean = true): String? {
         val attrOffset = findAttributes(element, attrName, androidNs).firstOrNull() ?: return null
@@ -158,10 +208,7 @@ class AxmlEditor(private val data: ByteArray) {
 
     /** 应用所有修改并输出新的 AXML 字节。 */
     fun build(): ByteArray {
-        val patchedTail = tail.copyOf()
-        intPatches.forEach { (position, value) -> writeU32(patchedTail, position, value) }
-        bytePatches.forEach { (position, value) -> patchedTail[position] = value.toByte() }
-
+        val patchedTail = rebuildTail()
         val pool = encodeStringPool()
         val totalSize = XML_HEADER_SIZE + pool.size + patchedTail.size
         val out = ByteBuffer.allocate(totalSize).order(ByteOrder.LITTLE_ENDIAN)
@@ -172,6 +219,56 @@ class AxmlEditor(private val data: ByteArray) {
         out.put(patchedTail)
         return out.array()
     }
+
+    /**
+     * 按 chunk 重组 tail：被 [removeElement] 标记的区间整段跳过，
+     * 其余 chunk 原样保留并应用属性补丁（补丁位置随删除前移）。
+     */
+    private fun rebuildTail(): ByteArray {
+        if (removedRanges.isEmpty()) {
+            val patched = tail.copyOf()
+            intPatches.forEach { (position, value) -> writeU32(patched, position, value) }
+            bytePatches.forEach { (position, value) -> patched[position] = value.toByte() }
+            return patched
+        }
+        val out = ByteArrayOutputStream(tail.size)
+        var pos = 0
+        while (pos + 8 <= tail.size) {
+            val size = tailU32(pos + 4)
+            if (size <= 0 || pos + size > tail.size) break
+            if (!isRemoved(pos, pos + size)) {
+                val chunk = tail.copyOfRange(pos, pos + size)
+                intPatches.forEach { (position, value) ->
+                    if (position >= pos && position + 4 <= pos + size) {
+                        writeU32(chunk, position - pos, value)
+                    }
+                }
+                bytePatches.forEach { (position, value) ->
+                    if (position >= pos && position < pos + size) {
+                        chunk[position - pos] = value.toByte()
+                    }
+                }
+                out.write(chunk)
+            }
+            pos += size
+        }
+        // 不构成完整 chunk 的尾部残余原样保留（正常文件不会出现）
+        if (pos < tail.size) {
+            val chunk = tail.copyOfRange(pos, tail.size)
+            intPatches.forEach { (position, value) ->
+                if (position >= pos) writeU32(chunk, position - pos, value)
+            }
+            bytePatches.forEach { (position, value) ->
+                if (position >= pos) chunk[position - pos] = value.toByte()
+            }
+            out.write(chunk)
+        }
+        return out.toByteArray()
+    }
+
+    private fun isRemoved(start: Int, end: Int): Boolean =
+        removedRanges.any { it.first <= start && end <= it.last + 1 }
+
     /**
      * 把 [element] 元素上名为 [attrName] 的属性中，以 [oldPrefix] 开头的字符串值
      * 替换为 [newPrefix] 前缀。
