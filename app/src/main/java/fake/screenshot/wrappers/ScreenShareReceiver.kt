@@ -35,9 +35,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   接收端登录 SSH 后建立本地端口转发（localhost:lport → SSH 服务器 127.0.0.1:port），
  *   适用于发送端通过远程转发把共享端口暴露在 SSH 服务器上的场景。
  *
- * [enableAudio]/[enableControl] 必须与发送端的"启用音频/允许控制"一致：
- * scrcpy server 按 video→audio→control 的顺序依次 accept，若开关不匹配，
- * server 会永远阻塞在 accept 上（或把 socket 错位配对），导致连接卡住或功能缺失。
+ * [enableAudio]/[enableControl] 只影响本端是否播放音频/发送控制消息：
+ * 接收端始终连接发送端提供的全部通道（未启用的通道只做排水），
+ * 因此与发送端的"启用音频/允许控制"开关不再要求一致。
  */
 data class ScreenShareReceiverConfig(
     val id: Int,
@@ -59,14 +59,21 @@ data class ScreenShareReceiverConfig(
  * 支持同时存在多个实例（对应多部发送设备）。
  *
  * 协议（tunnel_forward 模式，与 [fake.screenshot.scrcpy.Server] 的 TCP proxy 对接）：
- * - 按顺序建立三个 TCP 连接：video → audio → control（与 server 端
- *   DesktopConnection.open 的 accept 顺序一致）；
- * - video socket：1 字节 dummy byte + 64 字节设备名 + 4 字节 codec id + 帧流；
+ * - 逐条建立 TCP 连接：连一条、读到 server 在该通道上写入的 1 字节通道标识
+ *   （video=0 兼容旧 dummy byte，audio=1，control=2），确认配对成功后再连下一条。
+ *   严格定序消除了 TCP proxy 多线程转发导致的通道错位配对竞态。
+ * - 通道标识同时用于自适应：发送端关闭 audio/control 时 server 不再 accept
+ *   对应通道（连接立即 EOF），接收端按实际存在的通道工作，收发两端开关不再要求一致。
+ *   连接后等不到标识字节（旧版 server）则按 video → audio → control 的规范顺序回退。
+ * - video socket：64 字节设备名 + 4 字节 codec id + 帧流（标识字节已在协商时消费）；
  * - audio socket：4 字节 codec id + 帧流；
  * - control socket：client → server 的控制消息注入（触摸/滚动/按键/文本/剪贴板）；
  *   server → client 的 DeviceMessage（剪贴板同步等）由 [controlLoop] 解析。
  * - 帧格式：12 字节 header（8 字节 ptsAndFlags + 4 字节 packetSize）+ 载荷。
  *   bit63 = session meta（宽高变化），bit62 = config/CSD 包，bit61 = 关键帧。
+ *
+ * 连接失败或会话中途断开时自动重试（发送端会自动重启 server），
+ * 重试耗尽才进入 [State.Failed]。
  *
  * 生命周期：[start] 可重入（[stop] 后可再次 start），解码器在数据线程内创建与释放。
  */
@@ -108,6 +115,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         const val TYPE_GET_CLIPBOARD = 8
         const val TYPE_SET_CLIPBOARD = 9
         const val TYPE_ROTATE_DEVICE = 11
+        const val TYPE_RESET_VIDEO = 17
+
+        // 通道标识（server 在每个 accept 的通道上写入 1 字节）
+        const val CHANNEL_VIDEO = 0
+        const val CHANNEL_AUDIO = 1
+        const val CHANNEL_CONTROL = 2
+
+        /** 等待通道标识字节的超时；超时视为旧版 server（无标识字节）按规范顺序回退 */
+        const val CHANNEL_ID_TIMEOUT_MS = 3000
+
+        /** 连接/会话失败自动重试次数与间隔（发送端自动重启 server 需要约 1s） */
+        const val RETRY_COUNT = 5
+        const val RETRY_DELAY_MS = 1000L
 
         /**
          * 手指 pointerId 基数（-1 为 POINTER_ID_MOUSE 保留，服务端按鼠标注入），
@@ -145,6 +165,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     /** 当前会话的 socket，stop 时统一关闭以中断阻塞读 */
     private val sockets = CopyOnWriteArrayList<Socket>()
+
+    /** SSH 模式下创建的本地转发端口，stop/重连时删除，避免随重试累积泄漏 */
+    private val localForwardPorts = CopyOnWriteArrayList<Int>()
     private var sshSession: Session? = null
 
     /** control socket 的输出流，用于向发送端注入控制消息 */
@@ -160,6 +183,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     /** 视频尺寸（来自 session meta），viewer 用于宽高比适配与触摸坐标映射 */
     val videoSize = MutableStateFlow<IntArray?>(null)
+
+    /**
+     * 发送端是否提供控制通道（协商结果）。
+     * viewer 结合本端 enableControl 配置决定是否显示控制工具栏与触摸层。
+     */
+    val controlAvailable = MutableStateFlow(false)
 
     /**
      * 发送端剪贴板内容（来自 DeviceMessage type 0，含 GET_CLIPBOARD 响应与
@@ -186,6 +215,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         closeSockets()
         runCatching { sshSession?.disconnect() }
         sshSession = null
+        controlAvailable.value = false
         state.value = State.Stopped
     }
 
@@ -207,12 +237,73 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val session = sshSession ?: createSshSession()
         // local_port = 0：由 JSch 自动分配空闲本地端口
         val localPort = session.setPortForwardingL(0, "127.0.0.1", config.port)
+        localForwardPorts.add(localPort)
         val socket = Socket()
         socket.tcpNoDelay = true
         socket.connect(InetSocketAddress("127.0.0.1", localPort), CONNECT_TIMEOUT_MS)
         authenticate(socket)
         sockets.add(socket)
         return socket
+    }
+
+    /**
+     * 读取 server 在本条连接配对成功后写回的 1 字节通道标识。
+     * 返回标识值；-1 表示对端关闭（服务器不再提供更多通道）；
+     * -2 表示超时（旧版 server 不发送标识字节）。
+     */
+    private fun readChannelId(socket: Socket): Int {
+        socket.soTimeout = CHANNEL_ID_TIMEOUT_MS
+        try {
+            return socket.getInputStream().read()
+        } catch (e: java.net.SocketTimeoutException) {
+            return -2
+        } finally {
+            socket.soTimeout = 0
+        }
+    }
+
+    /** 协商结果：server 实际提供的各通道 socket */
+    private class Channels(
+        val videoSocket: Socket,
+        val audioSocket: Socket?,
+        val controlSocket: Socket?
+    )
+
+    /**
+     * 逐条连接并确认通道标识，直到 server 不再提供更多通道（EOF）或读满 3 条。
+     * 每条连接确认配对后才发起下一条，保证与 server 端 accept 顺序一致。
+     */
+    private fun negotiateChannels(): Channels {
+        val channels = HashMap<Int, Socket>()
+        val canonicalOrder = intArrayOf(CHANNEL_VIDEO, CHANNEL_AUDIO, CHANNEL_CONTROL)
+        try {
+            while (channels.size < 3) {
+                val socket = openSocket()
+                val id = readChannelId(socket)
+                when {
+                    id in 0..2 && !channels.containsKey(id) -> channels[id] = socket
+                    // 旧版 server 无标识字节：按规范顺序回退（连接顺序即配对顺序）
+                    id == -2 -> {
+                        val fallback = canonicalOrder.first { it !in channels }
+                        channels[fallback] = socket
+                    }
+                    else -> {
+                        // EOF 或重复/非法标识：server 不再提供更多通道
+                        runCatching { socket.close() }
+                        sockets.remove(socket)
+                        break
+                    }
+                }
+                if (channels.containsKey(CHANNEL_CONTROL)) break // control 是最后一个通道
+            }
+        } catch (e: Exception) {
+            channels.values.forEach { runCatching { it.close() } }
+            sockets.removeAll(channels.values)
+            throw e
+        }
+        val video = channels[CHANNEL_VIDEO]
+            ?: throw IOException("sender did not provide a video channel")
+        return Channels(video, channels[CHANNEL_AUDIO], channels[CHANNEL_CONTROL])
     }
 
     /**
@@ -241,76 +332,94 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private fun closeSockets() {
         sockets.forEach { runCatching { it.close() } }
         sockets.clear()
+        // 删除本次会话创建的 SSH 本地转发，避免随重试/重连累积泄漏
+        sshSession?.let { session ->
+            localForwardPorts.forEach { runCatching { session.delPortForwardingL(it) } }
+        }
+        localForwardPorts.clear()
     }
 
     // ---------------------------------------------------------------- 主循环
 
+    /**
+     * 主循环：协商 + 会话运行，失败（连接拒绝、server 重启窗口、网络断开等）
+     * 自动重试 [RETRY_COUNT] 次，重试期间保持 Connecting 状态。
+     */
     private suspend fun runLoop() {
         val gen = generation.incrementAndGet()
-        var videoSocket: Socket? = null
-        var audioSocket: Socket? = null
-        var controlSocket: Socket? = null
+        var attempts = 0
         try {
-            // 连接顺序必须与 server 端 accept 顺序一致：video → audio → control。
-            // 重要：server 端 DesktopConnection.open 要 accept 完全部 socket 才返回，
-            // 之后才发送 dummy byte / 设备名 / codec id，因此必须先建立全部连接再读取。
-            videoSocket = openSocket()
-            if (config.enableAudio) {
-                audioSocket = openSocket()
-            }
-            if (config.enableControl) {
-                controlSocket = openSocket()
-                controlOut = controlSocket.getOutputStream()
-            }
-
-            val videoIn = DataInputStream(
-                BufferedInputStream(videoSocket.getInputStream(), 64 * 1024)
-            )
-
-            // dummy byte：server 在第一个 accept 的 socket 上写入 1 字节 0，
-            // 用于让客户端检测连接错误
-            videoIn.read()
-
-            val deviceName = readDeviceName(videoIn)
-            val videoCodecId = videoIn.readInt()
-            val videoMime = videoMimeFor(videoCodecId)
-                ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
-
-            state.value = State.Running(deviceName)
-
-            // 等待 viewer 提供渲染 Surface（此前 server 推送的数据暂存于 TCP 缓冲）
-            while (running.get() && surface == null) delay(100)
-            if (!running.get()) return
-
-            val audioJob = audioSocket?.let {
-                scope.launch { runCatching { audioLoop(it) } }
-            }
-            val controlJob = controlSocket?.let {
-                scope.launch { runCatching { controlLoop(it) } }
-            }
-
-            videoLoop(videoSocket, videoIn, videoMime)
-
-            audioJob?.cancel()
-            controlJob?.cancel()
-        } catch (e: Exception) {
-            if (running.get() && gen == generation.get()) {
-                state.value = State.Failed(e.message ?: e.javaClass.simpleName)
+            while (running.get() && gen == generation.get()) {
+                try {
+                    state.value = State.Connecting
+                    runSession(gen)
+                    // 正常返回 = 已停止
+                    return
+                } catch (e: Exception) {
+                    // 清理本次失败的尝试（gen 已被新会话取代时不触碰共享状态）
+                    if (gen == generation.get()) {
+                        controlOut = null
+                        controlAvailable.value = false
+                        closeSockets()
+                    }
+                    if (!running.get() || gen != generation.get()) return
+                    attempts++
+                    if (attempts >= RETRY_COUNT || e is kotlinx.coroutines.CancellationException) {
+                        state.value = State.Failed(e.message ?: e.javaClass.simpleName)
+                        return
+                    }
+                    delay(RETRY_DELAY_MS)
+                }
             }
         } finally {
             if (gen == generation.get()) {
                 // 仍是当前会话：正常清理全部共享状态
                 running.set(false)
                 controlOut = null
+                controlAvailable.value = false
                 closeSockets()
                 runCatching { sshSession?.disconnect() }
                 sshSession = null
-            } else {
-                // 已被 stop()/新会话取代：只关闭本会话的 socket，
-                // 不触碰新会话的 running / controlOut / sockets / sshSession
-                runCatching { videoSocket?.close() }
-                runCatching { audioSocket?.close() }
-                runCatching { controlSocket?.close() }
+            }
+        }
+    }
+
+    /** 单次会话：协商通道 → 读取设备元数据 → 启动音频/控制子循环 → 运行视频循环 */
+    private suspend fun runSession(gen: Long) {
+        val channels = negotiateChannels()
+
+        val videoIn = DataInputStream(
+            BufferedInputStream(channels.videoSocket.getInputStream(), 64 * 1024)
+        )
+        val deviceName = readDeviceName(videoIn)
+        val videoCodecId = videoIn.readInt()
+        val videoMime = videoMimeFor(videoCodecId)
+            ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
+
+        state.value = State.Running(deviceName)
+
+        // 等待 viewer 提供渲染 Surface（此前 server 推送的数据暂存于 TCP 缓冲）
+        while (running.get() && surface == null) delay(100)
+        if (!running.get()) return
+
+        channels.controlSocket?.let { controlOut = it.getOutputStream() }
+        controlAvailable.value = channels.controlSocket != null
+
+        // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
+        val audioJob = channels.audioSocket?.let {
+            scope.launch { runCatching { audioLoop(it, config.enableAudio) } }
+        }
+        val controlJob = channels.controlSocket?.let {
+            scope.launch { runCatching { controlLoop(it) } }
+        }
+        try {
+            videoLoop(channels.videoSocket, videoIn, videoMime)
+        } finally {
+            audioJob?.cancel()
+            controlJob?.cancel()
+            if (gen == generation.get()) {
+                controlOut = null
+                controlAvailable.value = false
             }
         }
     }
@@ -339,6 +448,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         var frameBuffer = ByteArray(64 * 1024)
         val bufferInfo = MediaCodec.BufferInfo()
         var codec: MediaCodec? = null
+        // 解码拥塞处理：连续拿不到输入 buffer 说明解码跟不上，帧在堆积。
+        // 此时请求发送端 RESET_VIDEO（产生新 config+关键帧），并丢弃积压帧
+        // 直到新 config 到达（重建解码器），把延迟拉回来。
+        var congestedFrames = 0
+        var waitingForReset = false
+        var droppedSinceReset = 0
         try {
             while (running.get()) {
                 input.readFully(header)
@@ -358,7 +473,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 input.readFully(frameBuffer, 0, size)
 
                 if (isConfig) {
-                    // CSD 包（H264 为 SPS+PPS）：（重新）配置解码器
+                    // CSD 包（H264 为 SPS+PPS）：（重新）配置解码器；
+                    // 拥塞恢复点：新 config 到达，重建解码器后积压清零
+                    waitingForReset = false
+                    congestedFrames = 0
+                    droppedSinceReset = 0
                     runCatching { codec?.stop() }
                     runCatching { codec?.release() }
                     val format = MediaFormat.createVideoFormat(mime, 1920, 1080)
@@ -370,16 +489,32 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                         configure(format, surface, null, 0)
                         start()
                     }
+                } else if (waitingForReset) {
+                    // 等待 RESET_VIDEO 产生的新 config：丢弃旧帧快速排水。
+                    // 保险阀：reset 请求失败（无控制通道等）时避免无限丢帧
+                    droppedSinceReset++
+                    if (droppedSinceReset > 300) {
+                        waitingForReset = false
+                        droppedSinceReset = 0
+                    }
                 } else {
                     val c = codec ?: continue
                     val pts = ptsAndFlags and PTS_MASK
                     val index = c.dequeueInputBuffer(10_000)
                     if (index >= 0) {
+                        congestedFrames = 0
                         val inputBuffer = c.getInputBuffer(index)!!
                         inputBuffer.clear()
                         inputBuffer.put(frameBuffer, 0, size)
                         c.queueInputBuffer(index, 0, size, pts, 0)
                         drainAndRender(c, bufferInfo)
+                    } else {
+                        congestedFrames++
+                        if (congestedFrames >= 30) {
+                            sendEmptyEvent(TYPE_RESET_VIDEO)
+                            waitingForReset = true
+                            droppedSinceReset = 0
+                        }
                     }
                 }
             }
@@ -403,11 +538,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     // ---------------------------------------------------------------- 音频
 
-    private fun audioLoop(socket: Socket) {
+    private fun audioLoop(socket: Socket, play: Boolean) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
         val codecId = input.readInt()
-        if (codecId != CODEC_OPUS) {
-            // 非 OPUS（raw/flac 等）暂不支持播放，但必须持续读取防止 TCP 背压阻塞发送端
+        if (codecId != CODEC_OPUS || !play) {
+            // 非 OPUS（raw/flac 等）暂不支持播放，或本端未启用音频：
+            // 持续读取并丢弃，防止 TCP 背压阻塞发送端
             discardLoop(input)
             return
         }

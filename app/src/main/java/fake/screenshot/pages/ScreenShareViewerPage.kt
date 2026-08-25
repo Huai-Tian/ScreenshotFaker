@@ -101,6 +101,9 @@ fun ScreenShareViewerCompose(configId: Int) {
             val state by r.state.collectAsState()
             val videoSize by r.videoSize.collectAsState()
             val clipboardContent by r.clipboardContent.collectAsState()
+            // 控制可用 = 本端启用控制 且 协商到发送端提供的控制通道
+            val controlEnabled = cfg.enableControl &&
+                    r.controlAvailable.collectAsState().value
 
             // 发送端剪贴板内容到达（自动同步或拉取响应）→ 写入本机剪贴板
             LaunchedEffect(clipboardContent) {
@@ -161,7 +164,7 @@ fun ScreenShareViewerCompose(configId: Int) {
                                 }
                             )
 
-                            if (cfg.enableControl) {
+                            if (controlEnabled) {
                                 if (scrollMode) {
                                     ScrollInputLayer(
                                         receiver = r,
@@ -194,7 +197,7 @@ fun ScreenShareViewerCompose(configId: Int) {
                         }
                     }
 
-                    if (cfg.enableControl) {
+                    if (controlEnabled) {
                         ControlToolbar(
                             receiver = r,
                             scrollMode = scrollMode,

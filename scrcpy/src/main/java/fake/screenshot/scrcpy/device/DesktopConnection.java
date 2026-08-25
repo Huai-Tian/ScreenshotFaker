@@ -63,28 +63,27 @@ public final class DesktopConnection implements Closeable {
         try {
             if (tunnelForward) {
                 try (LocalServerSocket localServerSocket = new LocalServerSocket(socketName)) {
+                    // 每个 accept 的通道在建立时立即写入 1 字节通道标识
+                    // （video=0 兼容原 dummy byte，audio=1，control=2）。
+                    // 客户端据此确认本条连接被配对到了正确的通道，再发起下一条连接，
+                    // 消除 TCP proxy 多线程转发时 abstract socket 的配对竞态。
                     if (video) {
                         videoSocket = localServerSocket.accept();
                         if (sendDummyByte) {
                             // send one byte so the client may read() to detect a connection error
                             videoSocket.getOutputStream().write(0);
-                            sendDummyByte = false;
                         }
                     }
                     if (audio) {
                         audioSocket = localServerSocket.accept();
                         if (sendDummyByte) {
-                            // send one byte so the client may read() to detect a connection error
-                            audioSocket.getOutputStream().write(0);
-                            sendDummyByte = false;
+                            audioSocket.getOutputStream().write(1);
                         }
                     }
                     if (control) {
                         controlSocket = localServerSocket.accept();
                         if (sendDummyByte) {
-                            // send one byte so the client may read() to detect a connection error
-                            controlSocket.getOutputStream().write(0);
-                            sendDummyByte = false;
+                            controlSocket.getOutputStream().write(2);
                         }
                     }
                 }
