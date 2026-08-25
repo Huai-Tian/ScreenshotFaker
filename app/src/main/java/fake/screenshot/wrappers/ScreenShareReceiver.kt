@@ -24,6 +24,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 屏幕共享接收端配置。
@@ -135,6 +136,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private val running = AtomicBoolean(false)
     private var job: Job? = null
 
+    /**
+     * 会话代数：stop() 递增使旧 runLoop 的 finally 失效，
+     * 防止旧会话清理时误关新会话的 socket / 置空新会话的 controlOut
+     * （快速退出再进入 viewer、旋转屏幕触发 surface 重建时会发生）。
+     */
+    private val generation = AtomicLong(0)
+
     /** 当前会话的 socket，stop 时统一关闭以中断阻塞读 */
     private val sockets = CopyOnWriteArrayList<Socket>()
     private var sshSession: Session? = null
@@ -172,7 +180,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     }
 
     fun stop() {
+        generation.incrementAndGet() // 使旧 runLoop 的 finally 不再触碰共享状态
         running.set(false)
+        job?.cancel()
         closeSockets()
         runCatching { sshSession?.disconnect() }
         sshSession = null
@@ -236,6 +246,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     // ---------------------------------------------------------------- 主循环
 
     private suspend fun runLoop() {
+        val gen = generation.incrementAndGet()
         var videoSocket: Socket? = null
         var audioSocket: Socket? = null
         var controlSocket: Socket? = null
@@ -283,15 +294,24 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             audioJob?.cancel()
             controlJob?.cancel()
         } catch (e: Exception) {
-            if (running.get()) {
+            if (running.get() && gen == generation.get()) {
                 state.value = State.Failed(e.message ?: e.javaClass.simpleName)
             }
         } finally {
-            running.set(false)
-            controlOut = null
-            closeSockets()
-            runCatching { sshSession?.disconnect() }
-            sshSession = null
+            if (gen == generation.get()) {
+                // 仍是当前会话：正常清理全部共享状态
+                running.set(false)
+                controlOut = null
+                closeSockets()
+                runCatching { sshSession?.disconnect() }
+                sshSession = null
+            } else {
+                // 已被 stop()/新会话取代：只关闭本会话的 socket，
+                // 不触碰新会话的 running / controlOut / sockets / sshSession
+                runCatching { videoSocket?.close() }
+                runCatching { audioSocket?.close() }
+                runCatching { controlSocket?.close() }
+            }
         }
     }
 

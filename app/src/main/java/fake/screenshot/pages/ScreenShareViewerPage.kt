@@ -8,6 +8,8 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,7 +54,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -234,6 +238,9 @@ fun ScreenShareViewerCompose(configId: Int) {
  * 触摸转发层：跟踪任意多根手指，每根手指分配独立 pointerId（-2 起递减，
  * -1 为鼠标保留），按下/移动/抬起分别注入发送端，支持双指缩放等多指手势。
  * 视频尺寸未知时不转发（坐标无法映射）。
+ *
+ * 注意：必须用 change.id（PointerId）作为手指标识——每个指针事件都会产生新的
+ * PointerInputChange 实例，不能拿事件对象本身做 key。
  */
 @Composable
 private fun TouchInputLayer(
@@ -252,12 +259,15 @@ private fun TouchInputLayer(
 
                 var nextPointerId = ScreenShareReceiver.POINTER_ID_FIRST_FINGER
                 awaitEachGesture {
-                    // 活跃手指：Compose pointerId → 发送到对端的 scrcpy pointerId
-                    val active = HashMap<PointerInputChange, Long>()
+                    // 活跃手指：Compose PointerId → 发送到对端的 scrcpy pointerId
+                    val active = HashMap<PointerId, Long>()
+                    // 各手指最后位置，异常中断时用于补发抬起
+                    val lastPosition = HashMap<PointerId, Offset>()
 
                     fun inject(change: PointerInputChange, action: Int, pressure: Float) {
+                        val pid = active[change.id] ?: return
                         receiver.sendTouch(
-                            action, active[change] ?: return,
+                            action, pid,
                             mapX(change.position.x), mapY(change.position.y),
                             vw, vh, pressure
                         )
@@ -271,16 +281,19 @@ private fun TouchInputLayer(
                                 val released = change.previousPressed && !change.pressed
                                 when {
                                     newlyPressed -> {
-                                        active[change] = nextPointerId--
+                                        active[change.id] = nextPointerId--
+                                        lastPosition[change.id] = change.position
                                         inject(change, ScreenShareReceiver.ACTION_DOWN, 1f)
                                         change.consume()
                                     }
                                     released -> {
                                         inject(change, ScreenShareReceiver.ACTION_UP, 0f)
-                                        active.remove(change)
+                                        active.remove(change.id)
+                                        lastPosition.remove(change.id)
                                         change.consume()
                                     }
                                     change.pressed && change.positionChanged() -> {
+                                        lastPosition[change.id] = change.position
                                         inject(change, ScreenShareReceiver.ACTION_MOVE, 1f)
                                         change.consume()
                                     }
@@ -289,16 +302,18 @@ private fun TouchInputLayer(
                             }
                             if (active.isEmpty()) break
                         }
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
                         // 手势流中断（尺寸变化/协程取消）：为残余手指补发抬起，
-                        // 避免发送端触点悬死
-                        active.forEach { (change, pid) ->
+                        // 避免发送端触点悬死；CancellationException 继续向上抛
+                        active.forEach { (composeId, pid) ->
+                            val pos = lastPosition[composeId] ?: Offset.Zero
                             receiver.sendTouch(
                                 ScreenShareReceiver.ACTION_UP, pid,
-                                mapX(change.position.x), mapY(change.position.y),
+                                mapX(pos.x), mapY(pos.y),
                                 vw, vh, 0f
                             )
                         }
+                        if (e is kotlinx.coroutines.CancellationException) throw e
                     }
                 }
             }
@@ -359,8 +374,9 @@ private fun ControlToolbar(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color.Black.copy(alpha = 0.6f))
+            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 6.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         ToolbarButton(
             icon = Icons.Default.SwapVert,
