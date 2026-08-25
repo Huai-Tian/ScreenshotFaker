@@ -1,9 +1,13 @@
 package fake.screenshot.wrappers
 
+import android.content.ComponentName
 import android.content.Context
+import android.service.quicksettings.TileService
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import fake.screenshot.Auxiliary
+import fake.screenshot.R
+import fake.screenshot.services.ScreenShareTileService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,10 +24,34 @@ object ScreenShareManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var initialized = false
     var scrcpyRunning = false
+        private set
 
-    fun initialize(context: Context): Boolean {
+    /**
+     * 最近一次失败原因（字符串资源 id），null 表示无错误。
+     * 磁贴读取它显示在副标题上；成功启动后清除。
+     */
+    @Volatile
+    var lastErrorResId: Int? = null
+        private set
+
+    /** 请求系统刷新磁贴（触发其 onStartListening 重新读取状态） */
+    private fun requestTileUpdate() {
+        if (::appContext.isInitialized) {
+            runCatching {
+                TileService.requestListeningState(
+                    appContext,
+                    ComponentName(appContext, ScreenShareTileService::class.java)
+                )
+            }
+        }
+    }
+
+    /**
+     * 初始化：复制 server 到 /data/local/tmp 并（如启用）建立 SSH 隧道。
+     * 含网络与文件 IO，必须在 IO 线程调用（磁贴 onClick 在主线程，勿直接调用）。
+     */
+    private fun initializeInternal(): Boolean {
         if (initialized) return true
-        appContext = context
         if (runBlocking {
                 if (!ConfigManager.getDataOnce(
                         appContext,
@@ -60,7 +88,7 @@ object ScreenShareManager {
         return true
     }
 
-    fun startScreenShare(): Boolean {
+    private fun startScreenShareInternal(): Boolean {
         if (!(initialized && Auxiliary.isShellActivated)) return false
         if (scrcpyRunning) return true
         scrcpyJob = scope.launch {
@@ -133,11 +161,44 @@ object ScreenShareManager {
 
             Auxiliary.exec(args.joinToString(" "))
             scrcpyRunning = false
+            initialized = false
         }
-        initialized = false
         scrcpyRunning = true
         return true
     }
+
+    /**
+     * 磁贴/页面统一入口：异步初始化并启动共享。
+     * 可安全地在主线程调用；失败原因写入 [lastErrorResId] 并刷新磁贴。
+     */
+    fun toggleScreenShare(context: Context) {
+        if (scrcpyRunning) {
+            stopScreenShare()
+            requestTileUpdate()
+            return
+        }
+        appContext = context.applicationContext
+        scope.launch {
+            val ok = initializeInternal() && startScreenShareInternal()
+            if (!ok) {
+                lastErrorResId =
+                    if (Auxiliary.isShellActivated) R.string.initialize_failed
+                    else R.string.no_permission
+            } else {
+                lastErrorResId = null
+            }
+            requestTileUpdate()
+        }
+    }
+
+    /** 兼容旧入口：同步初始化（仅限已在 IO 线程的调用方） */
+    fun initialize(context: Context): Boolean {
+        appContext = context.applicationContext
+        return initializeInternal()
+    }
+
+    /** 兼容旧入口：同步启动（仅限已在 IO 线程的调用方） */
+    fun startScreenShare(): Boolean = startScreenShareInternal()
 
     fun stopScreenShare() {
         if (!scrcpyRunning) return
@@ -146,5 +207,6 @@ object ScreenShareManager {
         scrcpyRunning = false
         sshSession?.disconnect()
         sshSession = null
+        initialized = false
     }
 }

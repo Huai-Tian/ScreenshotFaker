@@ -150,6 +150,7 @@
     <string name="stealth_screencast">Stealth Screencast</string>
     <string name="screencasting">Screencasting</string>
     <string name="initializing">Initializing</string>
+    <string name="initialize_failed">Initialize failed</string>
     <!--Style-->
     <string name="crop_icon">Crop icon</string>
     <string name="crop_icon_hint">Drag to reposition, pinch to zoom.</string>
