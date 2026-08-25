@@ -65,7 +65,7 @@
     <string name="cannot_install">Cannot install: </string>
     <string name="packaging_success">Packaging complete. Please confirm installation in the system dialog.</string>
     <string name="packaging_failed">Packaging failed: </string>
-    <string name="packge_and_install">Package and install</string>
+    <string name="package_and_install">Package and install</string>
     <string name="backup">Backup</string>
     <string name="backup_config">Backup Config</string>
     <string name="restore">Restore</string>
@@ -150,6 +150,9 @@
     <string name="stealth_screencast">Stealth Screencast</string>
     <string name="screencasting">Screencasting</string>
     <string name="initializing">Initializing</string>
+    <!--Style-->
+    <string name="crop_icon">Crop icon</string>
+    <string name="crop_icon_hint">Drag to reposition, pinch to zoom.</string>
     <!--Common-->
     <string name="start">Start</string>
     <string name="stop">Stop</string>

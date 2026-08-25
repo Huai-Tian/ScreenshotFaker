@@ -121,7 +121,7 @@
     <string name="install_package_permission_required">此功能需要被授予 安装未知应用 权限</string>
     <string name="retain_if_not_selected">不选择则保留原图标</string>
     <string name="packaging_failed">打包失败：</string>
-    <string name="packge_and_install">打包并安装</string>
+    <string name="package_and_install">打包并安装</string>
     <string name="backup">备份</string>
     <string name="view_daemon_status">查看守护进程状态</string>
     <string name="permission_denied">没有权限</string>
@@ -141,6 +141,7 @@
     <string name="success">成功</string>
     <string name="hide_application_icon">隐藏应用图标</string>
     <string name="stealth_overlay">无痕悬浮窗</string>
+    <string name="crop_icon_hint">拖动调整位置，双指缩放</string>
     <string name="start">开始</string>
     <string name="new_package_name">新包名</string>
     <string name="application_name_english">应用名称（英语）</string>
@@ -151,4 +152,5 @@
     <string name="icon_selected">已选择图标（点击重选）</string>
     <string name="cannot_install">无法安装：</string>
     <string name="packaging_success">打包完成，请在系统弹窗中确认安装</string>
+    <string name="crop_icon">裁剪图标</string>
 </resources>

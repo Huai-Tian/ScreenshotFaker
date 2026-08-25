@@ -867,7 +867,7 @@ fun SettingsCompose(navController: NavController) {
                         },
                         enabled = !repackRepacking && isRepackInputValid
                     ) {
-                        Text(stringResource(R.string.packge_and_install))
+                        Text(stringResource(R.string.package_and_install))
                     }
                 },
                 dismissButton = {
