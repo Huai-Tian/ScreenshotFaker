@@ -138,6 +138,10 @@ object ScreenShareManager {
                 .let { if (it > 0) "video_bit_rate=$it" else "" }
             val enableAudio =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio", true).let { "audio=$it" }
+            // 音频捕获默认使用 ROUTE_FLAG_LOOP_BACK：音频被重定向到捕获流，
+            // 发送端设备本身静音。audio_dup=true 改用 ROUTE_FLAG_LOOP_BACK_RENDER，
+            // 设备继续外放的同时捕获（发送端不静音）
+            val audioDup = "audio_dup=true"
             val audioOutput =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio_output", true)
                     .let { if (it) "audio_source=output" else "" }
@@ -165,6 +169,7 @@ object ScreenShareManager {
                 maxFps,
                 videoBitRate,
                 enableAudio,
+                audioDup,
                 audioOutput,
                 audioMic,
                 tcpLocalOnly,
@@ -231,18 +236,21 @@ object ScreenShareManager {
     /**
      * 磁贴/页面统一入口：异步初始化并启动/停止共享。
      * 可安全地在主线程调用；失败原因写入 [lastError] 并刷新磁贴副标题。
+     *
+     * 停止判定不能只依赖 [scrcpyRunning]：发送端 app 退到后台被系统冻结/杀死后
+     * 进程重启，标志位归零，但 scrcpy server 与守护循环是独立 shell 进程仍在运行。
+     * 此时第一次点击会走"启动"分支（表现为重新拉起共享、磁贴无反应），
+     * 第二次才真正停止。因此标志位为 false 时先用 pgrep 探测实际进程状态。
      */
     fun toggleScreenShare(context: Context) {
         appContext = context.applicationContext
         Auxiliary.refreshShellState()
-        if (scrcpyRunning) {
-            scope.launch {
+        scope.launch {
+            if (scrcpyRunning || isServerActuallyRunning()) {
                 stopScreenShare()
                 notifyStateChanged()
+                return@launch
             }
-            return
-        }
-        scope.launch {
             lastError = if (!Auxiliary.isShellActivated) {
                 context.getString(R.string.no_permission)
             } else {
@@ -259,23 +267,38 @@ object ScreenShareManager {
         }
     }
 
+    /** server 进程是否实际在运行（app 进程重启后标志位丢失时以此为准） */
+    private fun isServerActuallyRunning(): Boolean =
+        Auxiliary.exec("pgrep -f fake.screenshot.scrcpy.Server").first == 0
+
     fun stopScreenShare() {
-        if (!scrcpyRunning) return
         // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
         scrcpyRunning = false
-        val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
-        val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
-        // 1) 写停止标记：守护循环醒来后退出，不再重启 server
-        Auxiliary.exec("touch $stopFlag")
-        // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
-        //    必须按 app_process 的实际命令行（含 fake.screenshot.scrcpy.Server）匹配。
-        //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
-        Auxiliary.exec(
-            "pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; pkill -KILL -f fake.screenshot.scrcpy.Server"
-        )
-        // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
-        Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
-        scrcpyJob.cancel()
+        if (::scrcpyName.isInitialized) {
+            val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
+            val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
+            // 1) 写停止标记：守护循环醒来后退出，不再重启 server
+            Auxiliary.exec("touch $stopFlag")
+            // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
+            //    必须按 app_process 的实际命令行（含 fake.screenshot.scrcpy.Server）匹配。
+            //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
+            Auxiliary.exec(
+                "pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; pkill -KILL -f fake.screenshot.scrcpy.Server"
+            )
+            // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
+            Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
+        } else {
+            // app 进程被杀重启后名称已丢失：按通配模式清理所有守护脚本与 server。
+            // 守护循环用固定 $STOP 文件名判断退出，脚本被杀即不再拉起，标记文件可删
+            Auxiliary.exec(
+                "pkill -f scrcpy_watch_; pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; " +
+                        "pkill -KILL -f fake.screenshot.scrcpy.Server; " +
+                        "rm -f /data/local/tmp/scrcpy_stop_* /data/local/tmp/scrcpy_watch_*.sh"
+            )
+        }
+        if (::scrcpyJob.isInitialized) {
+            scrcpyJob.cancel()
+        }
         sshSession?.disconnect()
         sshSession = null
         initialized = false

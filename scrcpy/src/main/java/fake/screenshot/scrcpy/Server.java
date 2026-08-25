@@ -122,9 +122,19 @@ public final class Server {
                 String socketName = DesktopConnection.getSocketName(scid);
                 try (ServerSocket serverSocket = createServerSocket(tcpPort, tcpLocalOnly)) {
                     Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
+                    // abstract socket 连接顺序控制：proxy 线程必须按 TCP accept 的先后
+                    // 顺序连接 abstract socket。server 端按 video → audio → control 顺序
+                    // accept，若各转发线程并发抢连 abstract，连接到达顺序与客户端连接
+                    // 顺序不一致时会产生通道错位配对（控制消息被写进 server 永不读取的
+                    // 通道，表现为控制完全失效且服务端无任何日志）
+                    final Object orderLock = new Object();
+                    final int[] nextConnectSeq = {0};
+                    int acceptSeq = 0;
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
-                        Thread connThread = new Thread(() -> proxyConnection(clientSocket, socketName, authPassword));
+                        final int seq = acceptSeq++;
+                        Thread connThread = new Thread(() ->
+                                proxyConnection(clientSocket, socketName, authPassword, seq, orderLock, nextConnectSeq));
                         connThread.setName("tcp_proxy_conn");
                         connThread.setDaemon(true);
                         connThread.start();
@@ -368,7 +378,8 @@ public final class Server {
         }
     }
 
-    private static void proxyConnection(Socket clientSocket, String socketName, String authPassword) {
+    private static void proxyConnection(Socket clientSocket, String socketName, String authPassword, int seq,
+                                        Object orderLock, int[] nextConnectSeq) {
         LocalSocket localSocket = new LocalSocket();
 
         try {
@@ -397,6 +408,20 @@ public final class Server {
             }
         }
 
+        // 等待轮到本连接（按 TCP accept 顺序）再连接 abstract socket，
+        // 保证 server 端通道配对顺序与客户端连接顺序一致
+        synchronized (orderLock) {
+            while (nextConnectSeq[0] != seq) {
+                try {
+                    orderLock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    closeQuietly(clientSocket);
+                    closeQuietly(localSocket);
+                    return;
+                }
+            }
+        }
         try {
             localSocket.connect(new LocalSocketAddress(socketName));
         } catch (IOException e) {
@@ -404,6 +429,12 @@ public final class Server {
             closeQuietly(clientSocket);
             closeQuietly(localSocket);
             return;
+        } finally {
+            // 无论成功失败都放行下一个连接，避免后续连接永久等待
+            synchronized (orderLock) {
+                nextConnectSeq[0] = seq + 1;
+                orderLock.notifyAll();
+            }
         }
 
         try {
