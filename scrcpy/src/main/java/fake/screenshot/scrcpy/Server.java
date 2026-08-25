@@ -230,52 +230,6 @@ public final class Server {
         }
     }
 
-    private static void proxyConnection(Socket clientSocket, String socketName) {
-        LocalSocket localSocket = new LocalSocket();
-
-        try {
-            clientSocket.setTcpNoDelay(true);
-            // 客户端异常掉线（无 FIN/RST）时依靠 keepalive 探测，避免连接长期泄漏
-            clientSocket.setKeepAlive(true);
-        } catch (IOException ignored) {
-        }
-
-        try {
-            localSocket.connect(new LocalSocketAddress(socketName));
-        } catch (IOException e) {
-            Ln.w("Failed to connect to abstract socket " + socketName + ": " + e.getMessage());
-            closeQuietly(clientSocket);
-            closeQuietly(localSocket);
-            return;
-        }
-
-        try {
-            InputStream clientIn = clientSocket.getInputStream();
-            OutputStream clientOut = clientSocket.getOutputStream();
-            InputStream localIn = localSocket.getInputStream();
-            OutputStream localOut = localSocket.getOutputStream();
-
-            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket));
-            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket));
-            toLocal.setName("tcp_proxy_up");
-            toClient.setName("tcp_proxy_down");
-            toLocal.setDaemon(true);
-            toClient.setDaemon(true);
-            toLocal.start();
-            toClient.start();
-
-            toLocal.join();
-            toClient.join();
-        } catch (IOException | InterruptedException e) {
-            if (!Thread.currentThread().isInterrupted()) {
-                Ln.e("Proxy connection error: " + e.getMessage());
-            }
-        } finally {
-            closeQuietly(clientSocket);
-            closeQuietly(localSocket);
-        }
-    }
-
     private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket) {
         byte[] buffer = new byte[64 * 1024];
         try {

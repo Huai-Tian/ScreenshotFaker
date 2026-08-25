@@ -167,6 +167,12 @@
     <string name="receiver_shared_password_hint">与发送端一致，未启用认证则留空</string>
     <string name="receiver_connecting">连接中…</string>
     <string name="receiver_connection_failed">连接失败：</string>
+    <string name="receiver_back">返回</string>
+    <string name="receiver_home">主页</string>
+    <string name="receiver_recents">最近任务</string>
+    <string name="receiver_rotate">旋转</string>
+    <string name="receiver_volume_up">音量加</string>
+    <string name="receiver_volume_down">音量减</string>
     <string name="delete_receiver_confirm">删除接收端“%1$s”？</string>
     <string name="screenShare_password">共享密码</string>
     <string name="screenShare_password_hint">留空则不启用认证，接收端需输入相同密码</string>

@@ -78,7 +78,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         data object Stopped : State
     }
 
-    private companion object {
+    companion object {
         /** scrcpy Codec id（名称的 4 字节 ASCII 大端表示） */
         const val CODEC_H264 = 0x68323634
         const val CODEC_H265 = 0x68323635
@@ -95,6 +95,30 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         const val DEVICE_NAME_LENGTH = 64
         const val CONNECT_TIMEOUT_MS = 8000
         const val SSH_TIMEOUT_MS = 8000
+
+        // ControlMessage 类型（与服务端 ControlMessage 常量一致）
+        const val TYPE_INJECT_KEYCODE = 0
+        const val TYPE_INJECT_TOUCH_EVENT = 2
+        const val TYPE_INJECT_SCROLL_EVENT = 3
+        const val TYPE_EXPAND_NOTIFICATION_PANEL = 5
+        const val TYPE_COLLAPSE_PANELS = 7
+        const val TYPE_ROTATE_DEVICE = 11
+
+        /** 通用手指 pointerId（非 -1/POINTER_ID_MOUSE，服务端按手指注入） */
+        const val POINTER_ID_GENERIC_FINGER = -2L
+
+        // MotionEvent.ACTION_*（避免依赖 android.view.MotionEvent 也可读性更好）
+        const val ACTION_DOWN = 0
+        const val ACTION_UP = 1
+        const val ACTION_MOVE = 2
+
+        // 常用 KeyEvent.KEYCODE_*
+        const val KEYCODE_BACK = 4
+        const val KEYCODE_HOME = 3
+        const val KEYCODE_APP_SWITCH = 187
+        const val KEYCODE_VOLUME_UP = 24
+        const val KEYCODE_VOLUME_DOWN = 25
+        const val KEYCODE_POWER = 26
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -105,11 +129,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private val sockets = CopyOnWriteArrayList<Socket>()
     private var sshSession: Session? = null
 
+    /** control socket 的输出流，用于向发送端注入控制消息 */
+    @Volatile
+    private var controlOut: java.io.OutputStream? = null
+    private val controlLock = Any()
+
     /** viewer 提供的渲染 Surface（null 表示暂无可渲染目标） */
     @Volatile
     private var surface: Surface? = null
 
     val state = MutableStateFlow<State>(State.Idle)
+
+    /** 视频尺寸（来自 session meta），viewer 用于宽高比适配与触摸坐标映射 */
+    val videoSize = MutableStateFlow<IntArray?>(null)
 
     fun setSurface(surface: Surface?) {
         this.surface = surface
@@ -119,6 +151,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         if (job?.isActive == true) return
         running.set(true)
         state.value = State.Connecting
+        videoSize.value = null
         job = scope.launch { runLoop() }
     }
 
@@ -191,8 +224,18 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         var audioSocket: Socket? = null
         var controlSocket: Socket? = null
         try {
-            // 连接顺序必须与 server 端 accept 顺序一致：video → audio → control
+            // 连接顺序必须与 server 端 accept 顺序一致：video → audio → control。
+            // 重要：server 端 DesktopConnection.open 要 accept 完全部 socket 才返回，
+            // 之后才发送 dummy byte / 设备名 / codec id，因此必须先建立全部连接再读取。
             videoSocket = openSocket()
+            if (config.enableAudio) {
+                audioSocket = openSocket()
+            }
+            if (config.enableControl) {
+                controlSocket = openSocket()
+                controlOut = controlSocket.getOutputStream()
+            }
+
             val videoIn = DataInputStream(
                 BufferedInputStream(videoSocket.getInputStream(), 64 * 1024)
             )
@@ -205,13 +248,6 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             val videoCodecId = videoIn.readInt()
             val videoMime = videoMimeFor(videoCodecId)
                 ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
-
-            if (config.enableAudio) {
-                audioSocket = openSocket()
-            }
-            if (config.enableControl) {
-                controlSocket = openSocket()
-            }
 
             state.value = State.Running(deviceName)
 
@@ -236,6 +272,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             }
         } finally {
             running.set(false)
+            controlOut = null
             closeSockets()
             runCatching { sshSession?.disconnect() }
             sshSession = null
@@ -245,7 +282,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private fun readDeviceName(input: DataInputStream): String {
         val buffer = ByteArray(DEVICE_NAME_LENGTH)
         input.readFully(buffer)
-        val end = buffer.indexOf(0)
+        // 设备名恰好占满 64 字节时无 0 终止符
+        val end = buffer.indexOf(0).let { if (it == -1) buffer.size else it }
         return String(buffer, 0, end).trim()
     }
 
@@ -269,8 +307,15 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             while (running.get()) {
                 input.readFully(header)
                 val ptsAndFlags = readLongBE(header, 0)
-                // session meta（分辨率变化）：跳过，解码器自行从码流获取尺寸
-                if (ptsAndFlags and PACKET_FLAG_SESSION != 0L) continue
+                // session meta（分辨率变化）：记录尺寸供 UI 宽高比适配与触摸坐标映射，
+                // 其余交给解码器自行从码流获取
+                if (ptsAndFlags and PACKET_FLAG_SESSION != 0L) {
+                    // 布局：flags(4) + width(4) + height(4)，width 位于 header[4..7]
+                    val w = readIntBE(header, 4)
+                    val h = readIntBE(header, 8)
+                    if (w > 0 && h > 0) videoSize.value = intArrayOf(w, h)
+                    continue
+                }
                 val isConfig = ptsAndFlags and PACKET_FLAG_CONFIG != 0L
                 val size = readIntBE(header, 8)
                 if (frameBuffer.size < size) frameBuffer = ByteArray(size)
@@ -464,6 +509,103 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             }
         }
     }
+
+    // ---------------------------------------------------------------- 控制消息发送
+
+    /**
+     * 注入触摸事件（与 ControlMessageReader.parseInjectTouchEvent 的线格式一致）：
+     * type(1) + action(1) + pointerId(8) + x(4) + y(4)
+     * + screenWidth(2) + screenHeight(2) + pressure(2) + actionButton(4) + buttons(4)
+     *
+     * 坐标为视频坐标系；[screenWidth]/[screenHeight] 传视频尺寸，
+     * server 端 PositionMapper 会映射到真实屏幕。
+     *
+     * @param action MotionEvent.ACTION_DOWN=0 / ACTION_UP=1 / ACTION_MOVE=2
+     */
+    fun sendTouch(action: Int, x: Int, y: Int, screenWidth: Int, screenHeight: Int, pressure: Float) {
+        val out = controlOut ?: return
+        val buffer = java.io.DataOutputStream(out)
+        synchronized(controlLock) {
+            runCatching {
+                buffer.writeByte(TYPE_INJECT_TOUCH_EVENT)
+                buffer.writeByte(action)
+                // 非 -1（POINTER_ID_MOUSE）即按手指事件注入（SOURCE_TOUCHSCREEN）
+                buffer.writeLong(POINTER_ID_GENERIC_FINGER)
+                buffer.writeInt(x)
+                buffer.writeInt(y)
+                buffer.writeShort(screenWidth)
+                buffer.writeShort(screenHeight)
+                // u16 定点压力：0xffff ↔ 1f
+                buffer.writeShort((pressure.coerceIn(0f, 1f) * 0xffff).toInt())
+                buffer.writeInt(0) // actionButton
+                buffer.writeInt(0) // buttons（手指事件下 server 强制清零）
+                buffer.flush()
+            }
+        }
+    }
+
+    /**
+     * 注入滚动事件（与 parseInjectScrollEvent 的线格式一致）：
+     * type(1) + x(4) + y(4) + screenWidth(2) + screenHeight(2)
+     * + hScroll(2) + vScroll(2) + buttons(4)
+     */
+    fun sendScroll(x: Int, y: Int, screenWidth: Int, screenHeight: Int, hScroll: Float, vScroll: Float) {
+        val out = controlOut ?: return
+        val buffer = java.io.DataOutputStream(out)
+        synchronized(controlLock) {
+            runCatching {
+                buffer.writeByte(TYPE_INJECT_SCROLL_EVENT)
+                buffer.writeInt(x)
+                buffer.writeInt(y)
+                buffer.writeShort(screenWidth)
+                buffer.writeShort(screenHeight)
+                // i16 定点，实际范围 [-16, 16]，编码前除以 16
+                buffer.writeShort(toI16FixedPoint(hScroll / 16))
+                buffer.writeShort(toI16FixedPoint(vScroll / 16))
+                buffer.writeInt(0) // buttons
+                buffer.flush()
+            }
+        }
+    }
+
+    /**
+     * 注入按键事件（与 parseInjectKeycode 的线格式一致）：
+     * type(1) + action(1) + keycode(4) + repeat(4) + metaState(4)
+     */
+    fun sendKeycode(action: Int, keycode: Int, repeat: Int = 0, metaState: Int = 0) {
+        val out = controlOut ?: return
+        val buffer = java.io.DataOutputStream(out)
+        synchronized(controlLock) {
+            runCatching {
+                buffer.writeByte(TYPE_INJECT_KEYCODE)
+                buffer.writeByte(action)
+                buffer.writeInt(keycode)
+                buffer.writeInt(repeat)
+                buffer.writeInt(metaState)
+                buffer.flush()
+            }
+        }
+    }
+
+    /** 便捷方法：完整的按键按下-抬起 */
+    fun sendKey(keycode: Int) {
+        sendKeycode(ACTION_DOWN, keycode)
+        sendKeycode(ACTION_UP, keycode)
+    }
+
+    /** 无载荷控制消息（展开通知栏、收起面板、旋转设备等） */
+    fun sendEmptyEvent(type: Int) {
+        val out = controlOut ?: return
+        synchronized(controlLock) {
+            runCatching {
+                out.write(type)
+                out.flush()
+            }
+        }
+    }
+
+    private fun toI16FixedPoint(value: Float): Int =
+        (value.coerceIn(-1f, 1f) * 0x7fff).toInt()
 
     // ---------------------------------------------------------------- 工具
 

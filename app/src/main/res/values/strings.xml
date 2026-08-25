@@ -181,6 +181,12 @@
     <string name="receiver_shared_password_hint">Must match the sender, empty if auth disabled</string>
     <string name="receiver_connecting">Connecting…</string>
     <string name="receiver_connection_failed">Connection failed: </string>
+    <string name="receiver_back">Back</string>
+    <string name="receiver_home">Home</string>
+    <string name="receiver_recents">Recents</string>
+    <string name="receiver_rotate">Rotate</string>
+    <string name="receiver_volume_up">Volume up</string>
+    <string name="receiver_volume_down">Volume down</string>
     <string name="delete_receiver_confirm">Delete receiver \"%1$s\"?</string>
     <string name="screenShare_password">Shared password</string>
     <string name="screenShare_password_hint">Empty disables authentication. Receiver must enter the same password</string>

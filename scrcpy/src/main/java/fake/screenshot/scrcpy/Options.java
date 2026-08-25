@@ -591,9 +591,12 @@ public class Options {
                     Ln.w("Unknown server option: " + key);
                     break;
             }
-            if (options.scid == -1) {
-                options.scid = new java.security.SecureRandom().nextInt() & 0x7FFFFFFF;
-            }
+        }
+
+        // scid 未显式指定时随机生成：abstract socket 名称不固定，
+        // 降低 root/adb 环境下被其它进程探测的概率
+        if (options.scid == -1) {
+            options.scid = new java.security.SecureRandom().nextInt() & 0x7FFFFFFF;
         }
 
         if (options.newDisplay != null) {
