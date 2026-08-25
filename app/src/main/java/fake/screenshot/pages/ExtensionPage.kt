@@ -1,5 +1,8 @@
 package fake.screenshot.pages
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import java.math.BigDecimal
@@ -9,6 +12,7 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
@@ -256,8 +260,18 @@ fun ExtensionCompose() {
         "screenShare_audio_mic",
         false
     )
+    val screenShareMaxSize by ConfigManager.rememberValue(context, "screenShare_max_size", 1280)
+    val screenShareMaxFps by ConfigManager.rememberValue(context, "screenShare_max_fps", 60)
+    val screenShareVideoBitRate by ConfigManager.rememberValue(
+        context,
+        "screenShare_video_bit_rate",
+        4000000
+    )
     var screenShareConfigDialog by remember { mutableStateOf(false) }
     var screenShareConfigDialogLocalPort by remember { mutableStateOf(screenShareLocalPort.toString()) }
+    var screenShareConfigDialogMaxSize by remember { mutableStateOf(screenShareMaxSize.toString()) }
+    var screenShareConfigDialogMaxFps by remember { mutableStateOf(screenShareMaxFps.toString()) }
+    var screenShareConfigDialogVideoBitRate by remember { mutableStateOf(screenShareVideoBitRate.toString()) }
     var screenShareConfigDialogAllowControl by remember { mutableStateOf(screenShareControl) }
     var screenShareConfigDialogSyncClipboard by remember { mutableStateOf(screenShareSyncClipboard) }
     var screenShareConfigDialogEnableVideo by remember { mutableStateOf(screenShareVideo) }
@@ -291,7 +305,13 @@ fun ExtensionCompose() {
             val cameraZoomValid = screenShareConfigDialogVideoCameraZoom.toBigDecimalOrNull()
                 ?.let { it >= BigDecimal.ONE }
                 ?: screenShareConfigDialogVideoCameraZoom.isEmpty()
-            portValid && cameraIdValid && cameraZoomValid && displayIdValid
+            val maxSizeValid = screenShareConfigDialogMaxSize.toIntOrNull()
+                .let { it == null || it in 0..4096 }
+            val maxFpsValid = screenShareConfigDialogMaxFps.toIntOrNull()
+                .let { it == null || it in 0..240 }
+            val bitRateValid = screenShareConfigDialogVideoBitRate.toIntOrNull()
+                .let { it == null || it in 0..100_000_000 }
+            portValid && cameraIdValid && cameraZoomValid && displayIdValid && maxSizeValid && maxFpsValid && bitRateValid
         }
     }
     //SSH Tunnel
@@ -577,6 +597,9 @@ fun ExtensionCompose() {
                         },
                         onClick = {
                             screenShareConfigDialogLocalPort = screenShareLocalPort.toString()
+                            screenShareConfigDialogMaxSize = screenShareMaxSize.toString()
+                            screenShareConfigDialogMaxFps = screenShareMaxFps.toString()
+                            screenShareConfigDialogVideoBitRate = screenShareVideoBitRate.toString()
                             screenShareConfigDialogAllowControl = screenShareControl
                             screenShareConfigDialogSyncClipboard = screenShareSyncClipboard
                             screenShareConfigDialogEnableVideo = screenShareVideo
@@ -1192,6 +1215,36 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        // 直连模式下显示本机 IP，方便接收端填写地址；点击复制 ip:port
+                        if (!sshTunnelEnabled) {
+                            val localIps = remember(screenShareConfigDialog) {
+                                getLocalIpv4Addresses()
+                            }
+                            if (localIps.isNotEmpty()) {
+                                val port = screenShareConfigDialogLocalPort.toIntOrNull()
+                                Text(
+                                    text = stringResource(R.string.screenShare_local_ip) +
+                                            " " + localIps.joinToString(" / "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val target = localIps.first() +
+                                                    if (port != null) ":$port" else ""
+                                            val cm = context.getSystemService(
+                                                Context.CLIPBOARD_SERVICE
+                                            ) as ClipboardManager
+                                            cm.setPrimaryClip(
+                                                ClipData.newPlainText("screenShare", target)
+                                            )
+                                            Toast.makeText(
+                                                context, target, Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                )
+                            }
+                        }
                         OutlinedTextField(
                             value = screenShareConfigDialogPassword,
                             onValueChange = { screenShareConfigDialogPassword = it },
@@ -1262,6 +1315,33 @@ fun ExtensionCompose() {
                                     singleLine = true
                                 )
                             }
+                            OutlinedTextField(
+                                value = screenShareConfigDialogMaxSize,
+                                onValueChange = { screenShareConfigDialogMaxSize = it },
+                                label = { Text(stringResource(R.string.stealth_screenShare_max_size)) },
+                                placeholder = { Text(stringResource(R.string.zero_if_unlimited)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = screenShareConfigDialogMaxFps,
+                                onValueChange = { screenShareConfigDialogMaxFps = it },
+                                label = { Text(stringResource(R.string.stealth_screenShare_max_fps)) },
+                                placeholder = { Text(stringResource(R.string.zero_if_unlimited)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = screenShareConfigDialogVideoBitRate,
+                                onValueChange = { screenShareConfigDialogVideoBitRate = it },
+                                label = { Text(stringResource(R.string.stealth_screenShare_video_bit_rate)) },
+                                placeholder = { Text(stringResource(R.string.zero_if_default)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1465,6 +1545,30 @@ fun ExtensionCompose() {
                                     context,
                                     "screenShare_password",
                                     screenShareConfigDialogPassword
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareMaxSize != screenShareConfigDialogMaxSize.toIntOrNull()) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_max_size",
+                                    screenShareConfigDialogMaxSize.toIntOrNull() ?: 1280
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareMaxFps != screenShareConfigDialogMaxFps.toIntOrNull()) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_max_fps",
+                                    screenShareConfigDialogMaxFps.toIntOrNull() ?: 60
+                                )
+                                configChanged = true
+                            }
+                            if (screenShareVideoBitRate != screenShareConfigDialogVideoBitRate.toIntOrNull()) {
+                                ConfigManager.saveData(
+                                    context,
+                                    "screenShare_video_bit_rate",
+                                    screenShareConfigDialogVideoBitRate.toIntOrNull() ?: 4000000
                                 )
                                 configChanged = true
                             }
@@ -1784,3 +1888,12 @@ fun ExtensionCompose() {
         }
     }
 }
+
+private fun getLocalIpv4Addresses(): List<String> = runCatching {
+    java.net.NetworkInterface.getNetworkInterfaces().asSequence()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.asSequence() }
+        .filter { it is java.net.Inet4Address && !it.isLoopbackAddress }
+        .mapNotNull { it.hostAddress }
+        .toList()
+}.getOrDefault(emptyList())

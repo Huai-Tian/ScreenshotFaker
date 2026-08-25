@@ -71,10 +71,16 @@
     <string name="stealth_screenRecord_bitrate">比特率（bps)</string>
     <string name="stealth_screenRecord_size">分辨率（宽x高)</string>
     <string name="stealth_screenShare_port">屏幕共享本地端口</string>
+    <string name="screenShare_local_ip">本机IP（点击复制）：</string>
     <string name="config_stealth_screenShare">配置无痕屏幕共享</string>
     <string name="stealth_screenShare_sync_clipboard">同步剪贴板</string>
     <string name="stealth_screenShare_video">启用视频</string>
     <string name="stealth_screenShare_control">允许控制</string>
+    <string name="stealth_screenShare_max_size">最大分辨率</string>
+    <string name="stealth_screenShare_max_fps">最大帧率</string>
+    <string name="stealth_screenShare_video_bit_rate">视频比特率（bps）</string>
+    <string name="zero_if_unlimited">0为不限制</string>
+    <string name="zero_if_default">0为默认</string>
     <string name="stealth_screenShare_video_camera">相机视频</string>
     <string name="stealth_screenShare_video_camera_id">摄像头编号</string>
     <string name="stealth_screenShare_video_camera_torch">闪光灯</string>

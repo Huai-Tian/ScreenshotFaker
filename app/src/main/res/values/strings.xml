@@ -99,7 +99,13 @@
     <string name="click_to_config_stealth_screen_sharing">Click to config stealth screen sharing</string>
     <string name="config_stealth_screenShare">Config stealth screen sharing</string>
     <string name="stealth_screenShare_port">Screencast local port</string>
+    <string name="screenShare_local_ip">Local IP (tap to copy):</string>
     <string name="stealth_screenShare_control">Allow control</string>
+    <string name="stealth_screenShare_max_size">Max video size</string>
+    <string name="stealth_screenShare_max_fps">Max frame rate</string>
+    <string name="stealth_screenShare_video_bit_rate">Video bit rate (bps)</string>
+    <string name="zero_if_unlimited">0 for unlimited</string>
+    <string name="zero_if_default">0 for default</string>
     <string name="stealth_screenShare_sync_clipboard">Sync clipboard</string>
     <string name="stealth_screenShare_video">Enable video</string>
     <string name="stealth_screenShare_video_display">Display video</string>
