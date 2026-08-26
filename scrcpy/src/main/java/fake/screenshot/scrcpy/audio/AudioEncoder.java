@@ -101,6 +101,8 @@ public final class AudioEncoder implements AsyncProcessor {
     @TargetApi(AndroidVersions.API_24_ANDROID_7_0)
     private void inputThread(MediaCodec mediaCodec, AudioCapture capture) throws IOException, InterruptedException {
         final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+        // 诊断日志：首次读到 PCM 数据（无声问题时区分"捕获无数据"与"编码无输出"）
+        boolean first = true;
 
         while (!Thread.currentThread().isInterrupted()) {
             InputTask task = inputTasks.take();
@@ -108,6 +110,18 @@ public final class AudioEncoder implements AsyncProcessor {
             int r = capture.read(buffer, bufferInfo);
             if (r <= 0) {
                 throw new IOException("Could not read audio: " + r);
+            }
+            if (first) {
+                first = false;
+                // 检测首包是否全零（部分设备 AudioPolicy 捕获只产生静音数据）
+                boolean allZero = true;
+                for (int i = 0; i < r; i += 64) {
+                    if (buffer.get(i) != 0) {
+                        allZero = false;
+                        break;
+                    }
+                }
+                Ln.i("Audio capture first PCM read: " + r + " bytes, allZero=" + allZero);
             }
 
             mediaCodec.queueInputBuffer(task.index, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags);

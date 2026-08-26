@@ -637,6 +637,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private fun audioLoop(socket: Socket, play: Boolean) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
         val codecId = input.readInt()
+        // 诊断日志：codecId=0 表示发送端禁用了音频流（捕获失败），
+        // =CODEC_OPUS 表示流正常。无声问题先看这条日志定位断点
+        Log.i(TAG, "audio stream codecId=$codecId (play=$play)")
         if (codecId != CODEC_OPUS || !play) {
             // 非 OPUS（raw/flac 等）暂不支持播放，或本端未启用音频：
             // 持续读取并丢弃，防止 TCP 背压阻塞发送端
@@ -661,6 +664,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
                 if (isConfig) {
                     // config 包为 OpusHead：magic(8) version(1) channels(1) preskip(2)…
+                    // 诊断日志：收到 config 说明音频数据在正常到达（无声时定位是解码还是传输问题）
+                    Log.i(TAG, "audio config received: ${size} bytes, channels=${packetBuffer[9].toInt() and 0xFF}")
                     runCatching { codec?.stop() }
                     runCatching { codec?.release() }
                     runCatching { track?.release() }

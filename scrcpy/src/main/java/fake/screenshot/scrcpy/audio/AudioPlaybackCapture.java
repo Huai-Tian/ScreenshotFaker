@@ -50,12 +50,13 @@ public final class AudioPlaybackCapture implements AudioCapture {
             Method addMixRuleMethod = audioMixingRuleBuilderClass.getMethod("addMixRule", int.class, Object.class);
             addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, attributes);
 
-            // AudioMixingRule audioMixingRule = builder.build();
-            Object audioMixingRule = audioMixingRuleBuilderClass.getMethod("build").invoke(audioMixingRuleBuilder);
-
             // audioMixingRuleBuilder.voiceCommunicationCaptureAllowed(true);
+            // 注意：必须在 build() 之前调用才生效（原先放在 build 之后，调用无效）
             Method voiceCommunicationCaptureAllowedMethod = audioMixingRuleBuilderClass.getMethod("voiceCommunicationCaptureAllowed", boolean.class);
             voiceCommunicationCaptureAllowedMethod.invoke(audioMixingRuleBuilder, true);
+
+            // AudioMixingRule audioMixingRule = builder.build();
+            Object audioMixingRule = audioMixingRuleBuilderClass.getMethod("build").invoke(audioMixingRuleBuilder);
 
             Class<?> audioMixClass = Class.forName("android.media.audiopolicy.AudioMix");
             Class<?> audioMixBuilderClass = Class.forName("android.media.audiopolicy.AudioMix$Builder");
@@ -120,6 +121,9 @@ public final class AudioPlaybackCapture implements AudioCapture {
         recorder = createAudioRecord();
         recorder.startRecording();
         reader = new AudioRecordReader(recorder);
+        // 诊断日志：AudioPolicy 注册与 sink 创建成功的标志（无声问题时先确认这里）
+        Ln.i("Playback capture started (keepPlayingOnDevice=" + keepPlayingOnDevice
+                + ", state=" + recorder.getState() + ")");
     }
 
     @Override
