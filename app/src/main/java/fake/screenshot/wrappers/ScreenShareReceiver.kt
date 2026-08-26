@@ -187,7 +187,15 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     /** control socket 的输出流，用于向发送端注入控制消息 */
     @Volatile
     private var controlOut: java.io.OutputStream? = null
-    private val controlLock = Any()
+
+    /**
+     * 控制消息发送线程：所有 sendXXX 都可能从 UI（主线程）调用，
+     * 直接写 socket 会抛 NetworkOnMainThreadException（控制失效的根因）。
+     * 单线程执行器既完成线程切换，又天然保证消息顺序（如 DOWN 先于 UP）。
+     */
+    private val controlExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "scrcpy-control-sender").apply { isDaemon = true }
+    }
 
     /**
      * 诊断：本会话首条控制消息是否已记录。
@@ -215,6 +223,23 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             Log.w(TAG, "control send skipped ($what): controlOut is null — channel not negotiated or session closed")
         }
         return out
+    }
+
+    /**
+     * 把一次控制消息写入投递到 [controlExecutor]（见其文档：主线程禁网）。
+     * 写失败（socket 已断等）记录日志便于定位控制链路断点
+     */
+    private fun postControl(what: String, write: (java.io.DataOutputStream) -> Unit) {
+        val out = requireControlOut(what) ?: return
+        controlExecutor.execute {
+            try {
+                val buffer = java.io.DataOutputStream(out)
+                write(buffer)
+                buffer.flush()
+            } catch (e: Exception) {
+                Log.w(TAG, "send $what failed", e)
+            }
+        }
     }
 
     /** viewer 提供的渲染 Surface（null 表示暂无可渲染目标） */
@@ -789,27 +814,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         screenHeight: Int,
         pressure: Float
     ) {
-        val out = requireControlOut("touch") ?: return
-        val buffer = java.io.DataOutputStream(out)
         logFirstSend("touch action=$action")
-        synchronized(controlLock) {
-            try {
-                buffer.writeByte(TYPE_INJECT_TOUCH_EVENT)
-                buffer.writeByte(action)
-                buffer.writeLong(pointerId)
-                buffer.writeInt(x)
-                buffer.writeInt(y)
-                buffer.writeShort(screenWidth)
-                buffer.writeShort(screenHeight)
-                // u16 定点压力：0xffff ↔ 1f
-                buffer.writeShort((pressure.coerceIn(0f, 1f) * 0xffff).toInt())
-                buffer.writeInt(0) // actionButton
-                buffer.writeInt(0) // buttons（手指事件下 server 强制清零）
-                buffer.flush()
-            } catch (e: Exception) {
-                // 写失败（socket 已断等）不再静默：记录日志便于定位控制链路断点
-                Log.w(TAG, "sendTouch failed", e)
-            }
+        postControl("touch") { buffer ->
+            buffer.writeByte(TYPE_INJECT_TOUCH_EVENT)
+            buffer.writeByte(action)
+            buffer.writeLong(pointerId)
+            buffer.writeInt(x)
+            buffer.writeInt(y)
+            buffer.writeShort(screenWidth)
+            buffer.writeShort(screenHeight)
+            // u16 定点压力：0xffff ↔ 1f
+            buffer.writeShort((pressure.coerceIn(0f, 1f) * 0xffff).toInt())
+            buffer.writeInt(0) // actionButton
+            buffer.writeInt(0) // buttons（手指事件下 server 强制清零）
         }
     }
 
@@ -819,24 +836,17 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * + hScroll(2) + vScroll(2) + buttons(4)
      */
     fun sendScroll(x: Int, y: Int, screenWidth: Int, screenHeight: Int, hScroll: Float, vScroll: Float) {
-        val out = requireControlOut("scroll") ?: return
-        val buffer = java.io.DataOutputStream(out)
         logFirstSend("scroll")
-        synchronized(controlLock) {
-            try {
-                buffer.writeByte(TYPE_INJECT_SCROLL_EVENT)
-                buffer.writeInt(x)
-                buffer.writeInt(y)
-                buffer.writeShort(screenWidth)
-                buffer.writeShort(screenHeight)
-                // i16 定点，实际范围 [-16, 16]，编码前除以 16
-                buffer.writeShort(toI16FixedPoint(hScroll / 16))
-                buffer.writeShort(toI16FixedPoint(vScroll / 16))
-                buffer.writeInt(0) // buttons
-                buffer.flush()
-            } catch (e: Exception) {
-                Log.w(TAG, "sendScroll failed", e)
-            }
+        postControl("scroll") { buffer ->
+            buffer.writeByte(TYPE_INJECT_SCROLL_EVENT)
+            buffer.writeInt(x)
+            buffer.writeInt(y)
+            buffer.writeShort(screenWidth)
+            buffer.writeShort(screenHeight)
+            // i16 定点，实际范围 [-16, 16]，编码前除以 16
+            buffer.writeShort(toI16FixedPoint(hScroll / 16))
+            buffer.writeShort(toI16FixedPoint(vScroll / 16))
+            buffer.writeInt(0) // buttons
         }
     }
 
@@ -845,20 +855,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * type(1) + action(1) + keycode(4) + repeat(4) + metaState(4)
      */
     fun sendKeycode(action: Int, keycode: Int, repeat: Int = 0, metaState: Int = 0) {
-        val out = requireControlOut("keycode") ?: return
-        val buffer = java.io.DataOutputStream(out)
         logFirstSend("keycode=$keycode action=$action")
-        synchronized(controlLock) {
-            try {
-                buffer.writeByte(TYPE_INJECT_KEYCODE)
-                buffer.writeByte(action)
-                buffer.writeInt(keycode)
-                buffer.writeInt(repeat)
-                buffer.writeInt(metaState)
-                buffer.flush()
-            } catch (e: Exception) {
-                Log.w(TAG, "sendKeycode failed", e)
-            }
+        postControl("keycode") { buffer ->
+            buffer.writeByte(TYPE_INJECT_KEYCODE)
+            buffer.writeByte(action)
+            buffer.writeInt(keycode)
+            buffer.writeInt(repeat)
+            buffer.writeInt(metaState)
         }
     }
 
@@ -870,15 +873,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     /** 无载荷控制消息（展开通知栏、收起面板、旋转设备等） */
     fun sendEmptyEvent(type: Int) {
-        val out = requireControlOut("emptyEvent") ?: return
         logFirstSend("emptyEvent type=$type")
-        synchronized(controlLock) {
-            try {
-                out.write(type)
-                out.flush()
-            } catch (e: Exception) {
-                Log.w(TAG, "sendEmptyEvent failed", e)
-            }
+        postControl("emptyEvent") { buffer ->
+            buffer.writeByte(type)
         }
     }
 
@@ -887,27 +884,22 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 超过 [INJECT_TEXT_MAX_LENGTH] 时自动分段发送。
      */
     fun sendText(text: String) {
-        val out = requireControlOut("text") ?: return
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.isEmpty()) return
-        synchronized(controlLock) {
-            try {
-                var offset = 0
-                while (offset < bytes.size) {
-                    // 从上限处回退到 UTF-8 字符边界，避免拆出非法序列
-                    var end = minOf(offset + INJECT_TEXT_MAX_LENGTH, bytes.size)
-                    while (end > offset && end < bytes.size &&
-                        (bytes[end].toInt() and 0xC0) == 0x80
-                    ) end--
+        logFirstSend("text")
+        postControl("text") { buffer ->
+            var offset = 0
+            while (offset < bytes.size) {
+                // 从上限处回退到 UTF-8 字符边界，避免拆出非法序列
+                var end = minOf(offset + INJECT_TEXT_MAX_LENGTH, bytes.size)
+                while (end > offset && end < bytes.size &&
+                    (bytes[end].toInt() and 0xC0) == 0x80
+                ) end--
 
-                    out.write(TYPE_INJECT_TEXT)
-                    writeIntBE(out, end - offset)
-                    out.write(bytes, offset, end - offset)
-                    out.flush()
-                    offset = end
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "sendText failed", e)
+                buffer.writeByte(TYPE_INJECT_TEXT)
+                buffer.writeInt(end - offset)
+                buffer.write(bytes, offset, end - offset)
+                offset = end
             }
         }
     }
@@ -918,20 +910,15 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * sequence 传 0（无效）则发送端不会回 ack；[paste] 为 true 时发送端立即触发粘贴。
      */
     fun sendSetClipboard(text: String, paste: Boolean) {
-        val out = requireControlOut("setClipboard") ?: return
         val bytes = text.toByteArray(Charsets.UTF_8)
-        synchronized(controlLock) {
-            try {
-                out.write(TYPE_SET_CLIPBOARD)
-                // sequence 无效，不请求 ack
-                for (shift in 56 downTo 0 step 8) out.write(0)
-                out.write(if (paste) 1 else 0)
-                writeIntBE(out, bytes.size)
-                out.write(bytes)
-                out.flush()
-            } catch (e: Exception) {
-                Log.w(TAG, "sendSetClipboard failed", e)
-            }
+        logFirstSend("setClipboard")
+        postControl("setClipboard") { buffer ->
+            buffer.writeByte(TYPE_SET_CLIPBOARD)
+            // sequence 无效，不请求 ack
+            buffer.writeLong(0)
+            buffer.writeByte(if (paste) 1 else 0)
+            buffer.writeInt(bytes.size)
+            buffer.write(bytes)
         }
     }
 
@@ -940,23 +927,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 内容通过 DeviceMessage(type 0) 异步返回，见 [clipboardContent]。
      */
     fun sendGetClipboard() {
-        val out = requireControlOut("getClipboard") ?: return
-        synchronized(controlLock) {
-            try {
-                out.write(TYPE_GET_CLIPBOARD)
-                out.write(0) // COPY_KEY_NONE
-                out.flush()
-            } catch (e: Exception) {
-                Log.w(TAG, "sendGetClipboard failed", e)
-            }
+        logFirstSend("getClipboard")
+        postControl("getClipboard") { buffer ->
+            buffer.writeByte(TYPE_GET_CLIPBOARD)
+            buffer.writeByte(0) // COPY_KEY_NONE
         }
-    }
-
-    private fun writeIntBE(out: java.io.OutputStream, value: Int) {
-        out.write(value ushr 24 and 0xFF)
-        out.write(value ushr 16 and 0xFF)
-        out.write(value ushr 8 and 0xFF)
-        out.write(value and 0xFF)
     }
 
     private fun toI16FixedPoint(value: Float): Int =
