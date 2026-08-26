@@ -737,6 +737,9 @@ fun SettingsCompose(navController: NavController) {
             val cannotInstall = stringResource(R.string.cannot_install)
             val packagingFailed = stringResource(R.string.packaging_failed)
             val packagingSuccess = stringResource(R.string.packaging_success)
+            // 按系统语言排序输入框：简体中文环境中文字段在前，
+            // 其他语言英文字段在前（用户最可能填写的放最显眼位置）
+            val zhFirst = remember { RepackIdentity.detectSimplifiedChinese() }
             CenteredAlertDialog(
                 onDismissRequest = {
                     if (!repackRepacking) repackConfigDialog = false
@@ -753,40 +756,77 @@ fun SettingsCompose(navController: NavController) {
                             singleLine = true,
                             enabled = !repackRepacking
                         )
-                        OutlinedTextField(
-                            value = repackAppNameEnInputText,
-                            onValueChange = { repackAppNameEnInputText = it },
-                            label = { Text(stringResource(R.string.application_name_english)) },
-                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            enabled = !repackRepacking
-                        )
-                        OutlinedTextField(
-                            value = repackAppNameZhInputText,
-                            onValueChange = { repackAppNameZhInputText = it },
-                            label = { Text(stringResource(R.string.application_name_chinese_simplified)) },
-                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            enabled = !repackRepacking
-                        )
-                        OutlinedTextField(
-                            value = repackDescriptionEnInputText,
-                            onValueChange = { repackDescriptionEnInputText = it },
-                            label = { Text(stringResource(R.string.application_description_english)) },
-                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !repackRepacking
-                        )
-                        OutlinedTextField(
-                            value = repackDescriptionZhInputText,
-                            onValueChange = { repackDescriptionZhInputText = it },
-                            label = { Text(stringResource(R.string.application_description_chinese_simplified)) },
-                            placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !repackRepacking
-                        )
+                        if (zhFirst) {
+                            OutlinedTextField(
+                                value = repackAppNameZhInputText,
+                                onValueChange = { repackAppNameZhInputText = it },
+                                label = { Text(stringResource(R.string.application_name_chinese_simplified)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackDescriptionZhInputText,
+                                onValueChange = { repackDescriptionZhInputText = it },
+                                label = { Text(stringResource(R.string.application_description_chinese_simplified)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackAppNameEnInputText,
+                                onValueChange = { repackAppNameEnInputText = it },
+                                label = { Text(stringResource(R.string.application_name_english)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackDescriptionEnInputText,
+                                onValueChange = { repackDescriptionEnInputText = it },
+                                label = { Text(stringResource(R.string.application_description_english)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !repackRepacking
+                            )
+                        } else {
+                            OutlinedTextField(
+                                value = repackAppNameEnInputText,
+                                onValueChange = { repackAppNameEnInputText = it },
+                                label = { Text(stringResource(R.string.application_name_english)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackAppNameZhInputText,
+                                onValueChange = { repackAppNameZhInputText = it },
+                                label = { Text(stringResource(R.string.application_name_chinese_simplified)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackDescriptionEnInputText,
+                                onValueChange = { repackDescriptionEnInputText = it },
+                                label = { Text(stringResource(R.string.application_description_english)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !repackRepacking
+                            )
+                            OutlinedTextField(
+                                value = repackDescriptionZhInputText,
+                                onValueChange = { repackDescriptionZhInputText = it },
+                                label = { Text(stringResource(R.string.application_description_chinese_simplified)) },
+                                placeholder = { Text(stringResource(R.string.keep_current_if_blank)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !repackRepacking
+                            )
+                        }
                         PreferenceItemEx(
                             icon = Icons.Default.Image,
                             title = if (repackIcon == null) stringResource(R.string.choose_new_icon) else stringResource(
