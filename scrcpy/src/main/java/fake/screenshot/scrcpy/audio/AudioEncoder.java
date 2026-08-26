@@ -103,6 +103,11 @@ public final class AudioEncoder implements AsyncProcessor {
         final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
         // 诊断日志：首次读到 PCM 数据（无声问题时区分"捕获无数据"与"编码无输出"）
         boolean first = true;
+        // 静音监测统计（每 64 包 ≈ 1.3 秒输出一次，便于短日志也能捕捉）
+        int statPackets = 0;
+        int statNonZeroPackets = 0;
+        int statPeak = 0;
+        long statBytes = 0;
 
         while (!Thread.currentThread().isInterrupted()) {
             InputTask task = inputTasks.take();
@@ -123,6 +128,30 @@ public final class AudioEncoder implements AsyncProcessor {
                 }
                 Ln.i("Audio capture first PCM read: " + r + " bytes, allZero=" + allZero);
             }
+            // 持续静音监测：部分设备（OPPO 等）AudioPolicy 捕获只产生全零 PCM。
+            // 每 64 包（约 1.3 秒）统计一次非零包占比与峰值，用于区分
+            // "捕获到真实音频"与"捕获到静音流"
+            statPackets++;
+            statBytes += r;
+            for (int i = 0; i < r; i += 2) {
+                short sample = buffer.getShort(i);
+                if (sample != 0) {
+                    statNonZeroPackets++;
+                    int abs = Math.abs(sample);
+                    if (abs > statPeak) {
+                        statPeak = abs;
+                    }
+                    break;
+                }
+            }
+            if (statPackets >= 64) {
+                Ln.i("Audio capture stats: " + statNonZeroPackets + "/" + statPackets
+                        + " packets non-zero, peak=" + statPeak + ", " + statBytes + " bytes");
+                statPackets = 0;
+                statNonZeroPackets = 0;
+                statPeak = 0;
+                statBytes = 0;
+            }
 
             mediaCodec.queueInputBuffer(task.index, bufferInfo.offset, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags);
         }
@@ -130,6 +159,11 @@ public final class AudioEncoder implements AsyncProcessor {
 
     private void outputThread(MediaCodec mediaCodec) throws IOException, InterruptedException {
         streamer.writeAudioHeader();
+        // 诊断日志：编码器输出统计（确认音频包确实在产出并发送）
+        boolean firstFrame = true;
+        int outPackets = 0;
+        long outBytes = 0;
+        long lastLogTime = System.currentTimeMillis();
 
         while (!Thread.currentThread().isInterrupted()) {
             OutputTask task = outputTasks.take();
@@ -139,6 +173,22 @@ public final class AudioEncoder implements AsyncProcessor {
                     fixTimestamp(task.bufferInfo);
                 }
                 streamer.writePacket(buffer, task.bufferInfo);
+                if ((task.bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                    if (firstFrame) {
+                        firstFrame = false;
+                        Ln.i("Audio encoder first packet: " + task.bufferInfo.size + " bytes");
+                    }
+                    outPackets++;
+                    outBytes += task.bufferInfo.size;
+                    long now = System.currentTimeMillis();
+                    if (now - lastLogTime >= 2000) {
+                        Ln.i("Audio encoder stats: " + outPackets + " packets, " + outBytes
+                                + " bytes in " + (now - lastLogTime) + "ms");
+                        outPackets = 0;
+                        outBytes = 0;
+                        lastLogTime = now;
+                    }
+                }
             } finally {
                 mediaCodec.releaseOutputBuffer(task.index, false);
             }

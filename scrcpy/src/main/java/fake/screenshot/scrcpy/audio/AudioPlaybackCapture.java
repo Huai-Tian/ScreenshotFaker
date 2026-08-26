@@ -50,6 +50,14 @@ public final class AudioPlaybackCapture implements AudioCapture {
             Method addMixRuleMethod = audioMixingRuleBuilderClass.getMethod("addMixRule", int.class, Object.class);
             addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, attributes);
 
+            // 补充 USAGE_GAME / USAGE_UNKNOWN：部分播放器（尤其游戏与直播类应用）
+            // 不使用 USAGE_MEDIA，只匹配 MEDIA 时这些应用的声音不会进入捕获混音，
+            // 导致捕获流全零。多条 RULE_MATCH_ATTRIBUTE_USAGE 规则为 OR 语义。
+            AudioAttributes gameAttributes = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).build();
+            addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, gameAttributes);
+            AudioAttributes unknownAttributes = new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_UNKNOWN).build();
+            addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, unknownAttributes);
+
             // audioMixingRuleBuilder.voiceCommunicationCaptureAllowed(true);
             // 注意：必须在 build() 之前调用才生效（原先放在 build 之后，调用无效）
             Method voiceCommunicationCaptureAllowedMethod = audioMixingRuleBuilderClass.getMethod("voiceCommunicationCaptureAllowed", boolean.class);

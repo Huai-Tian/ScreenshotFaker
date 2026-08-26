@@ -634,6 +634,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     // ---------------------------------------------------------------- 音频
 
+    // 音频解码静音监测统计（drainAudio 中使用）
+    private var audioStatPackets = 0
+    private var audioStatNonZero = 0
+    private var audioStatPeak = 0
+
     private fun audioLoop(socket: Socket, play: Boolean) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
         val codecId = input.readInt()
@@ -652,6 +657,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val bufferInfo = MediaCodec.BufferInfo()
         var codec: MediaCodec? = null
         var track: AudioTrack? = null
+        // 诊断：音频帧接收统计（区分"帧根本没到"与"到了但解码后静音"）
+        var firstFrame = true
+        var framesReceived = 0
+        var bytesReceived = 0L
+        var lastFrameLog = System.currentTimeMillis()
         try {
             while (running.get()) {
                 input.readFully(header)
@@ -661,6 +671,22 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 val size = readIntBE(header, 8)
                 if (packetBuffer.size < size) packetBuffer = ByteArray(size)
                 input.readFully(packetBuffer, 0, size)
+
+                if (!isConfig) {
+                    if (firstFrame) {
+                        firstFrame = false
+                        Log.i(TAG, "audio first frame received: $size bytes")
+                    }
+                    framesReceived++
+                    bytesReceived += size
+                    val now = System.currentTimeMillis()
+                    if (now - lastFrameLog >= 2000) {
+                        Log.i(TAG, "audio frames: $framesReceived packets, $bytesReceived bytes in ${now - lastFrameLog}ms")
+                        framesReceived = 0
+                        bytesReceived = 0
+                        lastFrameLog = now
+                    }
+                }
 
                 if (isConfig) {
                     // config 包为 OpusHead：magic(8) version(1) channels(1) preskip(2)…
@@ -730,6 +756,27 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             val index = codec.dequeueOutputBuffer(info, 0)
             if (index >= 0) {
                 val outputBuffer = codec.getOutputBuffer(index)!!
+                // 诊断：解码后 PCM 峰值监测（每 200 包统计一次），
+                // 发送端有声音但这里 peak=0 说明传输/解码环节出了静音问题
+                audioStatPackets++
+                for (i in 0 until info.size step 2) {
+                    val sample = outputBuffer.getShort(i)
+                    if (sample != 0.toShort()) {
+                        audioStatNonZero++
+                        val abs = kotlin.math.abs(sample.toInt())
+                        if (abs > audioStatPeak) audioStatPeak = abs
+                        break
+                    }
+                }
+                if (audioStatPackets >= 50) {
+                    Log.i(
+                        TAG, "audio decode stats: $audioStatNonZero/$audioStatPackets " +
+                                "packets non-zero, peak=$audioStatPeak"
+                    )
+                    audioStatPackets = 0
+                    audioStatNonZero = 0
+                    audioStatPeak = 0
+                }
                 track.write(outputBuffer, info.size, AudioTrack.WRITE_BLOCKING)
                 codec.releaseOutputBuffer(index, false)
             } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {

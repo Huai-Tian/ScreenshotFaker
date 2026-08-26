@@ -89,7 +89,7 @@ public final class Server {
         // 若日志中出现的不是本字符串（或完全没有），说明 APK 打包了过期的
         // server 二进制——检查 app/build.gradle.kts 的 injectScrcpyAsLib
         // 构建接线（必须直接依赖 :scrcpy:packageRelease，不可用嵌套 gradlew）
-        Ln.i("Server build: relay-diag-v3");
+        Ln.i("Server build: relay-diag-v4");
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
