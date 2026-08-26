@@ -162,6 +162,7 @@
     <string name="crop_icon">裁剪图标</string>
     <string name="delete">删除</string>
     <string name="add_receiver">添加接收端</string>
+    <string name="edit_receiver">编辑接收端</string>
     <string name="no_receivers">暂无接收端，添加一个以接收来自发送设备的屏幕共享</string>
     <string name="receiver_name">名称</string>
     <string name="receiver_address">发送端地址</string>

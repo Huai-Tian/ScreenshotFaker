@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -52,6 +53,7 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
     val scope = rememberCoroutineScope()
     var configs by remember { mutableStateOf<List<ScreenShareReceiverConfig>>(emptyList()) }
     var addDialog by remember { mutableStateOf(false) }
+    var editTarget by remember { mutableStateOf<ScreenShareReceiverConfig?>(null) }
     var deleteTarget by remember { mutableStateOf<ScreenShareReceiverConfig?>(null) }
 
     fun refresh() {
@@ -87,11 +89,19 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
                             append(config.port)
                         },
                         trailingContent = {
-                            IconButton(onClick = { deleteTarget = config }) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = stringResource(R.string.delete)
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = { editTarget = config }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = stringResource(R.string.edit_receiver)
+                                    )
+                                }
+                                IconButton(onClick = { deleteTarget = config }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = stringResource(R.string.delete)
+                                    )
+                                }
                             }
                         },
                         onClick = { navController.navigate("receive_viewer/${config.id}") }
@@ -121,7 +131,8 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
     }
 
     if (addDialog) {
-        AddReceiverDialog(
+        ReceiverConfigDialog(
+            existing = null,
             onDismiss = { addDialog = false },
             onConfirm = { config ->
                 scope.launch {
@@ -129,6 +140,20 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
                     refresh()
                 }
                 addDialog = false
+            }
+        )
+    }
+
+    editTarget?.let { target ->
+        ReceiverConfigDialog(
+            existing = target,
+            onDismiss = { editTarget = null },
+            onConfirm = { config ->
+                scope.launch {
+                    ScreenShareReceiverManager.saveConfig(context, config)
+                    refresh()
+                }
+                editTarget = null
             }
         )
     }
@@ -175,23 +200,24 @@ private fun SwitchRow(
 }
 
 @Composable
-private fun AddReceiverDialog(
+private fun ReceiverConfigDialog(
+    existing: ScreenShareReceiverConfig?,
     onDismiss: () -> Unit,
     onConfirm: (ScreenShareReceiverConfig) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var nameInput by remember { mutableStateOf("") }
-    var addressInput by remember { mutableStateOf("") }
-    var portInput by remember { mutableStateOf("") }
-    var useSsh by remember { mutableStateOf(false) }
-    var sshPortInput by remember { mutableStateOf("22") }
-    var sshUserNameInput by remember { mutableStateOf("") }
-    var sshPasswordInput by remember { mutableStateOf("") }
-    var enableAudio by remember { mutableStateOf(true) }
-    var enableControl by remember { mutableStateOf(true) }
-    var passwordInput by remember { mutableStateOf("") }
+    var nameInput by remember { mutableStateOf(existing?.name ?: "") }
+    var addressInput by remember { mutableStateOf(existing?.address ?: "") }
+    var portInput by remember { mutableStateOf(existing?.port?.toString() ?: "") }
+    var useSsh by remember { mutableStateOf(existing?.useSsh ?: false) }
+    var sshPortInput by remember { mutableStateOf(existing?.sshPort?.toString() ?: "22") }
+    var sshUserNameInput by remember { mutableStateOf(existing?.sshUserName ?: "") }
+    var sshPasswordInput by remember { mutableStateOf(existing?.sshPassword ?: "") }
+    var enableAudio by remember { mutableStateOf(existing?.enableAudio ?: true) }
+    var enableControl by remember { mutableStateOf(existing?.enableControl ?: true) }
+    var passwordInput by remember { mutableStateOf(existing?.password ?: "") }
 
     val portValid = portInput.toIntOrNull()?.let { it in 1024..65535 } == true
     val addressValid = addressInput.isNotEmpty()
@@ -200,7 +226,14 @@ private fun AddReceiverDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.add_receiver)) },
+        title = {
+            Text(
+                stringResource(
+                    if (existing == null) R.string.add_receiver
+                    else R.string.edit_receiver
+                )
+            )
+        },
         text = {
             Column {
                 OutlinedTextField(
@@ -302,7 +335,7 @@ private fun AddReceiverDialog(
             TextButton(
                 onClick = {
                     scope.launch {
-                        val id = ScreenShareReceiverManager.nextId(context)
+                        val id = existing?.id ?: ScreenShareReceiverManager.nextId(context)
                         onConfirm(
                             ScreenShareReceiverConfig(
                                 id = id,

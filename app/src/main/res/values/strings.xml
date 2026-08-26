@@ -176,6 +176,7 @@
     <string name="permission_denied">Permission denied</string>
     <string name="delete">Delete</string>
     <string name="add_receiver">Add receiver</string>
+    <string name="edit_receiver">Edit receiver</string>
     <string name="no_receivers">No receivers yet. Add one to receive screen sharing from a sender device</string>
     <string name="receiver_name">Name</string>
     <string name="receiver_address">Sender address</string>

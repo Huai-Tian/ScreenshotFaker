@@ -63,6 +63,9 @@ object ScreenShareReceiverManager {
         val ids = loadIds(context).toMutableSet()
         ids.add(config.id)
         ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
+        // 配置已变更，缓存中的旧实例不再有效：停止并移除，
+        // 下次使用时按新配置重建（新增时无缓存实例，无副作用）
+        receivers.remove(config.id)?.stop()
     }
 
     suspend fun deleteConfig(context: Context, id: Int) {
