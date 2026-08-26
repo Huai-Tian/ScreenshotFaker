@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+import java.util.zip.ZipFile
 
 plugins {
     alias(libs.plugins.android.application)
@@ -112,18 +113,9 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
-val buildScrcpy = tasks.register<Exec>("buildScrcpy") {
-    description = "Build libscrcpy-server.so"
-    workingDir = project.rootDir
-    commandLine = listOf(
-        if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "./gradlew",
-        ":scrcpy:assembleRelease"
-    )
-}
-
 val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
     description = "Add scrcpy to ScreenshotFaker's jnilibs"
-    dependsOn(buildScrcpy)
+    dependsOn(":scrcpy:packageRelease")
 
     val scrcpySo = project(":scrcpy").layout.buildDirectory
         .file("outputs/apk/release/libscrcpy-server.so")
@@ -142,6 +134,31 @@ val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
         if (!scrcpySo.exists()) {
             throw GradleException("Failed to find libscrcpy-server.so Path: ${scrcpySo.absolutePath}")
         }
+        // 防止打包过期 server：校验二进制内含当前源码的构建标记。
+        // libscrcpy-server.so 实际是 APK（zip），标记字符串存在 dex 的
+        // string pool 中。曾出现 APK 打包旧 server 导致控制失效且难以定位，
+        // 此处构建期直接失败，避免问题遗留到运行时。
+        val expectedMarker = "relay-v4"
+        val markerFound = runCatching {
+            ZipFile(scrcpySo).use { zip ->
+                zip.entries().asSequence()
+                    .filter { it.name.endsWith(".dex") }
+                    .any { entry ->
+                        zip.getInputStream(entry).use { input ->
+                            // ISO-8859-1 字节↔字符一一对应，二进制无损；
+                            // 标记为 ASCII，MUTF-8 下字节不变，直接子串搜索
+                            String(input.readBytes(), Charsets.ISO_8859_1).contains(expectedMarker)
+                        }
+                    }
+            }
+        }.getOrDefault(false)
+        if (!markerFound) {
+            throw GradleException(
+                "libscrcpy-server.so does not contain build marker '$expectedMarker'. " +
+                        "The scrcpy server binary is stale. Run './gradlew :scrcpy:clean " +
+                        ":scrcpy:packageRelease' and rebuild."
+            )
+        }
         abiList.forEach { abi ->
             val targetBase = targetBaseDir.get().asFile
             val targetDir = file("${targetBase}/${abi}")
@@ -151,7 +168,7 @@ val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
                 into(targetDir)
             }
         }
-        println("Successfully added libscrcpy-server.so")
+        println("Successfully added libscrcpy-server.so (build marker: $expectedMarker)")
     }
 }
 

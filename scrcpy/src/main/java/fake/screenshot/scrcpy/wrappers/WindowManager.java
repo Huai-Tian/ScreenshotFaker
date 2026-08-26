@@ -131,7 +131,7 @@ public final class WindowManager {
             Method method = getFreezeDisplayRotationMethod();
             switch (freezeDisplayRotationMethodVersion) {
                 case 0:
-                    method.invoke(manager, displayId, rotation, "scrcpy#freezeRotation");
+                    method.invoke(manager, displayId, rotation, "core#fr");
                     break;
                 case 1:
                     method.invoke(manager, displayId, rotation);
@@ -173,7 +173,7 @@ public final class WindowManager {
             Method method = getThawDisplayRotationMethod();
             switch (thawDisplayRotationMethodVersion) {
                 case 0:
-                    method.invoke(manager, displayId, "scrcpy#thawRotation");
+                    method.invoke(manager, displayId, "core#tr");
                     break;
                 case 1:
                     method.invoke(manager, displayId);

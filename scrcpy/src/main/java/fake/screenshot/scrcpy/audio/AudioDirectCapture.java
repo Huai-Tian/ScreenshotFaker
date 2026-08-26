@@ -82,7 +82,7 @@ public class AudioDirectCapture implements AudioCapture {
                 if (attempts == 0) {
                     Ln.e("Failed to start audio capture");
                     Ln.e("On Android 11, audio capture must be started in the foreground, make sure that the device is unlocked when starting "
-                            + "scrcpy.");
+                            + "the session.");
                     throw new AudioCaptureException();
                 } else {
                     Ln.d("Failed to start audio capture, retrying...");

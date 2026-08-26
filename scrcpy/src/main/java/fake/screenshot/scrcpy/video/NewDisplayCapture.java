@@ -232,10 +232,9 @@ public class NewDisplayCapture extends SurfaceCapture {
                 }
             }
             VirtualDisplay vd = ServiceManager.getDisplayManager()
-                    .createNewVirtualDisplay("scrcpy", displaySize.getWidth(), displaySize.getHeight(), dpi, surface, flags);
+                    .createNewVirtualDisplay(RandomName.next(), displaySize.getWidth(), displaySize.getHeight(), dpi, surface, flags);
             setCurrentVirtualDisplay(vd); // used for client resize
             int virtualDisplayId = vd.getDisplay().getDisplayId();
-            Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
 
             if (displayImePolicy != -1) {
                 ServiceManager.getWindowManager().setDisplayImePolicy(virtualDisplayId, displayImePolicy);

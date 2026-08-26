@@ -2,7 +2,6 @@ package fake.screenshot.scrcpy.device;
 
 import fake.screenshot.scrcpy.control.ControlChannel;
 import fake.screenshot.scrcpy.util.IO;
-import fake.screenshot.scrcpy.util.Ln;
 import fake.screenshot.scrcpy.util.StringUtils;
 
 import android.net.LocalServerSocket;
@@ -18,7 +17,19 @@ public final class DesktopConnection implements Closeable {
 
     private static final int DEVICE_NAME_FIELD_LENGTH = 64;
 
-    private static final String SOCKET_NAME_PREFIX = "scrcpy";
+    // abstract socket 名：每进程随机生成（hex），避免 "scrcpy" 特征出现在
+    // /proc/net/unix 中。本进程内的 TCP proxy 用 getSocketName() 取同名连接，
+    // 因此随机化对协议无影响
+    private static final String SOCKET_NAME_PREFIX = generateRandomName();
+
+    private static String generateRandomName() {
+        java.security.SecureRandom random = new java.security.SecureRandom();
+        StringBuilder sb = new StringBuilder(12);
+        for (int i = 0; i < 12; i++) {
+            sb.append("0123456789abcdef".charAt(random.nextInt(16)));
+        }
+        return sb.toString();
+    }
 
     private final LocalSocket videoSocket;
     private final FileDescriptor videoFd;
@@ -70,8 +81,6 @@ public final class DesktopConnection implements Closeable {
                     // 消除 TCP proxy 多线程转发时 abstract socket 的配对竞态。
                     if (video) {
                         videoSocket = localServerSocket.accept();
-                        // 诊断日志：确认各通道 accept 顺序与标识字节写入（控制失效排查）
-                        Ln.d("Channel connected: video");
                         if (sendDummyByte) {
                             // send one byte so the client may read() to detect a connection error
                             videoSocket.getOutputStream().write(0);
@@ -79,14 +88,12 @@ public final class DesktopConnection implements Closeable {
                     }
                     if (audio) {
                         audioSocket = localServerSocket.accept();
-                        Ln.d("Channel connected: audio");
                         if (sendDummyByte) {
                             audioSocket.getOutputStream().write(1);
                         }
                     }
                     if (control) {
                         controlSocket = localServerSocket.accept();
-                        Ln.d("Channel connected: control");
                         if (sendDummyByte) {
                             controlSocket.getOutputStream().write(2);
                         }

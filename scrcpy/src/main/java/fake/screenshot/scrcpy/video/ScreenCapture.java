@@ -131,8 +131,7 @@ public class ScreenCapture extends SurfaceCapture {
 
         try {
             virtualDisplay = ServiceManager.getDisplayManager()
-                    .createVirtualDisplay("scrcpy", inputSize.getWidth(), inputSize.getHeight(), displayId, surface);
-            Ln.d("Display: using DisplayManager API");
+                    .createVirtualDisplay(RandomName.next(), inputSize.getWidth(), inputSize.getHeight(), displayId, surface);
         } catch (Exception displayManagerException) {
             if (Build.BRAND.equalsIgnoreCase("oculus") && Build.MODEL.toLowerCase(Locale.ROOT).startsWith("quest")) {
                 // Workaround for buggy createVirtualDisplay on Quest
@@ -212,7 +211,8 @@ public class ScreenCapture extends SurfaceCapture {
         // On Android 12 preview, SDK_INT is still R (not S), but CODENAME is "S".
         boolean secure = Build.VERSION.SDK_INT < AndroidVersions.API_30_ANDROID_11 || (Build.VERSION.SDK_INT == AndroidVersions.API_30_ANDROID_11
                 && !"S".equals(Build.VERSION.CODENAME));
-        return SurfaceControl.createDisplay("scrcpy", secure);
+        // 显示名随机化：会出现在 dumpsys display / SurfaceFlinger 中
+        return SurfaceControl.createDisplay(RandomName.next(), secure);
     }
 
     private static void setDisplaySurface(IBinder display, Surface surface, Rect deviceRect, Rect displayRect, int layerStack) {

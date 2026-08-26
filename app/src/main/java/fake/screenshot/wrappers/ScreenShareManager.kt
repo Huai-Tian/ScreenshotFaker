@@ -160,8 +160,10 @@ object ScreenShareManager {
             val authPassword =
                 ConfigManager.getDataOnce(appContext, "screenShare_password", "")
                     .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
+            // 入口类用中性的 Relay：ps/pgrep 的进程 cmdline 中只出现
+            // fake.screenshot.core.Relay，内部实现包名不暴露
             val base =
-                "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.scrcpy.Server $VERSION tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
                 base,
                 enableControl,
@@ -198,9 +200,9 @@ object ScreenShareManager {
             // 仍在系统里运行（守护循环独立于 app 进程），必须先清理再启动，
             // 否则新 server 会因端口被占用而启动失败
             Auxiliary.exec(
-                "pkill -f scrcpy_watch_ ; pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; " +
-                        "pkill -KILL -f fake.screenshot.scrcpy.Server; " +
-                        "rm -f /data/local/tmp/scrcpy_stop_* /data/local/tmp/scrcpy_watch_*.sh"
+                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f fake.screenshot.core.Relay; sleep 1; " +
+                        "pkill -KILL -f fake.screenshot.core.Relay; " +
+                        "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
             )
 
             // 守护循环：接收端断开（锁屏/切后台/网络波动）会使 server 进程退出，
@@ -209,8 +211,10 @@ object ScreenShareManager {
             // 连续 3 次快速退出（<30s）说明 server 无法正常启动（端口占用等），放弃。
             // server 输出重定向 /dev/null：防止 stdout 管道写满阻塞 server。
             val serverCmd = args.joinToString(" ")
-            val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
-            val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
+            // 标记/脚本文件名带随机后缀且以 . 开头（ls 默认不可见），
+            // 不含任何工具特征字样
+            val stopFlag = "/data/local/tmp/.s_$scrcpyName"
+            val watchPath = "/data/local/tmp/.w_$scrcpyName.sh"
             val script = listOf(
                 "STOP=$stopFlag",
                 "rm -f \"\$STOP\"",
@@ -227,7 +231,7 @@ object ScreenShareManager {
                 "rm -f \"\$STOP\" \"$watchPath\" 2>/dev/null"
             ).joinToString("\n")
             // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开
-            Auxiliary.exec("cat > $watchPath <<'SCRCPY_EOF'\n$script\nSCRCPY_EOF")
+            Auxiliary.exec("cat > $watchPath <<'RL_EOF'\n$script\nRL_EOF")
 
             // 阻塞运行守护循环：用户停止或连续快速退出时返回
             Auxiliary.exec("sh $watchPath")
@@ -278,21 +282,21 @@ object ScreenShareManager {
 
     /** server 进程是否实际在运行（app 进程重启后标志位丢失时以此为准） */
     private fun isServerActuallyRunning(): Boolean =
-        Auxiliary.exec("pgrep -f fake.screenshot.scrcpy.Server").first == 0
+        Auxiliary.exec("pgrep -f fake.screenshot.core.Relay").first == 0
 
     fun stopScreenShare() {
         // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
         scrcpyRunning = false
         if (::scrcpyName.isInitialized) {
-            val stopFlag = "/data/local/tmp/scrcpy_stop_$scrcpyName"
-            val watchPath = "/data/local/tmp/scrcpy_watch_$scrcpyName.sh"
+            val stopFlag = "/data/local/tmp/.s_$scrcpyName"
+            val watchPath = "/data/local/tmp/.w_$scrcpyName.sh"
             // 1) 写停止标记：守护循环醒来后退出，不再重启 server
             Auxiliary.exec("touch $stopFlag")
             // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
-            //    必须按 app_process 的实际命令行（含 fake.screenshot.scrcpy.Server）匹配。
+            //    必须按 app_process 的实际命令行（含入口类名）匹配。
             //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
             Auxiliary.exec(
-                "pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; pkill -KILL -f fake.screenshot.scrcpy.Server"
+                "pkill -INT -f fake.screenshot.core.Relay; sleep 1; pkill -KILL -f fake.screenshot.core.Relay"
             )
             // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
             Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
@@ -300,9 +304,9 @@ object ScreenShareManager {
             // app 进程被杀重启后名称已丢失：按通配模式清理所有守护脚本与 server。
             // 守护循环用固定 $STOP 文件名判断退出，脚本被杀即不再拉起，标记文件可删
             Auxiliary.exec(
-                "pkill -f scrcpy_watch_; pkill -INT -f fake.screenshot.scrcpy.Server; sleep 1; " +
-                        "pkill -KILL -f fake.screenshot.scrcpy.Server; " +
-                        "rm -f /data/local/tmp/scrcpy_stop_* /data/local/tmp/scrcpy_watch_*.sh"
+                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f fake.screenshot.core.Relay; sleep 1; " +
+                        "pkill -KILL -f fake.screenshot.core.Relay; " +
+                        "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
             )
         }
         if (::scrcpyJob.isInitialized) {

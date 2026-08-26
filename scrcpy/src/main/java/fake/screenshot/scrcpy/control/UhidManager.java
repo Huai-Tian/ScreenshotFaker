@@ -3,6 +3,7 @@ package fake.screenshot.scrcpy.control;
 import fake.screenshot.scrcpy.AndroidVersions;
 import fake.screenshot.scrcpy.util.Ln;
 import fake.screenshot.scrcpy.util.StringUtils;
+import fake.screenshot.scrcpy.video.RandomName;
 import fake.screenshot.scrcpy.wrappers.ServiceManager;
 
 import android.os.Build;
@@ -32,8 +33,8 @@ public final class UhidManager {
 
     private static final int SIZE_OF_UHID_EVENT = 4380; // sizeof(struct uhid_event)
 
-    // Must be unique across the system
-    private static final String INPUT_PORT = "scrcpy:" + Os.getpid();
+    // Must be unique across the system（中性名：会出现在 input 系统的唯一性关联中）
+    private static final String INPUT_PORT = "vp-" + Os.getpid();
 
     private final String displayUniqueId;
 
@@ -47,7 +48,7 @@ public final class UhidManager {
         this.sender = sender;
         this.displayUniqueId = displayUniqueId;
         if (Build.VERSION.SDK_INT >= AndroidVersions.API_23_ANDROID_6_0) {
-            HandlerThread thread = new HandlerThread("UHidManager");
+            HandlerThread thread = new HandlerThread("worker");
             thread.start();
             queue = thread.getLooper().getQueue();
         } else {
@@ -187,7 +188,8 @@ public final class UhidManager {
         ByteBuffer buf = ByteBuffer.allocate(280 + reportDesc.length).order(ByteOrder.nativeOrder());
         buf.putInt(UHID_CREATE2);
 
-        String actualName = name.isEmpty() ? "scrcpy" : name;
+        // 默认设备名随机化：uhid 设备名会出现在 dumpsys input / getevent 中
+        String actualName = name.isEmpty() ? RandomName.next() : name;
         byte[] nameBytes = actualName.getBytes(StandardCharsets.UTF_8);
         int nameLen = StringUtils.getUtf8TruncationIndex(nameBytes, 127);
         assert nameLen <= 127;
