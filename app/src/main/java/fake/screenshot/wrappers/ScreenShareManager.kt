@@ -17,13 +17,13 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 object ScreenShareManager {
     private const val VERSION = "4.1"
-    private lateinit var scrcpyName: String
-    private lateinit var scrcpyJob: Job
+    private lateinit var relayName: String
+    private lateinit var relayJob: Job
     private var sshSession: Session? = null
     private lateinit var appContext: Context
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var initialized = false
-    var scrcpyRunning = false
+    var relayRunning = false
         private set
 
     @Volatile
@@ -88,9 +88,9 @@ object ScreenShareManager {
                 )
             }
         }
-        scrcpyName = Auxiliary.getRandomStringEx((20..35).random())
+        relayName = Auxiliary.getRandomStringEx((20..35).random())
         val src = "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
-        val (exitCode, output) = Auxiliary.exec("cp $src /data/local/tmp/$scrcpyName")
+        val (exitCode, output) = Auxiliary.exec("cp $src /data/local/tmp/$relayName")
         if (exitCode != 0) {
             return InitResult.CopyFailed(output.take(80))
         }
@@ -100,8 +100,8 @@ object ScreenShareManager {
 
     private fun startScreenShareInternal(): Boolean {
         if (!(initialized && Auxiliary.isShellActivated)) return false
-        if (scrcpyRunning) return true
-        scrcpyJob = scope.launch {
+        if (relayRunning) return true
+        relayJob = scope.launch {
             val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
             val enableControl = ConfigManager.getDataOnce(appContext, "screenShare_control", true)
                 .let { "control=$it" }
@@ -163,7 +163,7 @@ object ScreenShareManager {
             // 入口类用中性的 Relay：ps/pgrep 的进程 cmdline 中只出现
             // fake.screenshot.core.Relay，内部实现包名不暴露
             val base =
-                "CLASSPATH=/data/local/tmp/$scrcpyName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/$relayName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
                 base,
                 enableControl,
@@ -213,8 +213,8 @@ object ScreenShareManager {
             val serverCmd = args.joinToString(" ")
             // 标记/脚本文件名带随机后缀且以 . 开头（ls 默认不可见），
             // 不含任何工具特征字样
-            val stopFlag = "/data/local/tmp/.s_$scrcpyName"
-            val watchPath = "/data/local/tmp/.w_$scrcpyName.sh"
+            val stopFlag = "/data/local/tmp/.s_$relayName"
+            val watchPath = "/data/local/tmp/.w_$relayName.sh"
             val script = listOf(
                 "STOP=$stopFlag",
                 "rm -f \"\$STOP\"",
@@ -235,14 +235,14 @@ object ScreenShareManager {
 
             // 阻塞运行守护循环：用户停止或连续快速退出时返回
             Auxiliary.exec("sh $watchPath")
-            if (scrcpyRunning) {
+            if (relayRunning) {
                 lastError = "server_exited_repeatedly"
             }
-            scrcpyRunning = false
+            relayRunning = false
             initialized = false
             notifyStateChanged()
         }
-        scrcpyRunning = true
+        relayRunning = true
         return true
     }
 
@@ -250,7 +250,7 @@ object ScreenShareManager {
      * 磁贴/页面统一入口：异步初始化并启动/停止共享。
      * 可安全地在主线程调用；失败原因写入 [lastError] 并刷新磁贴副标题。
      *
-     * 停止判定不能只依赖 [scrcpyRunning]：发送端 app 退到后台被系统冻结/杀死后
+     * 停止判定不能只依赖 [relayRunning]：发送端 app 退到后台被系统冻结/杀死后
      * 进程重启，标志位归零，但 scrcpy server 与守护循环是独立 shell 进程仍在运行。
      * 此时第一次点击会走"启动"分支（表现为重新拉起共享、磁贴无反应），
      * 第二次才真正停止。因此标志位为 false 时先用 pgrep 探测实际进程状态。
@@ -259,7 +259,7 @@ object ScreenShareManager {
         appContext = context.applicationContext
         Auxiliary.refreshShellState()
         scope.launch {
-            if (scrcpyRunning || isServerActuallyRunning()) {
+            if (relayRunning || isServerActuallyRunning()) {
                 stopScreenShare()
                 notifyStateChanged()
                 return@launch
@@ -286,10 +286,10 @@ object ScreenShareManager {
 
     fun stopScreenShare() {
         // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
-        scrcpyRunning = false
-        if (::scrcpyName.isInitialized) {
-            val stopFlag = "/data/local/tmp/.s_$scrcpyName"
-            val watchPath = "/data/local/tmp/.w_$scrcpyName.sh"
+        relayRunning = false
+        if (::relayName.isInitialized) {
+            val stopFlag = "/data/local/tmp/.s_$relayName"
+            val watchPath = "/data/local/tmp/.w_$relayName.sh"
             // 1) 写停止标记：守护循环醒来后退出，不再重启 server
             Auxiliary.exec("touch $stopFlag")
             // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
@@ -309,8 +309,8 @@ object ScreenShareManager {
                         "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
             )
         }
-        if (::scrcpyJob.isInitialized) {
-            scrcpyJob.cancel()
+        if (::relayJob.isInitialized) {
+            relayJob.cancel()
         }
         sshSession?.disconnect()
         sshSession = null

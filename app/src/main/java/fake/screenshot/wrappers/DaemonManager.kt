@@ -333,11 +333,11 @@ object DaemonManager {
             listOf(enabled, address, port, name, password).joinToString("\u001F")
         }
         val otherOptions = suspend {
-            val scrcpyPath =
+            val relayPath =
                 "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
             val autoEncrypt =
                 "${ConfigManager.getDataOnce(appContext, "encrypt_outputs", false)}"
-            listOf(scrcpyPath, autoEncrypt).joinToString("\u001F")
+            listOf(relayPath, autoEncrypt).joinToString("\u001F")
         }
         val command =
             "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"

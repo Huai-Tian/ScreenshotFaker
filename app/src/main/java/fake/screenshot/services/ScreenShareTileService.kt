@@ -25,7 +25,7 @@ class ScreenShareTileService : TileService() {
         val tile = qsTile ?: return
 
         when {
-            ScreenShareManager.scrcpyRunning -> {
+            ScreenShareManager.relayRunning -> {
                 tile.state = Tile.STATE_ACTIVE
                 tile.label = getString(R.string.screencasting)
                 tile.subtitle = null
