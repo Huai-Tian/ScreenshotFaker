@@ -138,13 +138,16 @@ object ScreenShareManager {
                 .let { if (it > 0) "video_bit_rate=$it" else "" }
             val enableAudio =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio", true).let { "audio=$it" }
-            // 音频捕获默认使用 ROUTE_FLAG_LOOP_BACK：音频被重定向到捕获流，
-            // 发送端设备本身静音。audio_dup=true 改用 ROUTE_FLAG_LOOP_BACK_RENDER，
-            // 设备继续外放的同时捕获（发送端不静音）
+            // 音频源必须用 playback（AudioPolicy 播放捕获）而非 output（REMOTE_SUBMIX）：
+            // - output：音频被路由进 submix，发送端设备静音；且注册 submix 时系统
+            //   重配音频路由，部分设备（OPPO 等）会把媒体音量重置为固定值；
+            //   audio_dup 参数对该模式完全不生效
+            // - playback + audio_dup=true：ROUTE_FLAG_LOOP_BACK_RENDER，设备继续
+            //   外放的同时复制一份音频流到捕获，音量不受影响（双端都有声音）
             val audioDup = "audio_dup=true"
             val audioOutput =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio_output", true)
-                    .let { if (it) "audio_source=output" else "" }
+                    .let { if (it) "audio_source=playback" else "" }
             val audioMic = ConfigManager.getDataOnce(appContext, "screenShare_audio_mic", false)
                 .let { if (it) "audio_source=mic" else "" }
             val tcpLocalOnly =
