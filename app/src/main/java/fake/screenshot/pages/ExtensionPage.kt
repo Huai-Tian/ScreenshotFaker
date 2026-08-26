@@ -8,9 +8,11 @@ import android.net.Uri
 import java.math.BigDecimal
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -201,12 +203,38 @@ fun ExtensionCompose() {
     var isMuted by remember { mutableStateOf(DisplayOverlayService.isMuted()) }
     var overlayAlpha by remember { mutableFloatStateOf(DisplayOverlayService.getDisplayAlpha()) }
     val mediaPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
+        contract = ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
         if (uris.isNotEmpty()) {
             OverlayServiceManager.setMediaList(uris)
             if (isDisplayRunning) {
                 DisplayOverlayService.reloadMediaList()
+            }
+        }
+    }
+    // 记录当前是哪个对话框在选取文件夹，回填对应的保存路径输入框
+    var folderPickerTarget by remember { mutableStateOf("") }
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            // 将 SAF tree Uri 还原为真实文件路径（仅支持主外部存储），shell 命令需要真实路径
+            val docId = DocumentsContract.getTreeDocumentId(uri)
+            val path = when {
+                docId == "primary" -> Environment.getExternalStorageDirectory().path
+                docId.startsWith("primary:") ->
+                    Environment.getExternalStorageDirectory().path + "/" + docId.removePrefix("primary:")
+
+                else -> null
+            }
+            if (path != null) {
+                when (folderPickerTarget) {
+                    "screenshot" -> screenshotConfigDialogSavaPathInputText = path.removeSuffix("/")
+                    "screenRecord" -> screenRecordConfigDialogSavePathInputText =
+                        path.removeSuffix("/")
+                }
+            } else {
+                Toast.makeText(context, R.string.failed, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -704,7 +732,15 @@ fun ExtensionCompose() {
                             onValueChange = { screenshotConfigDialogSavaPathInputText = it }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenshot_save_path)) },
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
+                            singleLine = true,
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    folderPickerTarget = "screenshot"
+                                    folderPickerLauncher.launch(null)
+                                }) {
+                                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                                }
+                            }
                         )
                         if (!screenshotConfigDialogFullRandomInputText) {
                             if (screenshotConfigDialogCustomPrefixInputText) {
@@ -851,7 +887,15 @@ fun ExtensionCompose() {
                             }, // 可编辑
                             label = { Text(stringResource(R.string.stealth_screenRecord_save_path)) },
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
+                            singleLine = true,
+                            trailingIcon = {
+                                IconButton(onClick = {
+                                    folderPickerTarget = "screenRecord"
+                                    folderPickerLauncher.launch(null)
+                                }) {
+                                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                                }
+                            }
                         )
                         OutlinedTextField(
                             value = screenRecordConfigDialogDurationInputText,
@@ -1141,7 +1185,11 @@ fun ExtensionCompose() {
                                 )
                             },
                             onClick = {
-                                mediaPickerLauncher.launch(arrayOf("*/*"))
+                                mediaPickerLauncher.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageAndVideo
+                                    )
+                                )
                             }
                         )
                     }
