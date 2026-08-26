@@ -145,6 +145,11 @@ object ScreenShareManager {
             // - playback + audio_dup=true：ROUTE_FLAG_LOOP_BACK_RENDER，设备继续
             //   外放的同时复制一份音频流到捕获，音量不受影响（双端都有声音）
             val audioDup = "audio_dup=true"
+            // 音频编码用 raw（PCM 直传）而非 opus：实测部分接收设备的 Opus 解码器
+            // 组件启动后立即进入错误态（queueInputBuffer 抛 IllegalStateException），
+            // raw 无需解码，接收端 PCM 直接写 AudioTrack，彻底绕开解码器兼容性问题。
+            // 代价是带宽 ~1.5Mbps（48kHz 立体声 16bit），局域网/SSH 隧道均可承受。
+            val audioCodec = "audio_codec=raw"
             val audioOutput =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio_output", true)
                     .let { if (it) "audio_source=playback" else "" }
@@ -173,6 +178,7 @@ object ScreenShareManager {
                 videoBitRate,
                 enableAudio,
                 audioDup,
+                audioCodec,
                 audioOutput,
                 audioMic,
                 tcpLocalOnly,

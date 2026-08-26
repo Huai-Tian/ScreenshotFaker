@@ -98,6 +98,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         const val CODEC_VP8 = 0x00767038
         const val CODEC_VP9 = 0x00767039
         const val CODEC_OPUS = 0x6f707573
+        const val CODEC_RAW = 0x00726177
 
         const val PACKET_FLAG_SESSION = 1L shl 63
         const val PACKET_FLAG_CONFIG = 1L shl 62
@@ -502,11 +503,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         Log.i(TAG, "session ready: control bound=${channels.controlSocket != null}")
 
         // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
+        // 注意：异常必须记录——曾用 runCatching 静默吞掉，audioLoop 中途抛异常时
+        // 音频无声死亡且日志无任何痕迹，极难定位
         val audioJob = channels.audioSocket?.let {
-            scope.launch { runCatching { audioLoop(it, config.enableAudio) } }
+            scope.launch {
+                runCatching { audioLoop(it, config.enableAudio) }
+                    .onFailure { Log.e(TAG, "audioLoop terminated unexpectedly", it) }
+            }
         }
         val controlJob = channels.controlSocket?.let {
-            scope.launch { runCatching { controlLoop(it) } }
+            scope.launch {
+                runCatching { controlLoop(it) }
+                    .onFailure { Log.e(TAG, "controlLoop terminated unexpectedly", it) }
+            }
         }
         try {
             videoLoop(channels.videoSocket, videoIn, videoMime)
@@ -638,6 +647,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private var audioStatPackets = 0
     private var audioStatNonZero = 0
     private var audioStatPeak = 0
+    // 解码器产出监测：首个输出日志 + 入队无输出看门狗
+    private var audioDecoderFirstOutput = true
+    private var audioQueuedWithoutOutput = 0
+    // 解码器连续重建计数（drainAudio 产出输出时清零）
+    private var audioRebuildCount = 0
 
     private fun audioLoop(socket: Socket, play: Boolean) {
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
@@ -645,8 +659,15 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         // 诊断日志：codecId=0 表示发送端禁用了音频流（捕获失败），
         // =CODEC_OPUS 表示流正常。无声问题先看这条日志定位断点
         Log.i(TAG, "audio stream codecId=$codecId (play=$play)")
+        if (codecId == CODEC_RAW && play) {
+            // raw 流：发送端直传 PCM（48kHz 立体声 16bit），无需解码，
+            // 直接写 AudioTrack。实测部分设备 Opus 解码器组件故障
+            // （queueInputBuffer 抛 ISE），raw 彻底绕开解码器。
+            rawAudioLoop(input)
+            return
+        }
         if (codecId != CODEC_OPUS || !play) {
-            // 非 OPUS（raw/flac 等）暂不支持播放，或本端未启用音频：
+            // 非 OPUS/RAW（flac 等）暂不支持播放，或本端未启用音频：
             // 持续读取并丢弃，防止 TCP 背压阻塞发送端
             discardLoop(input)
             return
@@ -657,11 +678,16 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val bufferInfo = MediaCodec.BufferInfo()
         var codec: MediaCodec? = null
         var track: AudioTrack? = null
+        // config 包缓存：解码器中途崩溃（IllegalStateException 等）时，
+        // 发送端不会重发 config，必须用缓存重建解码器，否则音频永久中断
+        var configBytes: ByteArray? = null
         // 诊断：音频帧接收统计（区分"帧根本没到"与"到了但解码后静音"）
         var firstFrame = true
         var framesReceived = 0
         var bytesReceived = 0L
         var lastFrameLog = System.currentTimeMillis()
+        // 自愈退避：连续重建次数（成功产出输出后清零）
+
         try {
             while (running.get()) {
                 input.readFully(header)
@@ -692,33 +718,75 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                     // config 包为 OpusHead：magic(8) version(1) channels(1) preskip(2)…
                     // 诊断日志：收到 config 说明音频数据在正常到达（无声时定位是解码还是传输问题）
                     Log.i(TAG, "audio config received: ${size} bytes, channels=${packetBuffer[9].toInt() and 0xFF}")
+                    configBytes = packetBuffer.copyOf(size)
+                    audioRebuildCount = 0
                     runCatching { codec?.stop() }
                     runCatching { codec?.release() }
                     runCatching { track?.release() }
-                    val channels = packetBuffer[9].toInt() and 0xFF
-                    val format = MediaFormat.createAudioFormat(
-                        MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, channels
-                    )
-                    format.setByteBuffer(
-                        // MediaFormat.KEY_CSD_0 已从新 SDK 中移除，值为 "csd-0"
-                        "csd-0", ByteBufferWrap(packetBuffer, size)
-                    )
-                    codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
-                        configure(format, null, null, 0)
-                        start()
+                    val created = createOpusDecoder(configBytes!!)
+                    codec = created?.first
+                    track = created?.second?.also { it.play() }
+                    if (codec == null || track == null) {
+                        Log.e(TAG, "audio decoder creation failed, audio disabled")
+                        discardLoop(input)
+                        return
                     }
-                    track = buildAudioTrack(channels).also { it.play() }
+                    // 诊断：播放端点状态（playState=3 表示 PLAYING，异常值=未进入播放态）
+                    Log.i(TAG, "audio track started: playState=${track?.playState}")
+                    // 解码器重建：重置产出监测
+                    audioDecoderFirstOutput = true
+                    audioQueuedWithoutOutput = 0
                 } else {
-                    val c = codec ?: continue
-                    val t = track ?: continue
                     val pts = ptsAndFlags and PTS_MASK
-                    val index = c.dequeueInputBuffer(10_000)
-                    if (index >= 0) {
-                        val inputBuffer = c.getInputBuffer(index)!!
-                        inputBuffer.clear()
-                        inputBuffer.put(packetBuffer, 0, size)
-                        c.queueInputBuffer(index, 0, size, pts, 0)
+                    try {
+                        val c = codec ?: continue
+                        val t = track ?: continue
+                        val index = c.dequeueInputBuffer(10_000)
+                        if (index >= 0) {
+                            val inputBuffer = c.getInputBuffer(index) ?: continue
+                            inputBuffer.clear()
+                            inputBuffer.put(packetBuffer, 0, size)
+                            c.queueInputBuffer(index, 0, size, pts, 0)
+                            audioQueuedWithoutOutput++
+                        }
+                        // 无论是否成功入队都排水：输入满时输出也需及时取走
                         drainAudio(c, t, bufferInfo)
+                        if (audioQueuedWithoutOutput >= 100) {
+                            // 看门狗：解码器连续 100 包（约 2 秒）无任何输出，
+                            // 正常 Opus 解码器缓冲只有 1-2 包，此日志=解码器故障
+                            Log.w(TAG, "audio decoder produced no output for $audioQueuedWithoutOutput queued packets")
+                            audioQueuedWithoutOutput = 0
+                        }
+                    } catch (e: IllegalStateException) {
+                        // 自愈：实测部分设备 createDecoderByType 选中的解码器组件
+                        // 启动后立即进入错误态，所有调用抛无消息 ISE。丢弃当前包，
+                        // 用缓存 config 重建（优先 Google 软件解码器）后继续解码
+                        audioRebuildCount++
+                        Log.e(TAG, "audio decoder error (rebuild #$audioRebuildCount): ${e.message}", e)
+                        if (audioRebuildCount > 50) {
+                            Log.e(TAG, "audio decoder rebuild limit exceeded, giving up audio")
+                            track?.let { t -> runCatching { t.release() } }
+                            codec?.let { c -> runCatching { c.release() } }
+                            discardLoop(input)
+                            return
+                        }
+                        runCatching { codec?.stop() }
+                        runCatching { codec?.release() }
+                        runCatching { track?.release() }
+                        codec = null
+                        track = null
+                        val cb = configBytes
+                        if (cb != null) {
+                            val created = createOpusDecoder(cb)
+                            codec = created?.first
+                            track = created?.second?.also { it.play() }
+                            if (codec != null && track != null) {
+                                audioDecoderFirstOutput = true
+                                audioQueuedWithoutOutput = 0
+                            } else {
+                                Log.e(TAG, "audio decoder rebuild failed")
+                            }
+                        }
                     }
                 }
             }
@@ -727,6 +795,99 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             runCatching { codec?.release() }
             runCatching { track?.release() }
         }
+    }
+
+    /**
+     * raw 音频流处理：发送端直传 PCM（48kHz 立体声 16bit，包格式与其他流一致：
+     * 12 字节 header + 载荷），无需解码，直接写 AudioTrack。
+     */
+    private fun rawAudioLoop(input: DataInputStream) {
+        val header = ByteArray(12)
+        var packetBuffer = ByteArray(16 * 1024)
+        var track: AudioTrack? = null
+        // 与 OPUS 路径一致的静音监测统计
+        var statPackets = 0
+        var statNonZero = 0
+        var statPeak = 0
+        try {
+            while (running.get()) {
+                input.readFully(header)
+                val ptsAndFlags = readLongBE(header, 0)
+                if (ptsAndFlags and PACKET_FLAG_SESSION != 0L) continue
+                val isConfig = ptsAndFlags and PACKET_FLAG_CONFIG != 0L
+                val size = readIntBE(header, 8)
+                if (packetBuffer.size < size) packetBuffer = ByteArray(size)
+                input.readFully(packetBuffer, 0, size)
+                if (isConfig) continue
+
+                if (track == null) {
+                    // raw 流无 config 包，采样格式由协议固定（48kHz 立体声 16bit）
+                    track = buildAudioTrack(2).also { it.play() }
+                    Log.i(TAG, "raw audio track started: playState=${track.playState}")
+                }
+                // 静音监测（每 50 包输出一次）
+                statPackets++
+                for (i in 0 until size step 2) {
+                    val sample = packetBuffer[i + 1].toInt() and 0xFF shl 8 or (packetBuffer[i].toInt() and 0xFF)
+                    if (sample != 0) {
+                        statNonZero++
+                        val abs = if (sample > 32767) 65536 - sample else sample
+                        if (abs > statPeak) statPeak = abs
+                        break
+                    }
+                }
+                if (statPackets >= 50) {
+                    Log.i(
+                        TAG, "raw audio stats: $statNonZero/$statPackets packets non-zero, " +
+                                "peak=$statPeak, head=${track.playbackHeadPosition}"
+                    )
+                    statPackets = 0
+                    statNonZero = 0
+                    statPeak = 0
+                }
+                val buffer = ByteBuffer.wrap(packetBuffer, 0, size)
+                val written = track.write(buffer, size, AudioTrack.WRITE_BLOCKING)
+                if (written < 0) {
+                    Log.e(TAG, "AudioTrack.write returned $written")
+                }
+            }
+        } finally {
+            runCatching { track?.release() }
+        }
+    }
+
+    /**
+     * 创建 Opus 解码器 + AudioTrack。
+     *
+     * 优先使用 Google 软件解码器 "c2.android.opus.decoder"：实测部分设备的
+     * 默认解码器（createDecoderByType 按优先级选中厂商组件）启动后立即进入
+     * 错误态，queueInputBuffer/dequeueInputBuffer 全部抛无消息 IllegalStateException，
+     * 且无任何输出。软件解码器存在于所有 Android 8+ 设备，无厂商魔改，最稳。
+     * [configBytes] 为缓存的 OpusHead（发送端 config 包，19 字节）。
+     */
+    private fun createOpusDecoder(configBytes: ByteArray): Pair<MediaCodec, AudioTrack>? {
+        val channels = configBytes[9].toInt() and 0xFF
+        val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, channels)
+        format.setByteBuffer("csd-0", ByteBuffer.wrap(configBytes))
+
+        // 候选依次尝试：软件解码器 → 系统默认选择
+        val codecs = mutableListOf<MediaCodec>()
+        runCatching { codecs.add(MediaCodec.createByCodecName("c2.android.opus.decoder")) }
+        runCatching { codecs.add(MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)) }
+
+        for (c in codecs) {
+            val ok = runCatching {
+                c.configure(format, null, null, 0)
+                c.start()
+            }.isSuccess
+            if (ok) {
+                Log.i(TAG, "audio decoder created: ${c.name}")
+                return c to buildAudioTrack(channels)
+            }
+            runCatching { c.release() }
+            Log.w(TAG, "audio decoder ${c.name} failed to configure/start")
+        }
+        return null
     }
 
     private fun buildAudioTrack(channels: Int): AudioTrack {
@@ -755,8 +916,16 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         while (true) {
             val index = codec.dequeueOutputBuffer(info, 0)
             if (index >= 0) {
-                val outputBuffer = codec.getOutputBuffer(index)!!
-                // 诊断：解码后 PCM 峰值监测（每 200 包统计一次），
+                val outputBuffer = codec.getOutputBuffer(index) ?: break
+                // 诊断：解码器首个输出（首帧后 ~100ms 内必现，缺失=解码器故障）
+                if (audioDecoderFirstOutput) {
+                    audioDecoderFirstOutput = false
+                    Log.i(TAG, "audio decoder first output: ${info.size} bytes")
+                }
+                audioQueuedWithoutOutput = 0
+                // 解码器正常产出：连续重建计数清零
+                audioRebuildCount = 0
+                // 诊断：解码后 PCM 峰值监测（每 50 包统计一次），
                 // 发送端有声音但这里 peak=0 说明传输/解码环节出了静音问题
                 audioStatPackets++
                 for (i in 0 until info.size step 2) {
@@ -769,16 +938,25 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                     }
                 }
                 if (audioStatPackets >= 50) {
+                    // head=AudioTrack 播放头位置（帧数）：PCM 正常且 head 持续增长
+                    // 说明数据确实在渲染，此时无声只能是设备输出侧（音量/静音/路由）
                     Log.i(
                         TAG, "audio decode stats: $audioStatNonZero/$audioStatPackets " +
-                                "packets non-zero, peak=$audioStatPeak"
+                                "packets non-zero, peak=$audioStatPeak, head=${track.playbackHeadPosition}"
                     )
                     audioStatPackets = 0
                     audioStatNonZero = 0
                     audioStatPeak = 0
                 }
-                track.write(outputBuffer, info.size, AudioTrack.WRITE_BLOCKING)
+                val written = track.write(outputBuffer, info.size, AudioTrack.WRITE_BLOCKING)
+                if (written < 0) {
+                    // 负值=写入失败（如 ERROR_INVALID_OPERATION），此时无声
+                    Log.e(TAG, "AudioTrack.write returned $written")
+                }
                 codec.releaseOutputBuffer(index, false)
+            } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                // 诊断：解码器实际输出格式（核对采样率/声道/编码是否为 48k/2/PCM16）
+                Log.i(TAG, "audio decoder output format: ${codec.outputFormat}")
             } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 break
             }

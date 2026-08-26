@@ -90,6 +90,9 @@ public final class Server {
         // server 二进制——检查 app/build.gradle.kts 的 injectScrcpyAsLib
         // 构建接线（必须直接依赖 :scrcpy:packageRelease，不可用嵌套 gradlew）
         Ln.i("Server build: relay-diag-v4");
+        // 诊断：音频实际生效的配置（确认 audio_codec=raw 是否传到了 server）
+        Ln.i("Audio config: enabled=" + options.getAudio() + ", codec=" + options.getAudioCodec().getName()
+                + ", source=" + options.getAudioSource() + ", dup=" + options.getAudioDup());
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
