@@ -89,7 +89,7 @@ public final class Server {
         // 若日志中出现的不是本字符串（或完全没有），说明 APK 打包了过期的
         // server 二进制——检查 app/build.gradle.kts 的 injectScrcpyAsLib
         // 构建接线（必须直接依赖 :scrcpy:packageRelease，不可用嵌套 gradlew）
-        Ln.i("Server build: serial-proxy-v2");
+        Ln.i("Server build: relay-diag-v3");
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
@@ -131,6 +131,10 @@ public final class Server {
                     // 在 accept 线程内串行处理则天然保序，且无需任何锁，不存在死锁可能
                     // （此前按序放行的"顺序门"方案在认证失败分支不推进计数器，
                     // 会让后续所有连接永久阻塞，表现为完全连不上）
+                    // 连接序号（供转发日志区分通道：第 1/2/3 条连接对应
+                    // video/audio/control，会话循环下每个会话重新从 1 计数会
+                    // 与上一会话的残余连接混淆，因此用全局递增序号）
+                    int connSeq = 0;
                     while (!Thread.currentThread().isInterrupted()) {
                         Socket clientSocket = serverSocket.accept();
                         LocalSocket localSocket = null;
@@ -154,7 +158,8 @@ public final class Server {
                         }
                         final Socket relayClient = clientSocket;
                         final LocalSocket relayLocal = localSocket;
-                        Thread connThread = new Thread(() -> relayConnection(relayClient, relayLocal));
+                        final int seq = ++connSeq;
+                        Thread connThread = new Thread(() -> relayConnection(relayClient, relayLocal, seq));
                         connThread.setName("tcp_proxy_conn");
                         connThread.setDaemon(true);
                         connThread.start();
@@ -369,11 +374,21 @@ public final class Server {
         return serverSocket;
     }
 
-    private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket) {
+    private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket, int seq, String direction) {
         byte[] buffer = new byte[64 * 1024];
+        // 诊断日志：每个方向的首包（控制失效排查）。
+        // "up" = client→server（控制消息方向），"down" = server→client（音视频方向）。
+        // 若 up 首包出现而 Controller 无 "First control message received"，
+        // 说明数据卡在 abstract socket 段；若 up 首包不出现，
+        // 说明控制消息根本没从接收端发出（接收端 APK 旧或未触发发送）
+        boolean first = true;
         try {
             int len;
             while ((len = in.read(buffer)) != -1) {
+                if (first) {
+                    first = false;
+                    Ln.d("Proxy relay #" + seq + " " + direction + ": first " + len + " bytes");
+                }
                 out.write(buffer, 0, len);
                 out.flush();
             }
@@ -419,15 +434,15 @@ public final class Server {
     }
 
     /** 双向转发一条已配对完成的连接（认证与 abstract 连接已由 accept 线程完成） */
-    private static void relayConnection(Socket clientSocket, LocalSocket localSocket) {
+    private static void relayConnection(Socket clientSocket, LocalSocket localSocket, int seq) {
         try {
             InputStream clientIn = clientSocket.getInputStream();
             OutputStream clientOut = clientSocket.getOutputStream();
             InputStream localIn = localSocket.getInputStream();
             OutputStream localOut = localSocket.getOutputStream();
 
-            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket));
-            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket));
+            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket, seq, "up"));
+            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket, seq, "down"));
             toLocal.setName("tcp_proxy_up");
             toClient.setName("tcp_proxy_down");
             toLocal.setDaemon(true);

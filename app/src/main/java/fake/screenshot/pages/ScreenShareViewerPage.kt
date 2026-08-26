@@ -124,7 +124,7 @@ fun ScreenShareViewerCompose(configId: Int) {
                 injectError?.let { err ->
                     Toast.makeText(
                         context,
-                        "inject_failed: $err",
+                        "receiver_inject_failed $err",
                         Toast.LENGTH_LONG
                     ).show()
                     r.injectError.value = null
@@ -284,7 +284,13 @@ private fun TouchInputLayer(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(videoWidth, videoHeight) {
-                val vw = videoWidth ?: return@pointerInput
+                // 诊断：videoSize 未收到时触摸层不工作（session meta 包异常时定位）
+                val vw = videoWidth ?: run {
+                    android.util.Log.w(
+                        "ScreenShareViewer", "touch layer inactive: videoSize not received"
+                    )
+                    return@pointerInput
+                }
                 val vh = videoHeight ?: return@pointerInput
                 fun mapX(x: Float) = (x / size.width * vw).toInt().coerceIn(0, vw - 1)
                 fun mapY(y: Float) = (y / size.height * vh).toInt().coerceIn(0, vh - 1)
@@ -366,7 +372,13 @@ private fun ScrollInputLayer(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(videoWidth, videoHeight) {
-                val vw = videoWidth ?: return@pointerInput
+                // 诊断：videoSize 未收到时触摸层不工作（session meta 包异常时定位）
+                val vw = videoWidth ?: run {
+                    android.util.Log.w(
+                        "ScreenShareViewer", "touch layer inactive: videoSize not received"
+                    )
+                    return@pointerInput
+                }
                 val vh = videoHeight ?: return@pointerInput
                 // 拖动像素 → 滚动单位的换算系数（约 40px = 1 次滚轮）
                 val SCROLL_PIXEL_UNIT = 40f

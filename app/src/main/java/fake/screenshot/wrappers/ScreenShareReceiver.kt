@@ -204,6 +204,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
     }
 
+    /**
+     * 诊断辅助：controlOut 为 null 时记录一次警告（复用 firstSendLogged 防刷屏），
+     * 而不是静默返回。用于区分"UI 未触发发送"与"控制通道未绑定"两种失效
+     */
+    private fun requireControlOut(what: String): java.io.OutputStream? {
+        val out = controlOut
+        if (out == null && !firstSendLogged) {
+            firstSendLogged = true
+            Log.w(TAG, "control send skipped ($what): controlOut is null — channel not negotiated or session closed")
+        }
+        return out
+    }
+
     /** viewer 提供的渲染 Surface（null 表示暂无可渲染目标） */
     @Volatile
     private var surface: Surface? = null
@@ -460,6 +473,8 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         channels.controlSocket?.let { controlOut = it.getOutputStream() }
         controlAvailable.value = channels.controlSocket != null
         firstSendLogged = false
+        // 诊断日志：控制通道绑定时刻（后续 sendXXX 失效时对照此日志判断）
+        Log.i(TAG, "session ready: control bound=${channels.controlSocket != null}")
 
         // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
         val audioJob = channels.audioSocket?.let {
@@ -774,7 +789,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         screenHeight: Int,
         pressure: Float
     ) {
-        val out = controlOut ?: return
+        val out = requireControlOut("touch") ?: return
         val buffer = java.io.DataOutputStream(out)
         logFirstSend("touch action=$action")
         synchronized(controlLock) {
@@ -804,7 +819,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * + hScroll(2) + vScroll(2) + buttons(4)
      */
     fun sendScroll(x: Int, y: Int, screenWidth: Int, screenHeight: Int, hScroll: Float, vScroll: Float) {
-        val out = controlOut ?: return
+        val out = requireControlOut("scroll") ?: return
         val buffer = java.io.DataOutputStream(out)
         logFirstSend("scroll")
         synchronized(controlLock) {
@@ -830,7 +845,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * type(1) + action(1) + keycode(4) + repeat(4) + metaState(4)
      */
     fun sendKeycode(action: Int, keycode: Int, repeat: Int = 0, metaState: Int = 0) {
-        val out = controlOut ?: return
+        val out = requireControlOut("keycode") ?: return
         val buffer = java.io.DataOutputStream(out)
         logFirstSend("keycode=$keycode action=$action")
         synchronized(controlLock) {
@@ -855,7 +870,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
 
     /** 无载荷控制消息（展开通知栏、收起面板、旋转设备等） */
     fun sendEmptyEvent(type: Int) {
-        val out = controlOut ?: return
+        val out = requireControlOut("emptyEvent") ?: return
         logFirstSend("emptyEvent type=$type")
         synchronized(controlLock) {
             try {
@@ -872,7 +887,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 超过 [INJECT_TEXT_MAX_LENGTH] 时自动分段发送。
      */
     fun sendText(text: String) {
-        val out = controlOut ?: return
+        val out = requireControlOut("text") ?: return
         val bytes = text.toByteArray(Charsets.UTF_8)
         if (bytes.isEmpty()) return
         synchronized(controlLock) {
@@ -903,7 +918,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * sequence 传 0（无效）则发送端不会回 ack；[paste] 为 true 时发送端立即触发粘贴。
      */
     fun sendSetClipboard(text: String, paste: Boolean) {
-        val out = controlOut ?: return
+        val out = requireControlOut("setClipboard") ?: return
         val bytes = text.toByteArray(Charsets.UTF_8)
         synchronized(controlLock) {
             try {
@@ -925,7 +940,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 内容通过 DeviceMessage(type 0) 异步返回，见 [clipboardContent]。
      */
     fun sendGetClipboard() {
-        val out = controlOut ?: return
+        val out = requireControlOut("getClipboard") ?: return
         synchronized(controlLock) {
             try {
                 out.write(TYPE_GET_CLIPBOARD)
