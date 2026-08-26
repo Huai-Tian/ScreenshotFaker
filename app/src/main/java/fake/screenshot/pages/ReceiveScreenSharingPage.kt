@@ -44,6 +44,7 @@ import fake.screenshot.wrappers.ScreenShareReceiverManager
 import fake.screenshot.styles.CommonCard
 import fake.screenshot.styles.PreferenceItem
 import fake.screenshot.styles.PreferenceItemEx
+import fake.screenshot.styles.CenteredAlertDialog
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -224,7 +225,7 @@ private fun ReceiverConfigDialog(
     val passwordValid = passwordInput.let { it.isEmpty() || it.isNotBlank() }
     val sshPasswordValid = !useSsh || sshPasswordInput.isNotBlank()
 
-    AlertDialog(
+    CenteredAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
