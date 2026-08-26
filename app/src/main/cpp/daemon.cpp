@@ -449,7 +449,7 @@ int main(int argc, char *argv[]) {
             reply_plain.append("ssh_options:\n" + processSshDisplay(ssh) + "\n");
             reply_plain.append("other_options:\n");
             reply_plain.append(processOtherOptions("auto_encrypt= ", encrypt));
-            reply_plain.append(processOtherOptions("scrcpy_state= ", scrcpy_ready));
+            reply_plain.append(processOtherOptions("relay_state= ", scrcpy_ready));
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());

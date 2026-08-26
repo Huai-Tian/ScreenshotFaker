@@ -1,29 +1,13 @@
 package fake.screenshot.scrcpy.util;
 
-import android.util.Log;
-
-import java.io.FileDescriptor;
-import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
 
 /**
- * Log both to Android logger (so that logs are visible in "adb logcat") and standard output/error (so that they are visible in the terminal
- * directly).
+ * 日志门面：所有输出均已移除（隐藏性要求，任何日志都不落 logcat/stdout）。
+ * 方法签名保留，避免大量调用点改动；空方法体在编译优化后不产生任何开销。
  */
 public final class Ln {
-
-    private static final String TAG = "scrcpy";
-    private static final String PREFIX = "[server] ";
-
-    private static final PrintStream CONSOLE_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out));
-    private static final PrintStream CONSOLE_ERR = new PrintStream(new FileOutputStream(FileDescriptor.err));
-
-    public enum Level {
-        VERBOSE, DEBUG, INFO, WARN, ERROR
-    }
-
-    private static Level threshold = Level.INFO;
 
     private Ln() {
         // not instantiable
@@ -43,64 +27,43 @@ public final class Ln {
      * @param level the log level
      */
     public static void initLogLevel(Level level) {
-        threshold = level;
+        // no-op
     }
 
     public static boolean isEnabled(Level level) {
-        return level.ordinal() >= threshold.ordinal();
+        return false;
     }
 
     public static void v(String message) {
-        if (isEnabled(Level.VERBOSE)) {
-            Log.v(TAG, message);
-            CONSOLE_OUT.print(PREFIX + "VERBOSE: " + message + '\n');
-        }
+        // no-op
     }
 
     public static void d(String message) {
-        if (isEnabled(Level.DEBUG)) {
-            Log.d(TAG, message);
-            CONSOLE_OUT.print(PREFIX + "DEBUG: " + message + '\n');
-        }
+        // no-op
     }
 
     public static void i(String message) {
-        if (isEnabled(Level.INFO)) {
-            Log.i(TAG, message);
-            CONSOLE_OUT.print(PREFIX + "INFO: " + message + '\n');
-        }
+        // no-op
     }
 
     public static void w(String message, Throwable throwable) {
-        if (isEnabled(Level.WARN)) {
-            Log.w(TAG, message, throwable);
-            synchronized (CONSOLE_ERR) {
-                CONSOLE_ERR.print(PREFIX + "WARN: " + message + '\n');
-                if (throwable != null) {
-                    throwable.printStackTrace(CONSOLE_ERR);
-                }
-            }
-        }
+        // no-op
     }
 
     public static void w(String message) {
-        w(message, null);
+        // no-op
     }
 
     public static void e(String message, Throwable throwable) {
-        if (isEnabled(Level.ERROR)) {
-            Log.e(TAG, message, throwable);
-            synchronized (CONSOLE_ERR) {
-                CONSOLE_ERR.print(PREFIX + "ERROR: " + message + '\n');
-                if (throwable != null) {
-                    throwable.printStackTrace(CONSOLE_ERR);
-                }
-            }
-        }
+        // no-op
     }
 
     public static void e(String message) {
-        e(message, null);
+        // no-op
+    }
+
+    public enum Level {
+        VERBOSE, DEBUG, INFO, WARN, ERROR
     }
 
     static class NullOutputStream extends OutputStream {

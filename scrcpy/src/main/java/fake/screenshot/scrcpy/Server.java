@@ -84,15 +84,10 @@ public final class Server {
         // not instantiable
     }
 
-    private static void scrcpy(Options options) throws IOException, ConfigurationException {
-        // 构建标记：logcat 中据此确认设备上运行的 server 是否为最新版本。
-        // 若日志中出现的不是本字符串（或完全没有），说明 APK 打包了过期的
-        // server 二进制——检查 app/build.gradle.kts 的 injectScrcpyAsLib
-        // 构建接线（必须直接依赖 :scrcpy:packageRelease，不可用嵌套 gradlew）
-        Ln.i("Server build: relay-diag-v4");
-        // 诊断：音频实际生效的配置（确认 audio_codec=raw 是否传到了 server）
-        Ln.i("Audio config: enabled=" + options.getAudio() + ", codec=" + options.getAudioCodec().getName()
-                + ", source=" + options.getAudioSource() + ", dup=" + options.getAudioDup());
+    private static void runSession(Options options) throws IOException, ConfigurationException {
+        // 构建标记：Ln 已 no-op，此字符串仅存在于 dex string pool 中，
+        // 供 app/build.gradle.kts 构建期校验二进制新鲜度（防打包过期 server）
+        Ln.d("Server build: relay-v4");
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");
@@ -126,7 +121,7 @@ public final class Server {
             Thread proxyThread = new Thread(() -> {
                 String socketName = DesktopConnection.getSocketName(scid);
                 try (ServerSocket serverSocket = createServerSocket(tcpPort, tcpLocalOnly)) {
-                    Ln.i("TCP proxy listening on port " + tcpPort + ", forwarding to " + socketName);
+                    Ln.d("TCP proxy listening on port " + tcpPort);
                     // 认证与 abstract socket 连接必须在 accept 线程内按序完成：
                     // server 端按 video → audio → control 顺序 accept abstract 连接，
                     // 若在各转发线程内并发连接，连接到达顺序可能与客户端连接顺序不一致，
@@ -163,7 +158,7 @@ public final class Server {
                         final LocalSocket relayLocal = localSocket;
                         final int seq = ++connSeq;
                         Thread connThread = new Thread(() -> relayConnection(relayClient, relayLocal, seq));
-                        connThread.setName("tcp_proxy_conn");
+                        connThread.setName("net" + seq);
                         connThread.setDaemon(true);
                         connThread.start();
                     }
@@ -173,7 +168,7 @@ public final class Server {
                     }
                 }
             });
-            proxyThread.setName("proxy_thread");
+            proxyThread.setName("worker");
             proxyThread.setPriority(Thread.MAX_PRIORITY);
             proxyThread.setDaemon(true);
             proxyThread.start();
@@ -185,7 +180,7 @@ public final class Server {
         // 或发生致命错误。这消除了"接收端重进时 server 正在重启"的连接拒绝窗口。
         final CleanUp sessionCleanUp = cleanUp;
         final Options sessionOptions = options;
-        Thread sessionThread = new Thread(() -> sessionLoop(sessionOptions, sessionCleanUp), "session");
+        Thread sessionThread = new Thread(() -> sessionLoop(sessionOptions, sessionCleanUp), "main2");
         sessionThread.start();
 
         Looper.loop(); // 常驻；仅在致命错误（sessionLoop 调用 quitSafely）时返回
@@ -211,11 +206,11 @@ public final class Server {
             try {
                 DesktopConnection connection = DesktopConnection.open(scid, tunnelForward, video, audio, control, sendDummyByte);
                 runSession(options, cleanUp, connection);
-                Ln.i("Session ended, waiting for next client");
+                Ln.d("Session ended, waiting for next client");
             } catch (IOException | RuntimeException e) {
                 // 接收端在协商中途断开、abstract socket 未及时释放等：
                 // 视为一次失败的会话，继续等待下一个接收端
-                Ln.i("Session failed, waiting for next client: " + e.getMessage());
+                Ln.d("Session failed, waiting for next client: " + e.getMessage());
             }
 
             // 保险阀：会话持续超 3s 视为正常（含阻塞等待客户端连接的时间），
@@ -256,7 +251,7 @@ public final class Server {
     private static void runSession(Options options, CleanUp cleanUp, DesktopConnection connection) {
         List<AsyncProcessor> asyncProcessors = new ArrayList<>();
         // 诊断日志：确认各通道是否协商成功（控制无效问题时据此定位）
-        Ln.i("Session start: video=" + options.getVideo() + " audio=" + options.getAudio() + " control=" + options.getControl());
+        Ln.d("Session start: video=" + options.getVideo() + " audio=" + options.getAudio() + " control=" + options.getControl());
         try {
             if (options.getSendDeviceMeta()) {
                 connection.sendDeviceMeta(Device.getDeviceName());
@@ -377,21 +372,11 @@ public final class Server {
         return serverSocket;
     }
 
-    private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket, int seq, String direction) {
+    private static void relay(InputStream in, OutputStream out, Socket clientSocket, LocalSocket localSocket) {
         byte[] buffer = new byte[64 * 1024];
-        // 诊断日志：每个方向的首包（控制失效排查）。
-        // "up" = client→server（控制消息方向），"down" = server→client（音视频方向）。
-        // 若 up 首包出现而 Controller 无 "First control message received"，
-        // 说明数据卡在 abstract socket 段；若 up 首包不出现，
-        // 说明控制消息根本没从接收端发出（接收端 APK 旧或未触发发送）
-        boolean first = true;
         try {
             int len;
             while ((len = in.read(buffer)) != -1) {
-                if (first) {
-                    first = false;
-                    Ln.d("Proxy relay #" + seq + " " + direction + ": first " + len + " bytes");
-                }
                 out.write(buffer, 0, len);
                 out.flush();
             }
@@ -444,10 +429,10 @@ public final class Server {
             InputStream localIn = localSocket.getInputStream();
             OutputStream localOut = localSocket.getOutputStream();
 
-            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket, seq, "up"));
-            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket, seq, "down"));
-            toLocal.setName("tcp_proxy_up");
-            toClient.setName("tcp_proxy_down");
+            Thread toLocal = new Thread(() -> relay(clientIn, localOut, clientSocket, localSocket));
+            Thread toClient = new Thread(() -> relay(localIn, clientOut, clientSocket, localSocket));
+            toLocal.setName("net-" + seq + "a");
+            toClient.setName("net-" + seq + "b");
             toLocal.setDaemon(true);
             toClient.setDaemon(true);
             toLocal.start();
@@ -516,7 +501,7 @@ public final class Server {
         try {
             internalMain(args);
         } catch (Throwable t) {
-            Ln.e(t.getMessage(), t);
+            Ln.e("Fatal error", t);
             status = 1;
         } finally {
             // By default, the Java process exits when all non-daemon threads are terminated.
@@ -544,8 +529,6 @@ public final class Server {
         Ln.disableSystemStreams();
         Ln.initLogLevel(options.getLogLevel());
 
-        Ln.i("Device: [" + Build.MANUFACTURER + "] " + Build.BRAND + " " + Build.MODEL + " (Android " + Build.VERSION.RELEASE + ")");
-
         if (options.getList()) {
             if (options.getCleanup()) {
                 CleanUp.unlinkSelf();
@@ -572,7 +555,7 @@ public final class Server {
         }
 
         try {
-            scrcpy(options);
+            runSession(options);
         } catch (ConfigurationException e) {
             // Do not print stack trace, a user-friendly error-message has already been logged
         }

@@ -113,7 +113,7 @@ fun ScreenShareViewerCompose(configId: Int) {
                 clipboardContent?.let { text ->
                     if (text.isNotEmpty()) {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("scrcpy", text))
+                        cm.setPrimaryClip(ClipData.newPlainText("text", text))
                     }
                 }
             }
@@ -284,13 +284,8 @@ private fun TouchInputLayer(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(videoWidth, videoHeight) {
-                // 诊断：videoSize 未收到时触摸层不工作（session meta 包异常时定位）
-                val vw = videoWidth ?: run {
-                    android.util.Log.w(
-                        "ScreenShareViewer", "touch layer inactive: videoSize not received"
-                    )
-                    return@pointerInput
-                }
+                // videoSize 未收到时触摸层不工作（session meta 包异常）
+                val vw = videoWidth ?: return@pointerInput
                 val vh = videoHeight ?: return@pointerInput
                 fun mapX(x: Float) = (x / size.width * vw).toInt().coerceIn(0, vw - 1)
                 fun mapY(y: Float) = (y / size.height * vh).toInt().coerceIn(0, vh - 1)
@@ -372,13 +367,8 @@ private fun ScrollInputLayer(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(videoWidth, videoHeight) {
-                // 诊断：videoSize 未收到时触摸层不工作（session meta 包异常时定位）
-                val vw = videoWidth ?: run {
-                    android.util.Log.w(
-                        "ScreenShareViewer", "touch layer inactive: videoSize not received"
-                    )
-                    return@pointerInput
-                }
+                // videoSize 未收到时滚动层不工作（session meta 包异常）
+                val vw = videoWidth ?: return@pointerInput
                 val vh = videoHeight ?: return@pointerInput
                 // 拖动像素 → 滚动单位的换算系数（约 40px = 1 次滚轮）
                 val SCROLL_PIXEL_UNIT = 40f

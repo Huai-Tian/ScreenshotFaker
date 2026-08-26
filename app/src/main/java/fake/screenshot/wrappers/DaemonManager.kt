@@ -295,7 +295,7 @@ object DaemonManager {
             val audioMic = ConfigManager.getDataOnce(appContext, "screenShare_audio_mic", false)
                 .let { if (it) "audio_source=mic" else "" }
             val base =
-                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.scrcpy.Server 4.1 tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.core.Relay 4.1 tunnel_forward=true tcp_port=$localPort"
 
             listOf(
                 base,
