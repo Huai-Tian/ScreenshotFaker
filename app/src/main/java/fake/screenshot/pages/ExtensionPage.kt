@@ -316,7 +316,7 @@ fun ExtensionCompose() {
             val atLeastOneChannel = screenShareConfigDialogEnableVideo ||
                     screenShareConfigDialogEnableAudio || screenShareConfigDialogAllowControl
             portValid && cameraIdValid && cameraZoomValid && displayIdValid && maxSizeValid && maxFpsValid && bitRateValid &&
-                    atLeastOneChannel && screenSharePassword.isNotBlank()
+                    atLeastOneChannel && screenShareConfigDialogPassword.let { it.isEmpty() || it.isNotBlank() }
         }
     }
     //SSH Tunnel

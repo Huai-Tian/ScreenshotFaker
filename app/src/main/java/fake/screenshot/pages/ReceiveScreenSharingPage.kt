@@ -221,8 +221,8 @@ private fun ReceiverConfigDialog(
     val addressValid = addressInput.isNotEmpty()
     val sshPortValid = sshPortInput.toIntOrNull()?.let { it in 1..65535 } == true
     val sshValid = !useSsh || (sshUserNameInput.isNotEmpty() && sshPortValid)
-    val passwordValid = passwordInput.isNotBlank()
-    val sshPasswordValid = sshPasswordInput.isNotBlank()
+    val passwordValid = passwordInput.let { it.isEmpty() || it.isNotBlank() }
+    val sshPasswordValid = !useSsh || sshPasswordInput.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
