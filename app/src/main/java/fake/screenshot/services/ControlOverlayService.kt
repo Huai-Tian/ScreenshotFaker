@@ -10,7 +10,9 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -63,6 +65,31 @@ class ControlOverlayService : Service() {
     private var downY = 0f
     private var downTime = 0L
     private var isLongPress = false
+
+    // 视频长按快进/快退：左半区快退（-1），右半区快进（+1）
+    // 步长 5s 起步逐次翻倍、封顶 30s，每 500ms 一步——按住越久跳得越快
+    private var seekDirection = 0
+    private var seekStepMs = 0
+    private val seekHandler = Handler(Looper.getMainLooper())
+    private val seekRunnable = object : Runnable {
+        override fun run() {
+            if (!isLongPress || seekDirection == 0) return
+            DisplayOverlayService.seekMedia(seekDirection * seekStepMs)
+            seekStepMs = (seekStepMs * 2).coerceAtMost(30_000)
+            seekHandler.postDelayed(this, 500)
+        }
+    }
+
+    private fun startSeekLoop() {
+        seekStepMs = 5_000
+        seekRunnable.run()
+    }
+
+    private fun stopSeekLoop() {
+        seekHandler.removeCallbacks(seekRunnable)
+        seekDirection = 0
+        seekStepMs = 0
+    }
 
     private var screenWidth = 0
     private var screenHeight = 0
@@ -188,6 +215,7 @@ class ControlOverlayService : Service() {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     if (isLongPress) {
                         isLongPress = false
+                        stopSeekLoop()
                         lockedMode = Mode.NONE
                         isScaling = false
                         return@setOnTouchListener true
@@ -341,6 +369,15 @@ class ControlOverlayService : Service() {
     }
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
+        override fun onLongPress(e: MotionEvent) {
+            if (isScaling || lockedMode != Mode.NONE) return
+            if (!DisplayOverlayService.isCurrentVideo()) return
+            val halfWidth = (controlView?.width ?: return) / 2f
+            seekDirection = if (e.x < halfWidth) -1 else 1
+            isLongPress = true
+            startSeekLoop()
+        }
+
         override fun onDoubleTap(e: MotionEvent): Boolean {
             if (isScaling) {
                 return false
@@ -395,6 +432,7 @@ class ControlOverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopSeekLoop()
         OverlayServiceManager.setControlRunning(false)
         controlView?.let { windowManager.removeView(it) }
     }

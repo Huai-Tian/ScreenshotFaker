@@ -96,6 +96,17 @@ class DisplayOverlayService : Service() {
         }
 
         @JvmStatic
+        fun seekMedia(deltaMs: Int) {
+            instanceRef?.get()?.let { service ->
+                val mp = service.mediaPlayer ?: return
+                val duration = mp.duration
+                if (duration <= 0) return
+                val target = (mp.currentPosition + deltaMs).coerceIn(0, (duration - 250).coerceAtLeast(0))
+                mp.seekTo(target)
+            }
+        }
+
+        @JvmStatic
         fun scaleMedia(factor: Float) {
             instanceRef?.get()?.applyScale(factor)
         }
