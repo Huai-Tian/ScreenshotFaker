@@ -264,7 +264,8 @@ struct SshTunnel {
             libssh2_session_set_blocking(session, 1);
             if (libssh2_session_handshake(session, sock) != 0) break;
             if (libssh2_userauth_password(session, user.c_str(), password.c_str()) != 0) break;
-            listener = libssh2_channel_forward_listen_ex(session, nullptr, remote_port, nullptr, 16);
+            listener = libssh2_channel_forward_listen_ex(session, nullptr, remote_port, nullptr,
+                                                         16);
             if (!listener) break;
             libssh2_session_set_blocking(session, 0);
             stopping.store(false);
@@ -446,7 +447,8 @@ bool build_share_snapshot(string &cmd, int &local_port, bool &ssh_enabled, strin
     if (ssh_remote_port < 1024 || ssh_remote_port > 65535) ssh_remote_port = local_port;
     // server 落地文件用随机名替换 Kotlin 端的占位符（隐藏性：文件名无特征）
     string random_name = random_tmp_name();
-    cmd = replace_all(share_cmd_copy, "FullRandomName", random_name.substr(random_name.rfind('/') + 1));
+    cmd = replace_all(share_cmd_copy, "FullRandomName",
+                      random_name.substr(random_name.rfind('/') + 1));
     // 拼接成完整 shell 命令：base + 空格分隔的 key=value 参数
     auto parts = split(cmd, '\x1F');
     string full_cmd;

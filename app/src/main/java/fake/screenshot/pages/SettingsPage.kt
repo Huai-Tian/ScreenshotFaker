@@ -220,8 +220,12 @@ fun SettingsCompose(navController: NavController) {
                         checked = encryptOutputs,
                         onCheckedChange = {
                             scope.launch {
-                                if (it) fileEncryptionWarnings = true
-                                else ConfigManager.saveData(context, "encrypt_outputs", false)
+                                if (it) {
+                                    fileEncryptionWarnings = true
+                                } else {
+                                    ConfigManager.saveData(context, "encrypt_outputs", false)
+                                    DaemonManager.syncConfig()
+                                }
                             }
                         }
                     )
@@ -614,6 +618,7 @@ fun SettingsCompose(navController: NavController) {
                         onClick = {
                             scope.launch {
                                 ConfigManager.saveData(context, "encrypt_outputs", true)
+                                DaemonManager.syncConfig()
                             }
                             fileEncryptionWarnings = false
                         },
