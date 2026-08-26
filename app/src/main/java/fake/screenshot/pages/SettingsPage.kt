@@ -5,7 +5,6 @@ import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Environment
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -111,7 +110,6 @@ fun SettingsCompose(navController: NavController) {
         }
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
-    var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var hideIconWarnings by remember { mutableStateOf(false) }
     var installPackageRequireDialog by remember { mutableStateOf(false) }
@@ -222,13 +220,8 @@ fun SettingsCompose(navController: NavController) {
                         checked = encryptOutputs,
                         onCheckedChange = {
                             scope.launch {
-                                when {
-                                    !it -> ConfigManager.saveData(context, "encrypt_outputs", false)
-                                    Environment.isExternalStorageManager() -> fileEncryptionWarnings =
-                                        true
-
-                                    else -> externalStorageRequireDialog = true
-                                }
+                                if (it) fileEncryptionWarnings = true
+                                else ConfigManager.saveData(context, "encrypt_outputs", false)
                             }
                         }
                     )
@@ -602,36 +595,6 @@ fun SettingsCompose(navController: NavController) {
                 },
                 dismissButton = {
                     TextButton(onClick = { daemonConfigDialog = false }) {
-                        Text(stringResource(R.string.Cancel))
-                    }
-                }
-            )
-        }
-        if (externalStorageRequireDialog) {
-            CenteredAlertDialog(
-                onDismissRequest = { externalStorageRequireDialog = false },
-                title = {
-                    Text(text = stringResource(R.string.tips))
-                },
-                text = {
-                    Text(stringResource(R.string.full_storage_access_required))
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val intent =
-                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                                    data = "package:${context.packageName}".toUri()
-                                }
-                            context.startActivity(intent)
-                            externalStorageRequireDialog = false
-                        },
-                    ) {
-                        Text(stringResource(R.string.go_to_settings))
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { externalStorageRequireDialog = false }) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
