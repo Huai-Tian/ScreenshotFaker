@@ -221,6 +221,8 @@ private fun ReceiverConfigDialog(
     val addressValid = addressInput.isNotEmpty()
     val sshPortValid = sshPortInput.toIntOrNull()?.let { it in 1..65535 } == true
     val sshValid = !useSsh || (sshUserNameInput.isNotEmpty() && sshPortValid)
+    val passwordValid = passwordInput.isNotBlank()
+    val sshPasswordValid = sshPasswordInput.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -252,6 +254,7 @@ private fun ReceiverConfigDialog(
                             )
                         )
                     },
+                    keyboardOptions = KeyboardOptions(keyboardType = if (useSsh) KeyboardType.Text else KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -334,7 +337,7 @@ private fun ReceiverConfigDialog(
                         )
                     }
                 },
-                enabled = portValid && addressValid && sshValid && nameInput.isNotEmpty()
+                enabled = portValid && addressValid && sshValid && nameInput.isNotEmpty() && passwordValid && sshPasswordValid
             ) {
                 Text(stringResource(R.string.Confirm))
             }
