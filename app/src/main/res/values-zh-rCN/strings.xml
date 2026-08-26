@@ -168,9 +168,7 @@
     <string name="receiver_address">发送端地址</string>
     <string name="receiver_port">发送端共享端口</string>
     <string name="receiver_use_ssh">通过 SSH 隧道连接</string>
-    <string name="receiver_enable_audio">启用音频</string>
-    <string name="receiver_enable_control">启用控制</string>
-    <string name="receiver_channel_match_hint">这两个开关必须与发送端的音频/控制设置一致，否则连接会卡住</string>
+    <string name="receiver_video_disabled">发送端未共享视频（音频/控制模式）</string>
     <string name="receiver_shared_password">共享密码</string>
     <string name="receiver_shared_password_hint">与发送端一致，未启用认证则留空</string>
     <string name="receiver_connecting">连接中…</string>
@@ -195,6 +193,7 @@
     <string name="delete_receiver_confirm">删除接收端“%1$s”？</string>
     <string name="screenShare_password">共享密码</string>
     <string name="screenShare_password_hint">留空则不启用认证，接收端需输入相同密码</string>
+    <string name="screenShare_all_channels_disabled">视频、音频、控制不能全部关闭</string>
     <string name="ssh_tunnel_remote_port">SSH 远程端口</string>
     <string name="ssh_tunnel_remote_port_hint">SSH 服务器上的端口，默认与共享端口相同</string>
 </resources>

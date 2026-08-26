@@ -42,8 +42,8 @@ object ScreenShareReceiverManager {
                 sshPort = parts[4].toInt(),
                 sshUserName = parts[5],
                 sshPassword = parts[6],
-                enableAudio = parts[7].toBoolean(),
-                enableControl = parts[8].toBoolean(),
+                // 槽位 7/8 原为 enableAudio/enableControl，已随"自动适配通道"移除，
+                // 读取时跳过（旧数据的值无意义）；槽位 9 为 password
                 password = parts.getOrElse(9) { "" }
             )
         }.getOrNull()
@@ -53,10 +53,12 @@ object ScreenShareReceiverManager {
         context: Context,
         config: ScreenShareReceiverConfig
     ) {
+        // 槽位 7/8 写固定占位保持格式稳定（password 固定在槽位 9），
+        // 使旧版本数据与新数据共用同一解析路径
         val raw = listOf(
             config.name, config.address, config.port.toString(), config.useSsh.toString(),
             config.sshPort.toString(), config.sshUserName, config.sshPassword,
-            config.enableAudio.toString(), config.enableControl.toString(),
+            "true", "true",
             config.password
         ).joinToString(SEPARATOR)
         ConfigManager.saveData(context, CONFIG_PREFIX + config.id, raw)

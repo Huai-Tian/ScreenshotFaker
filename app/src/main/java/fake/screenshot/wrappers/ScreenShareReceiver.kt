@@ -35,9 +35,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   接收端登录 SSH 后建立本地端口转发（localhost:lport → SSH 服务器 127.0.0.1:port），
  *   适用于发送端通过远程转发把共享端口暴露在 SSH 服务器上的场景。
  *
- * [enableAudio]/[enableControl] 只影响本端是否播放音频/发送控制消息：
- * 接收端始终连接发送端提供的全部通道（未启用的通道只做排水），
- * 因此与发送端的"启用音频/允许控制"开关不再要求一致。
+ * 音频与控制无需配置：接收端按发送端实际提供的通道自动适配
+ * （发送端关闭 video/audio/control 任意通道时，本端自动进入对应模式，
+ * 与 scrcpy 官方 `--no-video`/`--no-audio`/`--no-control` 行为一致）。
  */
 data class ScreenShareReceiverConfig(
     val id: Int,
@@ -48,8 +48,6 @@ data class ScreenShareReceiverConfig(
     val sshPort: Int = 22,
     val sshUserName: String = "",
     val sshPassword: String = "",
-    val enableAudio: Boolean = true,
-    val enableControl: Boolean = true,
     /** 共享密码：与发送端 auth_password 一致，留空表示发送端未启用认证 */
     val password: String = ""
 )
@@ -65,8 +63,10 @@ data class ScreenShareReceiverConfig(
  * - 通道标识同时用于自适应：发送端关闭 audio/control 时 server 不再 accept
  *   对应通道（连接立即 EOF），接收端按实际存在的通道工作，收发两端开关不再要求一致。
  *   连接后等不到标识字节（旧版 server）则按 video → audio → control 的规范顺序回退。
+ * - 通道可缺失：发送端支持仅视频/仅音频/仅控制（对应 video=/audio=/control= 参数），
+ *   video 缺失时设备名改由 audio（或 control）socket 携带，音频/控制照常工作。
  * - video socket：64 字节设备名 + 4 字节 codec id + 帧流（标识字节已在协商时消费）；
- * - audio socket：4 字节 codec id + 帧流；
+ * - audio socket：4 字节 codec id + 帧流（video 缺失时最前面还有 64 字节设备名）；
  * - control socket：client → server 的控制消息注入（触摸/滚动/按键/文本/剪贴板）；
  *   server → client 的 DeviceMessage（剪贴板同步等）由 [controlLoop] 解析。
  * - 帧格式：12 字节 header（8 字节 ptsAndFlags + 4 字节 packetSize）+ 载荷。
@@ -222,8 +222,14 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     val videoSize = MutableStateFlow<IntArray?>(null)
 
     /**
+     * 发送端是否提供视频通道（协商结果）。
+     * 缺失时 viewer 隐藏画面区域，显示音频/控制模式提示。
+     */
+    val videoAvailable = MutableStateFlow(false)
+
+    /**
      * 发送端是否提供控制通道（协商结果）。
-     * viewer 结合本端 enableControl 配置决定是否显示控制工具栏与触摸层。
+     * viewer 据此决定是否显示控制工具栏与触摸层。
      */
     val controlAvailable = MutableStateFlow(false)
 
@@ -249,6 +255,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         running.set(true)
         state.value = State.Connecting
         videoSize.value = null
+        videoAvailable.value = false
         job = scope.launch { runLoop() }
     }
 
@@ -259,6 +266,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         closeSockets()
         runCatching { sshSession?.disconnect() }
         sshSession = null
+        videoAvailable.value = false
         controlAvailable.value = false
         state.value = State.Stopped
     }
@@ -306,9 +314,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
     }
 
-    /** 协商结果：server 实际提供的各通道 socket */
+    /** 协商结果：server 实际提供的各通道 socket（video 可缺失 = 发送端关闭了视频） */
     private class Channels(
-        val videoSocket: Socket,
+        val videoSocket: Socket?,
         val audioSocket: Socket?,
         val controlSocket: Socket?
     )
@@ -353,9 +361,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             sockets.removeAll(channels.values)
             throw e
         }
-        val video = channels[CHANNEL_VIDEO]
-            ?: throw IOException("sender did not provide a video channel")
-        return Channels(video, channels[CHANNEL_AUDIO], channels[CHANNEL_CONTROL])
+        // 发送端可关闭任意通道（仅视频/仅音频/仅控制），但至少要有一个
+        if (channels.isEmpty()) {
+            throw IOException("sender did not provide any channel")
+        }
+        return Channels(channels[CHANNEL_VIDEO], channels[CHANNEL_AUDIO], channels[CHANNEL_CONTROL])
     }
 
     /**
@@ -411,6 +421,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                     // 清理本次失败的尝试（gen 已被新会话取代时不触碰共享状态）
                     if (gen == generation.get()) {
                         controlOut = null
+                        videoAvailable.value = false
                         controlAvailable.value = false
                         closeSockets()
                     }
@@ -428,6 +439,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 // 仍是当前会话：正常清理全部共享状态
                 running.set(false)
                 controlOut = null
+                videoAvailable.value = false
                 controlAvailable.value = false
                 closeSockets()
                 runCatching { sshSession?.disconnect() }
@@ -436,46 +448,90 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
     }
 
-    /** 单次会话：协商通道 → 读取设备元数据 → 启动音频/控制子循环 → 运行视频循环 */
+    /**
+     * 单次会话：协商通道 → 读取设备元数据 → 按可用通道运行主循环。
+     *
+     * 设备名由第一条可用通道（video → audio → control）携带，video 缺失时
+     * audio/control socket 最前面是 64 字节设备名，其后才是各自的流数据。
+     * 主循环选择：video 存在时为 videoLoop（其余通道为子协程）；video 缺失时
+     * 依次回退 audioLoop / controlLoop，主循环异常上抛触发重试，
+     * 子协程异常被 runCatching 吞掉仅记录（排水职责）。
+     */
     private suspend fun runSession(gen: Long) {
         val channels = negotiateChannels()
 
-        val videoIn = DataInputStream(
-            BufferedInputStream(channels.videoSocket.getInputStream(), 64 * 1024)
+        // 设备名在第一条可用通道上（video 缺失时为 audio/control）
+        val firstSocket = channels.videoSocket ?: channels.audioSocket ?: channels.controlSocket!!
+        val firstIn = DataInputStream(
+            BufferedInputStream(firstSocket.getInputStream(), 64 * 1024)
         )
         // 协商后元数据读取加超时：server 异常/通道错位时快速失败走重试，
         // 否则 readFully 无超时会永久阻塞在"连接中"
-        channels.videoSocket.soTimeout = NEGOTIATION_TIMEOUT_MS
-        val deviceName = readDeviceName(videoIn)
-        val videoCodecId = videoIn.readInt()
-        channels.videoSocket.soTimeout = 0
-        val videoMime = videoMimeFor(videoCodecId)
-            ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
+        firstSocket.soTimeout = NEGOTIATION_TIMEOUT_MS
+        val deviceName = readDeviceName(firstIn)
+        var videoMime: String? = null
+        if (channels.videoSocket != null) {
+            val videoCodecId = firstIn.readInt()
+            videoMime = videoMimeFor(videoCodecId)
+                ?: throw IOException("unsupported video codec: 0x${videoCodecId.toString(16)}")
+        }
+        firstSocket.soTimeout = 0
 
         state.value = State.Running(deviceName)
+        videoAvailable.value = channels.videoSocket != null
 
-        // 等待 viewer 提供渲染 Surface（此前 server 推送的数据暂存于 TCP 缓冲）
-        while (running.get() && surface == null) delay(100)
-        if (!running.get()) return
+        // 视频模式需等待 viewer 提供渲染 Surface（此前 server 推送的数据暂存于 TCP 缓冲）；
+        // 纯音频/纯控制模式不渲染，无需等待
+        if (channels.videoSocket != null) {
+            while (running.get() && surface == null) delay(100)
+            if (!running.get()) return
+        }
 
         channels.controlSocket?.let { controlOut = it.getOutputStream() }
         controlAvailable.value = channels.controlSocket != null
 
-        // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
-        // 注意：异常必须记录——曾用 runCatching 静默吞掉，audioLoop 中途抛异常时
-        // 音频无声死亡且日志无任何痕迹，极难定位
-        val audioJob = channels.audioSocket?.let {
-            scope.launch {
-                runCatching { audioLoop(it, config.enableAudio) }
-            }
-        }
-        val controlJob = channels.controlSocket?.let {
-            scope.launch {
-                runCatching { controlLoop(it) }
-            }
-        }
+        var audioJob: Job? = null
+        var controlJob: Job? = null
         try {
-            videoLoop(channels.videoSocket, videoIn, videoMime)
+            when {
+                channels.videoSocket != null -> {
+                    // 接收端未启用的通道也要保持排水（读丢弃），否则 TCP 背压会阻塞发送端
+                    audioJob = channels.audioSocket?.let {
+                        scope.launch {
+                            runCatching {
+                                audioLoop(
+                                    DataInputStream(BufferedInputStream(it.getInputStream(), 64 * 1024))
+                                )
+                            }
+                        }
+                    }
+                    controlJob = channels.controlSocket?.let {
+                        scope.launch {
+                            runCatching {
+                                controlLoop(DataInputStream(BufferedInputStream(it.getInputStream())))
+                            }
+                        }
+                    }
+                    videoLoop(channels.videoSocket, firstIn, videoMime!!)
+                }
+
+                channels.audioSocket != null -> {
+                    // 仅音频（+可选控制）：audioLoop 为主循环
+                    controlJob = channels.controlSocket?.let {
+                        scope.launch {
+                            runCatching {
+                                controlLoop(DataInputStream(BufferedInputStream(it.getInputStream())))
+                            }
+                        }
+                    }
+                    audioLoop(firstIn)
+                }
+
+                else -> {
+                    // 仅控制：controlLoop 为主循环
+                    controlLoop(firstIn)
+                }
+            }
         } finally {
             audioJob?.cancel()
             controlJob?.cancel()
@@ -603,18 +659,17 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     /** 解码器连续重建计数（drainAudio 产出输出时清零） */
     private var audioRebuildCount = 0
 
-    private fun audioLoop(socket: Socket, play: Boolean) {
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 64 * 1024))
+    private fun audioLoop(input: DataInputStream) {
         val codecId = input.readInt()
-        if (codecId == CODEC_RAW && play) {
+        if (codecId == CODEC_RAW) {
             // raw 流：发送端直传 PCM（48kHz 立体声 16bit），无需解码，
             // 直接写 AudioTrack。实测部分设备 Opus 解码器组件故障
             // （queueInputBuffer 抛 ISE），raw 彻底绕开解码器。
             rawAudioLoop(input)
             return
         }
-        if (codecId != CODEC_OPUS || !play) {
-            // 非 OPUS/RAW（flac 等）暂不支持播放，或本端未启用音频：
+        if (codecId != CODEC_OPUS) {
+            // 非 OPUS/RAW（flac 等）暂不支持播放：
             // 持续读取并丢弃，防止 TCP 背压阻塞发送端
             discardLoop(input)
             return
@@ -824,8 +879,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * type 1 ack clipboard（sequence）与 type 2 uhid output → 读取丢弃。
      * 不读取会导致 server 端写阻塞。
      */
-    private fun controlLoop(socket: Socket) {
-        val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+    private fun controlLoop(input: DataInputStream) {
         val skipBuffer = ByteArray(8 * 1024)
         fun skipFully(count: Int) {
             var remaining = count

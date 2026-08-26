@@ -311,7 +311,12 @@ fun ExtensionCompose() {
                 .let { it == null || it in 0..240 }
             val bitRateValid = screenShareConfigDialogVideoBitRate.toIntOrNull()
                 .let { it == null || it in 0..100_000_000 }
-            portValid && cameraIdValid && cameraZoomValid && displayIdValid && maxSizeValid && maxFpsValid && bitRateValid
+            // 与 scrcpy 官方一致：视频/音频/控制至少启用一项，全关会导致
+            // server 无法协商任何通道（getFirstSocket 为 null）
+            val atLeastOneChannel = screenShareConfigDialogEnableVideo ||
+                    screenShareConfigDialogEnableAudio || screenShareConfigDialogAllowControl
+            portValid && cameraIdValid && cameraZoomValid && displayIdValid && maxSizeValid && maxFpsValid && bitRateValid &&
+                    atLeastOneChannel
         }
     }
     //SSH Tunnel
@@ -1429,6 +1434,14 @@ fun ExtensionCompose() {
                                     }
                                 )
                             }
+                        }
+                        if (!screenShareConfigDialogEnableVideo && !screenShareConfigDialogEnableAudio &&
+                            !screenShareConfigDialogAllowControl
+                        ) {
+                            Text(
+                                text = stringResource(R.string.screenShare_all_channels_disabled),
+                                color = MaterialTheme.colorScheme.error
+                            )
                         }
                     }
                 },

@@ -88,6 +88,11 @@ public final class Server {
         // 构建标记：Ln 已 no-op，此字符串仅存在于 dex string pool 中，
         // 供 app/build.gradle.kts 构建期校验二进制新鲜度（防打包过期 server）
         Ln.d("Server build: relay-v4");
+        // 与 scrcpy 官方一致：三个通道全关时无第一条可用通道，
+        // sendDeviceMeta 的 getFirstSocket() 为 null，必须在启动时显式拒绝
+        if (!options.getVideo() && !options.getAudio() && !options.getControl()) {
+            throw new ConfigurationException("Audio/video/control all disabled");
+        }
         if (Build.VERSION.SDK_INT < AndroidVersions.API_31_ANDROID_12 && options.getVideoSource() == VideoSource.CAMERA) {
             Ln.e("Camera mirroring is not supported before Android 12");
             throw new ConfigurationException("Camera mirroring is not supported");

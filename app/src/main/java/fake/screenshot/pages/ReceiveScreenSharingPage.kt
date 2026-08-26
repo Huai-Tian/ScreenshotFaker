@@ -215,8 +215,6 @@ private fun ReceiverConfigDialog(
     var sshPortInput by remember { mutableStateOf(existing?.sshPort?.toString() ?: "22") }
     var sshUserNameInput by remember { mutableStateOf(existing?.sshUserName ?: "") }
     var sshPasswordInput by remember { mutableStateOf(existing?.sshPassword ?: "") }
-    var enableAudio by remember { mutableStateOf(existing?.enableAudio ?: true) }
-    var enableControl by remember { mutableStateOf(existing?.enableControl ?: true) }
     var passwordInput by remember { mutableStateOf(existing?.password ?: "") }
 
     val portValid = portInput.toIntOrNull()?.let { it in 1024..65535 } == true
@@ -314,21 +312,6 @@ private fun ReceiverConfigDialog(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
-
-                SwitchRow(
-                    title = stringResource(R.string.receiver_enable_audio),
-                    checked = enableAudio,
-                    onCheckedChange = { enableAudio = it }
-                )
-                SwitchRow(
-                    title = stringResource(R.string.receiver_enable_control),
-                    checked = enableControl,
-                    onCheckedChange = { enableControl = it }
-                )
-                Text(
-                    text = stringResource(R.string.receiver_channel_match_hint),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         },
         confirmButton = {
@@ -346,8 +329,6 @@ private fun ReceiverConfigDialog(
                                 sshPort = sshPortInput.toIntOrNull() ?: 22,
                                 sshUserName = sshUserNameInput,
                                 sshPassword = sshPasswordInput,
-                                enableAudio = enableAudio,
-                                enableControl = enableControl,
                                 password = passwordInput
                             )
                         )

@@ -104,9 +104,10 @@ fun ScreenShareViewerCompose(configId: Int) {
             val state by r.state.collectAsState()
             val videoSize by r.videoSize.collectAsState()
             val clipboardContent by r.clipboardContent.collectAsState()
-            // 控制可用 = 本端启用控制 且 协商到发送端提供的控制通道
-            val controlEnabled = cfg.enableControl &&
-                    r.controlAvailable.collectAsState().value
+            // 视频是否可用由协商结果决定（发送端可能仅共享音频/控制）
+            val videoAvailable by r.videoAvailable.collectAsState()
+            // 控制可用 = 协商到发送端提供的控制通道（无需本端配置）
+            val controlEnabled = r.controlAvailable.collectAsState().value
 
             // 发送端剪贴板内容到达（自动同步或拉取响应）→ 写入本机剪贴板
             LaunchedEffect(clipboardContent) {
@@ -195,6 +196,14 @@ fun ScreenShareViewerCompose(configId: Int) {
                                     )
                                 }
                             }
+                        }
+
+                        // 无视频模式（发送端仅共享音频/控制）：显示模式提示
+                        if (state is ScreenShareReceiver.State.Running && !videoAvailable) {
+                            Text(
+                                text = stringResource(R.string.receiver_video_disabled),
+                                color = Color.White.copy(alpha = 0.8f)
+                            )
                         }
 
                         when (val s = state) {
