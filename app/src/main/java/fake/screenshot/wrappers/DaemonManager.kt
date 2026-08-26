@@ -15,8 +15,13 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.time.Duration.Companion.milliseconds
 
 object DaemonManager {
+    private const val VERSION = "4.1"
     private lateinit var appContext: Context
     private val mutex = Mutex()
+
+    /** sh 安全引用：单引号包裹，内部单引号转义为 '\''（与 ScreenShareManager 一致） */
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
 
     // 缓存密钥（密码不变则复用）
     private var cachedPassword: String? = null
@@ -262,6 +267,7 @@ object DaemonManager {
         }
         val screenShareCommand = suspend {
             val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
+            val sshEnabled = ConfigManager.getDataOnce(appContext, "ssh_tunnel_enabled", false)
             val enableControl = ConfigManager.getDataOnce(appContext, "screenShare_control", true)
                 .let { "control=$it" }
             val syncClipboard =
@@ -287,15 +293,34 @@ object DaemonManager {
             val videoCameraTorch =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_torch", false)
                     .let { "camera_torch=$it" }
+            // 限制分辨率/帧率，降低编码与传输延迟（0 表示不限制）
+            val maxSize = ConfigManager.getDataOnce(appContext, "screenShare_max_size", 1280)
+                .let { if (it > 0) "max_size=$it" else "" }
+            val maxFps = ConfigManager.getDataOnce(appContext, "screenShare_max_fps", 60)
+                .let { if (it > 0) "max_fps=$it" else "" }
+            // 视频比特率：过高会加大编码与传输延迟，0 表示使用 server 默认值
+            val videoBitRate =
+                ConfigManager.getDataOnce(appContext, "screenShare_video_bit_rate", 4000000)
+                    .let { if (it > 0) "video_bit_rate=$it" else "" }
             val enableAudio =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio", true).let { "audio=$it" }
+            // 与 ScreenShareManager 保持一致：
+            // - playback + audio_dup=true：设备继续外放的同时复制一份音频流到捕获，音量不受影响
+            // - raw（PCM 直传）：绕开部分接收设备 Opus 解码器的兼容性问题
+            val audioDup = "audio_dup=true"
+            val audioCodec = "audio_codec=raw"
             val audioOutput =
                 ConfigManager.getDataOnce(appContext, "screenShare_audio_output", true)
-                    .let { if (it) "audio_source=output" else "" }
+                    .let { if (it) "audio_source=playback" else "" }
             val audioMic = ConfigManager.getDataOnce(appContext, "screenShare_audio_mic", false)
                 .let { if (it) "audio_source=mic" else "" }
+            // SSH 隧道模式下 server 只监听回环，防止局域网直连绕过隧道
+            val tcpLocalOnly = if (sshEnabled) "tcp_local_only=true" else ""
+            val authPassword =
+                ConfigManager.getDataOnce(appContext, "screenShare_password", "")
+                    .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
             val base =
-                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.core.Relay 4.1 tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
 
             listOf(
                 base,
@@ -308,9 +333,16 @@ object DaemonManager {
                 videoCameraID,
                 videoCameraZoom,
                 videoCameraTorch,
+                maxSize,
+                maxFps,
+                videoBitRate,
                 enableAudio,
+                audioDup,
+                audioCodec,
                 audioOutput,
-                audioMic
+                audioMic,
+                tcpLocalOnly,
+                authPassword
             ).filter { it.isNotEmpty() }.joinToString("\u001F")
         }
         val sshOptions = suspend {
@@ -330,7 +362,8 @@ object DaemonManager {
                 appContext, "ssh_tunnel_user_password",
                 "ScreenshotFaker"
             )
-            listOf(enabled, address, port, name, password).joinToString("\u001F")
+            val remotePort = ConfigManager.getDataOnce(appContext, "ssh_tunnel_remote_port", 0)
+            listOf(enabled, address, port, name, password, remotePort).joinToString("\u001F")
         }
         val otherOptions = suspend {
             val relayPath =

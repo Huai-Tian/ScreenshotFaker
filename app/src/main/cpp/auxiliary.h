@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <cerrno>
 #include <fstream>
@@ -24,6 +25,8 @@
 #include <poll.h>
 #include <spawn.h>
 #include <filesystem>
+#include <atomic>
+#include <mutex>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
@@ -45,8 +48,9 @@ extern string record_command;
 extern string share_gesture;
 extern string share_command;
 extern string ssh_options;
-extern bool auto_encrypt;
+extern atomic_bool auto_encrypt;
 extern string scrcpy_path;
+extern vector<unsigned char> g_key;
 
 // ===================== 辅助函数 =====================
 inline vector<string> split(const string &s, char sep) {
