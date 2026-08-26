@@ -10,10 +10,15 @@ import androidx.compose.runtime.setValue
 import moe.shizuku.server.IShizukuService
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import rikka.shizuku.Shizuku
+import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
 object Auxiliary {
+    private val suPaths = arrayOf(
+        "/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sd/bin/su",
+        "/vendor/bin/su", "/product/bin/su", "/data/local/xbin/su", "/data/local/bin/su"
+    )
     var isModuleActivated by mutableStateOf(false)
     var isShellActivated by mutableStateOf(
         try {
@@ -23,7 +28,14 @@ object Auxiliary {
         }
     )
 
-    fun isRootActivated() = false
+    var isRootActivated by mutableStateOf(
+        try {
+            (isShellActivated && Shizuku.getUid() == 0) || suPaths.any { File(it).exists() }
+        } catch (_: Exception) {
+            false
+        }
+    )
+
     fun exec(cmd: String) = runCatching {
         IShizukuService.Stub.asInterface(Shizuku.getBinder())
             .newProcess(arrayOf("sh"), null, null)
@@ -58,6 +70,15 @@ object Auxiliary {
             result
         } catch (_: Exception) {
             false
+        }
+        refreshRootState()
+    }
+
+    fun refreshRootState() {
+        isRootActivated = when {
+            isShellActivated && runCatching { Shizuku.getUid() == 0 }.getOrDefault(false) -> true
+            isShellActivated -> exec("command -v su").first == 0
+            else -> suPaths.any { File(it).exists() }
         }
     }
 

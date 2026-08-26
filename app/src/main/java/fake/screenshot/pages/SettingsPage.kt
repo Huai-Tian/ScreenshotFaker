@@ -244,7 +244,7 @@ fun SettingsCompose(navController: NavController) {
                         subtitle = stringResource(R.string.start_daemon_to_work_background),
                         checked = isDaemonRunning,
                         onCheckedChange = { newValue ->
-                            if (newValue && !(Auxiliary.isShellActivated || Auxiliary.isRootActivated())) {
+                            if (newValue && !(Auxiliary.isShellActivated || Auxiliary.isRootActivated)) {
                                 //权限不足
                                 return@TwoStatePreference
                             }
