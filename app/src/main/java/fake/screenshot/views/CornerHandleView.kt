@@ -1,4 +1,4 @@
-package fake.screenshot.services
+package fake.screenshot.views
 
 import android.content.Context
 import android.graphics.Canvas
@@ -8,7 +8,7 @@ import android.view.View
 
 /**
  * 悬浮窗四角/顶部中线把手绘制（本地窗口与 root 托管窗口共用）。
- * 纯绘制、不消费事件。
+ * 纯绘制、不消费事件。非服务类，故置于 views 包而非 services 包。
  */
 class CornerHandleView(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {

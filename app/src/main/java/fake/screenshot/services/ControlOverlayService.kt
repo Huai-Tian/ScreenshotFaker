@@ -24,7 +24,6 @@ import fake.screenshot.Auxiliary
 import fake.screenshot.services.privileged.RootDisplayConnection
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
-import fake.screenshot.wrappers.OverlayStealthManager
 import kotlinx.coroutines.runBlocking
 import rikka.shizuku.Shizuku
 import kotlin.math.abs
@@ -186,25 +185,10 @@ class ControlOverlayService : Service() {
             y = pos.second
         }
 
-        // 隐身（root 可用时自动启用，与显示窗口的 root 托管绝对隐藏配套）：
-        // 伪装窗口身份（包名/标题）并对无障碍隐藏内容；
-        // 失败时 addViewDisguised 内部自动回退为真实身份，功能不受影响
-        val rootAvailable = Auxiliary.isShellActivated &&
-                runCatching { Shizuku.getUid() == 0 }.getOrDefault(false)
-        val stealthMode = rootAvailable || runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                OverlayStealthManager.CONFIG_KEY_STEALTH,
-                false
-            )
-        }
+        // 无特权模式 = 普通悬浮窗：不做任何伪装（root 可用时控制窗口由
+        // root 进程托管为 TRUSTED_OVERLAY，本地控制窗口仅是功能兜底）
         val view = controlView ?: return
-        if (stealthMode) {
-            OverlayStealthManager.hideFromAccessibility(view)
-            OverlayStealthManager.addViewDisguised(windowManager, view, params)
-        } else {
-            windowManager.addView(view, params)
-        }
+        windowManager.addView(view, params)
 
         view.setOnTouchListener { v, event -> onLocalControlTouch(v, event) }
     }

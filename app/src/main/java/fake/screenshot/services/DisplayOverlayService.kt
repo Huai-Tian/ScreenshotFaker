@@ -29,7 +29,7 @@ import fake.screenshot.services.privileged.IRootDisplayCallback
 import fake.screenshot.services.privileged.RootDisplayConnection
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
-import fake.screenshot.wrappers.OverlayStealthManager
+import fake.screenshot.views.CornerHandleView
 import kotlinx.coroutines.runBlocking
 import rikka.shizuku.Shizuku
 import java.lang.ref.WeakReference
@@ -249,10 +249,17 @@ class DisplayOverlayService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // root 端手势"切换媒体"的反向回调（binder 线程进入 → 转主线程处理媒体列表）
+    // root 端手势"切换媒体"/窗口挂载失败的反向回调（binder 线程进入 → 转主线程处理）
     private val rootCallback = object : IRootDisplayCallback.Stub() {
         override fun onSwitchMedia(delta: Int) {
             mainHandler.post { switchMedia(delta) }
+        }
+
+        override fun onWindowFailed(reason: String?) {
+            // root 端 addView 失败（WMS 拒绝等）：reason 仅留本地 logcat 定位，
+            // 作废后端并广播断连——onRootConnectionChanged(false) 回落本地窗口
+            android.util.Log.w("DisplayOverlay", "root window failed: $reason")
+            mainHandler.post { RootDisplayConnection.reportBackendFailed() }
         }
     }
 
@@ -439,8 +446,10 @@ class DisplayOverlayService : Service() {
             // 连接到达（Shizuku binder 或 su socket）：挂窗口并显示首个媒体
             val root = RootDisplayConnection.get() ?: return
             runCatching {
-                root.attach(params.x, params.y, params.width, params.height)
+                // 先注册回调再挂窗口：attach 失败时 onWindowFailed 才不至于
+                // 因回调未就绪被丢弃（两条 oneway 事务按序到达，顺序有保证）
                 root.registerCallback(rootCallback)
+                root.attach(params.x, params.y, params.width, params.height)
                 root.setAlpha(currentAlpha)
                 root.setMuted(isMuted)
                 // 控制服务已在运行则同时挂 root 控制窗口（ControlOverlayService
@@ -467,27 +476,13 @@ class DisplayOverlayService : Service() {
         }
     }
 
-    /** 以现有 floatingView/params 补挂本地窗口（初始即本地模式，或 root 断连回退）。 */
+    /** 以现有 floatingView/params 补挂本地普通窗口（初始即本地模式，或 root 断连回退）。 */
     private fun addLocalWindow() {
         if (localWindowAttached) return
 
-        // 隐身（root 可用时自动启用）：伪装窗口身份（包名/标题）并对无障碍隐藏内容；
-        // 失败时 addViewDisguised 内部自动回退为真实身份，功能不受影响
-        val rootAvailable = Auxiliary.isShellActivated &&
-                runCatching { Shizuku.getUid() == 0 }.getOrDefault(false)
-        val stealthMode = rootAvailable || runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                OverlayStealthManager.CONFIG_KEY_STEALTH,
-                false
-            )
-        }
-        if (stealthMode) {
-            OverlayStealthManager.hideFromAccessibility(floatingView)
-            OverlayStealthManager.addViewDisguised(windowManager, floatingView, params)
-        } else {
-            windowManager.addView(floatingView, params)
-        }
+        // 无特权模式 = 普通悬浮窗：不做任何伪装（root 可用时窗口由 root 进程
+        // 托管为 TRUSTED_OVERLAY，回落本地仅是功能兜底，保持普通身份即可）
+        windowManager.addView(floatingView, params)
         localWindowAttached = true
 
         floatingView.post {
