@@ -21,9 +21,12 @@ import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import fake.screenshot.Auxiliary
+import fake.screenshot.services.privileged.RootDisplayConnection
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
+import fake.screenshot.wrappers.OverlayStealthManager
 import kotlinx.coroutines.runBlocking
+import rikka.shizuku.Shizuku
 import kotlin.math.abs
 
 class ControlOverlayService : Service() {
@@ -66,6 +69,10 @@ class ControlOverlayService : Service() {
     private var downTime = 0L
     private var isLongPress = false
 
+    // 视频状态每手势只查询一次（ACTION_DOWN 时刷新），
+    // 之后整条手势流复用，避免逐事件触发跨进程逻辑
+    private var isVideoGesture = false
+
     // 视频长按快进/快退：左半区快退（-1），右半区快进（+1）
     // 步长 5s 起步逐次翻倍、封顶 30s，每 500ms 一步——按住越久跳得越快
     private var seekDirection = 0
@@ -102,6 +109,9 @@ class ControlOverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
 
+        // 提前初始化：onDestroy / root 断连回退路径均可能访问
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
         val pos = DisplayOverlayService.getPosition()
         val size = DisplayOverlayService.getSize()
         if (pos == null || size == null) {
@@ -127,7 +137,29 @@ class ControlOverlayService : Service() {
             startForeground(id, createNotification())
         }
 
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        // root 托管模式：控制窗口同样由 root 进程创建（TRUSTED_OVERLAY，
+        // 可触摸窗口遮挡下层触摸时不产生 FLAG_WINDOW_IS_OBSCURED——
+        // 应用进程的可触摸窗口做不到这一点），本服务不创建任何本地窗口。
+        // 手势由 RootDisplayService 处理；root 断连时经 rootFallbackListener
+        // 补挂本地窗口回落。
+        if (DisplayOverlayService.isUsingRootWindow()) {
+            RootDisplayConnection.addListener(rootFallbackListener)
+            // binder 已就绪（控制服务单独启动的场景）则直接挂；
+            // 否则等 DisplayOverlayService 的 connected 回调统一补挂
+            RootDisplayConnection.get()?.let {
+                runCatching {
+                    it.attachControl(pos.first, pos.second, size.first, size.second)
+                }
+            }
+            return
+        }
+
+        attachLocalControl(pos, size)
+    }
+
+    /** 创建并挂载本地控制窗口（无 root 的原方案，或 root 断连后的回退）。 */
+    private fun attachLocalControl(pos: Pair<Int, Int>, size: Pair<Int, Int>) {
+        if (controlView != null) return
 
         val metrics = windowManager.currentWindowMetrics
         val bounds = metrics.bounds
@@ -154,97 +186,131 @@ class ControlOverlayService : Service() {
             y = pos.second
         }
 
-        windowManager.addView(controlView, params)
+        // 隐身（root 可用时自动启用，与显示窗口的 root 托管绝对隐藏配套）：
+        // 伪装窗口身份（包名/标题）并对无障碍隐藏内容；
+        // 失败时 addViewDisguised 内部自动回退为真实身份，功能不受影响
+        val rootAvailable = Auxiliary.isShellActivated &&
+                runCatching { Shizuku.getUid() == 0 }.getOrDefault(false)
+        val stealthMode = rootAvailable || runBlocking {
+            ConfigManager.getDataOnce(
+                applicationContext,
+                OverlayStealthManager.CONFIG_KEY_STEALTH,
+                false
+            )
+        }
+        val view = controlView ?: return
+        if (stealthMode) {
+            OverlayStealthManager.hideFromAccessibility(view)
+            OverlayStealthManager.addViewDisguised(windowManager, view, params)
+        } else {
+            windowManager.addView(view, params)
+        }
 
-        controlView?.setOnTouchListener { view, event ->
-            // GestureDetector 优先
-            if (gestureDetector.onTouchEvent(event)) {
-                return@setOnTouchListener true
+        view.setOnTouchListener { v, event -> onLocalControlTouch(v, event) }
+    }
+
+    /**
+     * root 断连回退：DisplayOverlayService 已回落本地显示窗口（其监听先于本监听
+     * 回调，useRootWindow 已置 false），这里补挂本地控制窗口保证悬浮窗可继续操作。
+     */
+    private val rootFallbackListener = RootDisplayConnection.Listener { active ->
+        if (!active && controlView == null && !DisplayOverlayService.isUsingRootWindow()) {
+            val pos = DisplayOverlayService.getPosition() ?: return@Listener
+            val size = DisplayOverlayService.getSize() ?: return@Listener
+            runCatching { attachLocalControl(pos, size) }
+        }
+    }
+
+    private fun onLocalControlTouch(view: View, event: MotionEvent): Boolean {
+        // GestureDetector 优先
+        if (gestureDetector.onTouchEvent(event)) {
+            return true
+        }
+
+        scaleDetector.onTouchEvent(event)
+        if (scaleDetector.isInProgress) {
+            return true
+        }
+
+        return when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = event.x
+                downY = event.y
+                downTime = System.currentTimeMillis()
+                isLongPress = false
+
+                // 每手势一次：长按/双击/模式判定整条事件流复用该值
+                isVideoGesture = DisplayOverlayService.isCurrentVideo()
+
+                lockedMode = detectMode(event)
+                if (lockedMode.name.startsWith("SCALE_")) {
+                    isScaling = true
+                }
+                initialX = params.x
+                initialY = params.y
+                initialWidth = params.width
+                initialHeight = params.height
+                initialTouchX = event.rawX
+                initialTouchY = event.rawY
+
+                // 只有在非边缘区域（Mode.NONE）且是视频模式时才透传
+                if (isVideoGesture && lockedMode == Mode.NONE) {
+                    false
+                } else {
+                    true
+                }
             }
 
-            scaleDetector.onTouchEvent(event)
-            if (scaleDetector.isInProgress) {
-                return@setOnTouchListener true
+            MotionEvent.ACTION_MOVE -> {
+                if (isLongPress) {
+                    return true
+                }
+
+                when (lockedMode) {
+                    Mode.MOVE_WINDOW -> handleMoveWindow(event)
+                    Mode.MOVE_MEDIA -> handleMoveMedia(event)
+                    Mode.SCALE_LEFT_TOP, Mode.SCALE_RIGHT_TOP,
+                    Mode.SCALE_LEFT_BOTTOM, Mode.SCALE_RIGHT_BOTTOM -> {
+                        handleScale(event)
+                    }
+
+                    else -> {}
+                }
+                true
             }
 
-            val isVideo = DisplayOverlayService.isCurrentVideo()
-
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = event.x
-                    downY = event.y
-                    downTime = System.currentTimeMillis()
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (isLongPress) {
                     isLongPress = false
-
-                    lockedMode = detectMode(event)
-                    if (lockedMode.name.startsWith("SCALE_")) {
-                        isScaling = true
-                    }
-                    initialX = params.x
-                    initialY = params.y
-                    initialWidth = params.width
-                    initialHeight = params.height
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-
-                    // 只有在非边缘区域（Mode.NONE）且是视频模式时才透传
-                    if (isVideo && lockedMode == Mode.NONE) {
-                        return@setOnTouchListener false
-                    }
-                    true
-                }
-
-                MotionEvent.ACTION_MOVE -> {
-                    if (isLongPress) {
-                        return@setOnTouchListener true
-                    }
-
-                    when (lockedMode) {
-                        Mode.MOVE_WINDOW -> handleMoveWindow(event)
-                        Mode.MOVE_MEDIA -> handleMoveMedia(event)
-                        Mode.SCALE_LEFT_TOP, Mode.SCALE_RIGHT_TOP,
-                        Mode.SCALE_LEFT_BOTTOM, Mode.SCALE_RIGHT_BOTTOM -> {
-                            handleScale(event)
-                        }
-
-                        else -> {}
-                    }
-                    true
-                }
-
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isLongPress) {
-                        isLongPress = false
-                        stopSeekLoop()
-                        lockedMode = Mode.NONE
-                        isScaling = false
-                        return@setOnTouchListener true
-                    }
-
-                    // 视频模式下且非边缘区域：透传单击给播放器
-                    if (isVideo && lockedMode == Mode.NONE) {
-                        lockedMode = Mode.NONE
-                        isScaling = false
-                        return@setOnTouchListener false
-                    }
-
-                    // 点击检测（图片模式）
-                    if (abs(event.rawX - initialTouchX) < 5 && abs(event.rawY - initialTouchY) < 5) {
-                        view.performClick()
-                    }
-
+                    stopSeekLoop()
                     lockedMode = Mode.NONE
                     isScaling = false
-                    true
+                    return true
                 }
 
-                MotionEvent.ACTION_POINTER_DOWN,
-                MotionEvent.ACTION_POINTER_UP -> {
-                    true
+                // 视频模式下且非边缘区域：透传单击给播放器
+                if (isVideoGesture && lockedMode == Mode.NONE) {
+                    lockedMode = Mode.NONE
+                    isScaling = false
+                    return false
                 }
 
-                else -> false
+                // 点击检测（图片模式）
+                if (abs(event.rawX - initialTouchX) < 5 && abs(event.rawY - initialTouchY) < 5) {
+                    view.performClick()
+                }
+
+                lockedMode = Mode.NONE
+                isScaling = false
+                true
             }
+
+            MotionEvent.ACTION_POINTER_DOWN,
+            MotionEvent.ACTION_POINTER_UP -> {
+                true
+            }
+
+            else -> false
         }
     }
 
@@ -267,15 +333,13 @@ class ControlOverlayService : Service() {
         val isTop = y <= touchSlop
         val isBottom = y >= h - touchSlop
 
-        val isVideo = DisplayOverlayService.isCurrentVideo()
-
         return when {
             isLeft && isTop -> Mode.SCALE_LEFT_TOP
             isRight && isTop -> Mode.SCALE_RIGHT_TOP
             isLeft && isBottom -> Mode.SCALE_LEFT_BOTTOM
             isRight && isBottom -> Mode.SCALE_RIGHT_BOTTOM
             isTop -> Mode.MOVE_WINDOW
-            isVideo -> Mode.NONE
+            isVideoGesture -> Mode.NONE
             else -> Mode.MOVE_MEDIA
         }
     }
@@ -370,8 +434,10 @@ class ControlOverlayService : Service() {
 
     private inner class GestureListener : GestureDetector.SimpleOnGestureListener() {
         override fun onLongPress(e: MotionEvent) {
+            // 仅视频启用长按 seek；图片保持原有行为
+            // 缩放/窗口移动/边缘调整模式下不触发（此时手势已有明确含义）
             if (isScaling || lockedMode != Mode.NONE) return
-            if (!DisplayOverlayService.isCurrentVideo()) return
+            if (!isVideoGesture) return
             val halfWidth = (controlView?.width ?: return) / 2f
             seekDirection = if (e.x < halfWidth) -1 else 1
             isLongPress = true
@@ -383,9 +449,8 @@ class ControlOverlayService : Service() {
                 return false
             }
             val view = controlView ?: return false
-            val isVideo = DisplayOverlayService.isCurrentVideo()
 
-            if (isVideo) {
+            if (isVideoGesture) {
                 // 视频：左25%上一张，中间50%播放/暂停，右25%下一张
                 val width = view.width.toFloat()
                 val x = e.x
@@ -434,7 +499,15 @@ class ControlOverlayService : Service() {
         super.onDestroy()
         stopSeekLoop()
         OverlayServiceManager.setControlRunning(false)
-        controlView?.let { windowManager.removeView(it) }
+        if (controlView != null) {
+            runCatching { windowManager.removeView(controlView) }
+        } else {
+            // root 托管模式（本地窗口从未创建）：撤下 root 端控制窗口并移除回退监听
+            RootDisplayConnection.removeListener(rootFallbackListener)
+            RootDisplayConnection.get()?.let {
+                runCatching { it.detachControl() }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY

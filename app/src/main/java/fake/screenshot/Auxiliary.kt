@@ -19,6 +19,7 @@ object Auxiliary {
         "/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sd/bin/su",
         "/vendor/bin/su", "/product/bin/su", "/data/local/xbin/su", "/data/local/bin/su"
     )
+    val suBinaryPaths: Array<String> get() = suPaths
     var isModuleActivated by mutableStateOf(false)
     var isShellActivated by mutableStateOf(
         try {
@@ -35,6 +36,8 @@ object Auxiliary {
             false
         }
     )
+
+    fun hasSuBinary(): Boolean = suPaths.any { File(it).exists() }
 
     fun exec(cmd: String) = runCatching {
         IShizukuService.Stub.asInterface(Shizuku.getBinder())

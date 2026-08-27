@@ -7,14 +7,14 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
-import android.graphics.Paint
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -25,9 +25,13 @@ import android.widget.ImageView
 import androidx.core.app.NotificationCompat
 import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.enableScreenshotExclusion
+import fake.screenshot.services.privileged.IRootDisplayCallback
+import fake.screenshot.services.privileged.RootDisplayConnection
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
+import fake.screenshot.wrappers.OverlayStealthManager
 import kotlinx.coroutines.runBlocking
+import rikka.shizuku.Shizuku
 import java.lang.ref.WeakReference
 
 class DisplayOverlayService : Service() {
@@ -66,7 +70,14 @@ class DisplayOverlayService : Service() {
                 service.params.y = y
                 service.params.width = width
                 service.params.height = height
-                service.windowManager.updateViewLayout(service.floatingView, service.params)
+                if (service.useRootWindow) {
+                    // 几何真相源始终是本服务持有的 params；root 端同步更新
+                    RootDisplayConnection.get()?.setGeometry(x, y, width, height)
+                } else {
+                    runCatching {
+                        service.windowManager.updateViewLayout(service.floatingView, service.params)
+                    }
+                }
                 service.cornerHandleView?.invalidate()
                 service.refreshContent()
             }
@@ -84,49 +95,79 @@ class DisplayOverlayService : Service() {
 
         @JvmStatic
         fun togglePlayPause() {
+            // root 托管优先；连接不可用时自动走本地路径
+            RootDisplayConnection.get()?.let {
+                runCatching { it.togglePlayPause() }
+                return
+            }
             instanceRef?.get()?.let { service ->
                 service.mediaPlayer?.let { mp ->
-                    if (mp.isPlaying) {
-                        mp.pause()
-                    } else {
-                        mp.start()
+                    runCatching {
+                        if (mp.isPlaying) {
+                            mp.pause()
+                        } else {
+                            mp.start()
+                        }
+                    }
+                }
+            }
+        }
+
+        // 视频快进/快退：deltaMs 正为快进，负为快退
+        @JvmStatic
+        fun seekMedia(deltaMs: Int) {
+            RootDisplayConnection.get()?.let {
+                runCatching { it.seekBy(deltaMs) }
+                return
+            }
+            instanceRef?.get()?.let { service ->
+                val mp = service.mediaPlayer ?: return
+                runCatching {
+                    val duration = mp.duration
+                    if (duration > 0) {
+                        val target = (mp.currentPosition + deltaMs)
+                            .coerceIn(0, (duration - 250).coerceAtLeast(0))
+                        mp.seekTo(target)
                     }
                 }
             }
         }
 
         @JvmStatic
-        fun seekMedia(deltaMs: Int) {
-            instanceRef?.get()?.let { service ->
-                val mp = service.mediaPlayer ?: return
-                val duration = mp.duration
-                if (duration <= 0) return
-                val target = (mp.currentPosition + deltaMs).coerceIn(0, (duration - 250).coerceAtLeast(0))
-                mp.seekTo(target)
-            }
-        }
-
-        @JvmStatic
         fun scaleMedia(factor: Float) {
-            instanceRef?.get()?.applyScale(factor)
+            val service = instanceRef?.get() ?: return
+            if (service.useRootWindow) {
+                RootDisplayConnection.get()?.let {
+                    runCatching { it.scaleImage(factor) }
+                }
+                return
+            }
+            service.applyScale(factor)
         }
 
         @JvmStatic
         fun panMedia(dx: Float, dy: Float) {
             // 仅图片支持平移
-            instanceRef?.get()?.let { service ->
-                if (service.mediaView is ImageView) {
-                    service.panX += dx
-                    service.panY += dy
-                    service.clampPan()
-                    service.updateImageMatrix()
+            val service = instanceRef?.get() ?: return
+            if (service.useRootWindow) {
+                RootDisplayConnection.get()?.let {
+                    runCatching { it.panImage(dx, dy) }
                 }
+                return
+            }
+            if (service.mediaView is ImageView) {
+                service.panX += dx
+                service.panY += dy
+                service.clampPan()
+                service.updateImageMatrix()
             }
         }
 
+        // 视频状态由本服务在 showMedia 时按 MIME 记录，
+        // root 托管与本地模式统一读取，避免逐事件跨进程查询
         @JvmStatic
         fun isCurrentVideo(): Boolean {
-            return instanceRef?.get()?.mediaView is SurfaceView
+            return instanceRef?.get()?.currentIsVideo ?: false
         }
 
         @JvmStatic
@@ -135,6 +176,11 @@ class DisplayOverlayService : Service() {
                 val clamped = alpha.coerceIn(0.0f, 1.0f)
                 service.currentAlpha = clamped
                 service.floatingView.alpha = clamped
+                if (service.useRootWindow) {
+                    RootDisplayConnection.get()?.let {
+                        runCatching { it.setAlpha(clamped) }
+                    }
+                }
             }
         }
 
@@ -153,6 +199,7 @@ class DisplayOverlayService : Service() {
                 } else {
                     service.floatingView.setBackgroundColor(Color.RED)
                     service.clearMedia()
+                    RootDisplayConnection.get()?.let { runCatching { it.clearMedia() } }
                 }
             }
         }
@@ -162,6 +209,7 @@ class DisplayOverlayService : Service() {
             instanceRef?.get()?.let { service ->
                 service.isMuted = muted
                 service.applyMuteState()
+                RootDisplayConnection.get()?.let { runCatching { it.setMuted(muted) } }
                 runBlocking {
                     ConfigManager.saveData(service.applicationContext, "overlay_video_muted", muted)
                 }
@@ -173,15 +221,45 @@ class DisplayOverlayService : Service() {
             return instanceRef?.get()?.isMuted ?: false
         }
 
+        /**
+         * 显示窗口当前是否由 root 进程托管。
+         * ControlOverlayService 据此决定自己是否创建本地控制窗口：
+         * root 模式下控制窗口同样由 root 托管（绝对无痕），本地不挂任何窗口。
+         */
+        @JvmStatic
+        fun isUsingRootWindow(): Boolean {
+            return instanceRef?.get()?.useRootWindow ?: false
+        }
+
     }
 
     private lateinit var windowManager: WindowManager
     private lateinit var floatingView: FrameLayout
     private lateinit var params: WindowManager.LayoutParams
 
+    // root 托管模式：显示窗口由 root 进程（TRUSTED_OVERLAY）托管，
+    // 本地 floatingView 仅构造不 addView，作为回退与几何真相源
+    private var useRootWindow = false
+    private var localWindowAttached = false
+
+    private val rootConnectionListener = RootDisplayConnection.Listener { active ->
+        // Shizuku 在主线程派发（MAIN_HANDLER）
+        onRootConnectionChanged(active)
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // root 端手势"切换媒体"的反向回调（binder 线程进入 → 转主线程处理媒体列表）
+    private val rootCallback = object : IRootDisplayCallback.Stub() {
+        override fun onSwitchMedia(delta: Int) {
+            mainHandler.post { switchMedia(delta) }
+        }
+    }
+
     private var currentIndex = 0
     private var mediaList: List<Uri> = emptyList()
     private var contentContainer: FrameLayout? = null
+    private var currentIsVideo = false
 
     // 图片相关
     private var imageView: ImageView? = null
@@ -238,6 +316,7 @@ class DisplayOverlayService : Service() {
         val initWidth = (screenWidth * 0.6).toInt().coerceIn(300, 1000)
         val initHeight = (screenHeight * 0.4).toInt().coerceIn(200, 800)
 
+        // 本地视图始终构造（回退即用、几何真相源）；root 托管模式下不 addView
         floatingView = FrameLayout(this).apply {
             setBackgroundColor(Color.RED)
             cornerHandleView = CornerHandleView(this@DisplayOverlayService).apply {
@@ -265,7 +344,15 @@ class DisplayOverlayService : Service() {
             y = 200
         }
 
-        windowManager.addView(floatingView, params)
+        useRootWindow = tryEnableRootDisplay()
+        if (useRootWindow) {
+            // binder 经主线程回调稍后到达，在回调中 attach 并显示首个媒体
+            RootDisplayConnection.get()?.let { root ->
+                runCatching { root.attach(params.x, params.y, params.width, params.height) }
+            }
+        } else {
+            addLocalWindow()
+        }
 
         val savedAlpha = runBlocking {
             ConfigManager.getDataOnce(applicationContext, "overlay_display_alpha", 1.0f)
@@ -278,15 +365,20 @@ class DisplayOverlayService : Service() {
         }
         isMuted = savedMuted
 
-
-        floatingView.post {
-            floatingView.enableScreenshotExclusion()
+        if (localWindowAttached) {
+            floatingView.post {
+                floatingView.enableScreenshotExclusion()
+            }
         }
 
         mediaList = OverlayServiceManager.mediaList.value
         if (mediaList.isNotEmpty()) {
             currentIndex = 0
-            showMedia(0)
+            // root 模式：等 connected 回调（其中会显示首个媒体）；
+            // binder 已就绪（重绑场景）则直接显示
+            if (!useRootWindow || RootDisplayConnection.isActive) {
+                showMedia(0)
+            }
         } else {
             floatingView.setBackgroundColor(Color.RED)
         }
@@ -299,12 +391,109 @@ class DisplayOverlayService : Service() {
         OverlayServiceManager.setDisplayRunning(false)
         instanceRef?.clear()
         instanceRef = null
+        if (useRootWindow) {
+            RootDisplayConnection.removeListener(rootConnectionListener)
+            RootDisplayConnection.get()?.let { root ->
+                runCatching {
+                    // 控制窗口可能仍由 ControlOverlayService 生命周期管理，
+                    // 显示服务销毁时一并撤下（unbind 的 destroy 也会兜底清理）
+                    root.detachControl()
+                    root.detach()
+                }
+            }
+            RootDisplayConnection.unbind()
+        }
         releasePlayer()
         clearMedia()
-        windowManager.removeView(floatingView)
+        if (localWindowAttached) {
+            runCatching { windowManager.removeView(floatingView) }
+            localWindowAttached = false
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // ---------- root 托管模式 ----------
+
+    /**
+     * 自动启用 root 托管窗口（绝对隐藏，无额外开关）：
+     * RootDisplayConnection 双后端自动选择——Shizuku 以 root（uid=0）
+     * 运行时优先用之；否则只要有 root 管理器对应用的 su 授权，就直接
+     * 拉起 root 宿主进程（不要求 Shizuku/Sui 存在）。窗口归属 "android"
+     * 包 + TRUSTED_OVERLAY 生效，穿透触摸不携带 FLAG_WINDOW_IS_OBSCURED；
+     * 无 root 时才走本地窗口方案（隐身伪装开关）。
+     * su 后端为异步建立（含授权弹窗等待）：失败经 Listener 通知，
+     * onRootConnectionChanged(false) 同样回落本地，悬浮窗不中断。
+     */
+    private fun tryEnableRootDisplay(): Boolean {
+        RootDisplayConnection.addListener(rootConnectionListener)
+        if (!RootDisplayConnection.bind(this)) {
+            RootDisplayConnection.removeListener(rootConnectionListener)
+            return false
+        }
+        return true
+    }
+
+    private fun onRootConnectionChanged(active: Boolean) {
+        if (useRootWindow && active) {
+            // 连接到达（Shizuku binder 或 su socket）：挂窗口并显示首个媒体
+            val root = RootDisplayConnection.get() ?: return
+            runCatching {
+                root.attach(params.x, params.y, params.width, params.height)
+                root.registerCallback(rootCallback)
+                root.setAlpha(currentAlpha)
+                root.setMuted(isMuted)
+                // 控制服务已在运行则同时挂 root 控制窗口（ControlOverlayService
+                // root 模式下不创建本地窗口，由这里统一补挂）
+                if (OverlayServiceManager.isControlRunning.value) {
+                    root.attachControl(params.x, params.y, params.width, params.height)
+                }
+                if (mediaList.isNotEmpty()) {
+                    showMedia(currentIndex.coerceIn(0, mediaList.size - 1))
+                }
+            }
+        } else if (useRootWindow && !active) {
+            // root 进程死亡：立即回落本地窗口，悬浮窗不中断。
+            // ControlOverlayService 的同名监听也会收到断连通知并补挂本地控制窗口
+            useRootWindow = false
+            RootDisplayConnection.removeListener(rootConnectionListener)
+            addLocalWindow()
+            floatingView.alpha = currentAlpha
+            if (mediaList.isNotEmpty()) {
+                showMedia(currentIndex.coerceIn(0, mediaList.size - 1))
+            } else {
+                floatingView.setBackgroundColor(Color.RED)
+            }
+        }
+    }
+
+    /** 以现有 floatingView/params 补挂本地窗口（初始即本地模式，或 root 断连回退）。 */
+    private fun addLocalWindow() {
+        if (localWindowAttached) return
+
+        // 隐身（root 可用时自动启用）：伪装窗口身份（包名/标题）并对无障碍隐藏内容；
+        // 失败时 addViewDisguised 内部自动回退为真实身份，功能不受影响
+        val rootAvailable = Auxiliary.isShellActivated &&
+                runCatching { Shizuku.getUid() == 0 }.getOrDefault(false)
+        val stealthMode = rootAvailable || runBlocking {
+            ConfigManager.getDataOnce(
+                applicationContext,
+                OverlayStealthManager.CONFIG_KEY_STEALTH,
+                false
+            )
+        }
+        if (stealthMode) {
+            OverlayStealthManager.hideFromAccessibility(floatingView)
+            OverlayStealthManager.addViewDisguised(windowManager, floatingView, params)
+        } else {
+            windowManager.addView(floatingView, params)
+        }
+        localWindowAttached = true
+
+        floatingView.post {
+            floatingView.enableScreenshotExclusion()
+        }
+    }
 
     private fun applyMuteState() {
         mediaPlayer?.setVolume(if (isMuted) 0f else 1f, if (isMuted) 0f else 1f)
@@ -339,16 +528,57 @@ class DisplayOverlayService : Service() {
         clearMedia()
         val uri = mediaList[index]
         val mimeType = contentResolver.getType(uri)
+        val isImage = mimeType?.startsWith("image/") == true
+        val isVideo = mimeType?.startsWith("video/") == true
+        currentIndex = index
+        currentIsVideo = isVideo
+
+        if (useRootWindow) {
+            val root = RootDisplayConnection.get()
+            if (root == null) {
+                // 转发中连接断开：回落本地并重试一次
+                useRootWindow = false
+                RootDisplayConnection.removeListener(rootConnectionListener)
+                addLocalWindow()
+                floatingView.alpha = currentAlpha
+                showMedia(index)
+                return
+            }
+            val delivered = runCatching {
+                if (isImage || isVideo) {
+                    // app 进程持 Uri 授权，打开 fd 后跨进程传递（binder 自动 dup）
+                    contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                        if (isImage) root.showImage(pfd) else root.showVideo(pfd)
+                        true
+                    } ?: false
+                } else {
+                    false
+                }
+            }.getOrDefault(false)
+            if (!delivered) {
+                if (!RootDisplayConnection.isActive) {
+                    // 连接已断：回落本地并重试一次
+                    useRootWindow = false
+                    RootDisplayConnection.removeListener(rootConnectionListener)
+                    addLocalWindow()
+                    floatingView.alpha = currentAlpha
+                    showMedia(index)
+                } else {
+                    // 连接仍在但内容不可读（授权丢失等）：root 端清空旧内容显示红底
+                    runCatching { root.clearMedia() }
+                }
+            }
+            return
+        }
+
         when {
-            mimeType?.startsWith("image/") == true -> showImage(uri)
-            mimeType?.startsWith("video/") == true -> showVideo(uri)
+            isImage -> showImage(uri)
+            isVideo -> showVideo(uri)
             else -> {
                 floatingView.setBackgroundColor(Color.RED)
-                currentIndex = index
                 return
             }
         }
-        currentIndex = index
         if (mediaView is ImageView) {
             currentScale = 1.0f
             panX = 0f
@@ -530,34 +760,5 @@ class DisplayOverlayService : Service() {
         panX = 0f
         panY = 0f
         baseScale = 1.0f
-    }
-
-    // ---------- 角标 ----------
-    private class CornerHandleView(context: Context) : View(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.STROKE
-            strokeWidth = 6f * resources.displayMetrics.density
-        }
-        private val cornerSize = 30f * resources.displayMetrics.density
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val w = width.toFloat()
-            val h = height.toFloat()
-            val size = cornerSize
-
-            canvas.drawLine(0f, 0f, size, 0f, paint)
-            canvas.drawLine(0f, 0f, 0f, size, paint)
-            canvas.drawLine(w - size, 0f, w, 0f, paint)
-            canvas.drawLine(w, 0f, w, size, paint)
-            canvas.drawLine(0f, h - size, 0f, h, paint)
-            canvas.drawLine(0f, h, size, h, paint)
-            canvas.drawLine(w - size, h, w, h, paint)
-            canvas.drawLine(w, h - size, w, h, paint)
-
-            val centerX = w / 2
-            canvas.drawLine(centerX - size, 0f, centerX + size, 0f, paint)
-        }
     }
 }
