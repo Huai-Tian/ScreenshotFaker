@@ -149,18 +149,18 @@ object Auxiliary {
     }
 
     @SuppressLint("BlockedPrivateApi")
-    fun View.enableScreenshotExclusion() {
-        try {
+    fun View.enableScreenshotExclusion(): Boolean {
+        return try {
             HiddenApiBypass.addHiddenApiExemptions("Landroid/view/")
 
-            val parent = rootView.parent ?: return
+            val parent = rootView.parent ?: return false
             val surfaceField = parent.javaClass.getDeclaredField("mSurfaceControl")
             surfaceField.isAccessible = true
-            val surfaceControl = surfaceField.get(parent) ?: return
+            val surfaceControl = surfaceField.get(parent) ?: return false
 
             val isValid = surfaceControl.javaClass.getDeclaredMethod("isValid")
             isValid.isAccessible = true
-            if (isValid.invoke(surfaceControl) != true) return
+            if (isValid.invoke(surfaceControl) != true) return false
 
             val scClass = Class.forName("android.view.SurfaceControl")
             val transClass = Class.forName($$"android.view.SurfaceControl$Transaction")
@@ -176,8 +176,9 @@ object Auxiliary {
             setMethod.invoke(transaction, surfaceControl, true)
 
             transClass.getDeclaredMethod("apply").invoke(transaction)
-
+            true
         } catch (_: Exception) {
+            false
         }
     }
 

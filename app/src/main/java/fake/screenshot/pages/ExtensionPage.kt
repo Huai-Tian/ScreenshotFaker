@@ -200,8 +200,8 @@ fun ExtensionCompose() {
     val mediaList by OverlayServiceManager.mediaList.collectAsState()
     var stealthOverlayConfigDialog by remember { mutableStateOf(false) }
     var overlayPermissionRequireDialog by remember { mutableStateOf(false) }
-    var isMuted by remember { mutableStateOf(DisplayOverlayService.isMuted()) }
-    var overlayAlpha by remember { mutableFloatStateOf(DisplayOverlayService.getDisplayAlpha()) }
+    var isMuted by remember { mutableStateOf(OverlayServiceManager.isMuted()) }
+    var overlayAlpha by remember { mutableFloatStateOf(OverlayServiceManager.getDisplayAlpha()) }
     val mediaPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia()
     ) { uris ->
@@ -1110,10 +1110,10 @@ fun ExtensionCompose() {
                 overlayAlpha = saved
                 isMuted = muted
                 if (isDisplayRunning) {
-                    DisplayOverlayService.setDisplayAlpha(saved)
+                    OverlayServiceManager.setDisplayAlpha(saved)
                 }
                 if (isDisplayRunning) {
-                    DisplayOverlayService.setMuted(muted)
+                    OverlayServiceManager.setMuted(muted)
                 }
             }
             CenteredAlertDialog(
@@ -1146,7 +1146,7 @@ fun ExtensionCompose() {
                                 checked = isMuted,
                                 onCheckedChange = {
                                     isMuted = it
-                                    DisplayOverlayService.setMuted(it)
+                                    OverlayServiceManager.setMuted(it)
                                 },
                                 enabled = isDisplayRunning
                             )
@@ -1160,7 +1160,7 @@ fun ExtensionCompose() {
                             onValueChange = { newAlpha ->
                                 overlayAlpha = newAlpha
                                 if (isDisplayRunning) {
-                                    DisplayOverlayService.setDisplayAlpha(newAlpha)
+                                    OverlayServiceManager.setDisplayAlpha(newAlpha)
                                 }
                                 scope.launch {
                                     ConfigManager.saveData(
