@@ -1,5 +1,6 @@
 package fake.screenshot.wrappers
 
+import android.annotation.SuppressLint
 import android.view.WindowManager
 
 /**
@@ -29,6 +30,7 @@ object OverlayStealthManager {
      * 在应用进程中调用会被 WMS 静默忽略（无副作用），因此也可安全用于
      * "写上以防万一"的场景。返回是否成功写入字段。
      */
+    @SuppressLint("DiscouragedPrivateApi")
     fun applyTrustedOverlay(params: WindowManager.LayoutParams): Boolean {
         return try {
             val field = WindowManager.LayoutParams::class.java.getDeclaredField("privateFlags")

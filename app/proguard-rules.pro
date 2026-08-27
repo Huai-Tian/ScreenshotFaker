@@ -6,4 +6,4 @@
     public <init>();
 }
 -keep class fake.screenshot.services.privileged.** { *; }
--keep class fake.screenshot.services.CornerHandleView { *; }
+-keep class fake.screenshot.views.CornerHandleView { *; }
