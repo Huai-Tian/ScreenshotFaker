@@ -5,5 +5,3 @@
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }
--keep class fake.screenshot.services.privileged.** { *; }
--keep class fake.screenshot.views.CornerHandleView { *; }
