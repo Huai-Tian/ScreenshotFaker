@@ -23,7 +23,6 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import fake.screenshot.views.CornerHandleView
-import fake.screenshot.wrappers.OverlayStealthManager
 import rikka.shizuku.ShizukuApiConstants
 import java.io.ByteArrayInputStream
 import java.io.DataInputStream
@@ -80,6 +79,31 @@ class RootDisplayService : IRootDisplay.Stub() {
                 val vm = Class.forName("dalvik.system.VMRuntime")
                 vm.getMethod("setHiddenApiExemptions", Array<String>::class.java)
                     .invoke(vm.getMethod("getRuntime").invoke(null), arrayOf("L"))
+            }
+        }
+
+        /**
+         * 在窗口 LayoutParams 上写入 PRIVATE_FLAG_TRUSTED_OVERLAY（hidden 常量 1 shl 28）。
+         *
+         * 仅在 root（uid=0）进程中调用真实生效：WMS 校验签名权限
+         * INTERNAL_SYSTEM_WINDOW，uid=0 的 binder 调用直接 GRANTED；之后本窗口
+         * （FLAG_NOT_TOUCHABLE 穿透）遮挡下层应用时，InputDispatcher 的遮挡检查
+         * 会跳过 trusted overlay，下层应用触摸事件不再携带 FLAG_WINDOW_IS_OBSCURED。
+         *
+         * 刻意不做的（会留痕）：修改 Settings.Global（如 block_untrusted_touches）
+         * 或 appops——任何应用可读取，本身即特征。
+         *
+         * 返回是否成功写入字段（失败=false：穿透触摸将携带遮挡标记，仅 logcat 留痕）。
+         */
+        @Suppress("DiscouragedPrivateApi")
+        private fun applyTrustedOverlay(params: WindowManager.LayoutParams): Boolean {
+            return try {
+                val field = WindowManager.LayoutParams::class.java.getDeclaredField("privateFlags")
+                field.isAccessible = true
+                field.set(params, (field.get(params) as Int) or (1 shl 28))
+                true
+            } catch (_: Throwable) {
+                false
             }
         }
     }
@@ -172,7 +196,12 @@ class RootDisplayService : IRootDisplay.Stub() {
         }
         try {
             exemptHiddenApi()
-            val context = obtainSystemContext() ?: return
+            val context = obtainSystemContext() ?: run {
+                // 与 Sui 无显示同源的隐患：反射失败绝不能静默吞掉，
+                // 必须上报否则应用侧无从感知、悬浮窗消失
+                notifyWindowFailed("attach", IllegalStateException("systemContext unavailable"))
+                return
+            }
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
             val view = FrameLayout(context).apply {
@@ -203,13 +232,16 @@ class RootDisplayService : IRootDisplay.Stub() {
                 this.y = y
             }
             // uid=0 下签名权限校验直接通过，TRUSTED_OVERLAY 真实生效
-            // （消除穿透触摸的 FLAG_WINDOW_IS_OBSCURED）
-            OverlayStealthManager.applyTrustedOverlay(p)
+            // （消除穿透触摸的 FLAG_WINDOW_IS_OBSCURED）。trusted=false 说明
+            // 反射写 privateFlags 失败——穿透触摸将携带 obscured 标志被
+            // 下层应用感知，logcat 留痕以便排查（logcat 其他应用不可读）
+            val trusted = applyTrustedOverlay(p)
 
             wm.addView(view, p)
             floatingView = view
             params = p
             windowManager = wm
+            android.util.Log.i("RootDisplay", "display attached trusted=$trusted")
         } catch (t: Throwable) {
             // 绝不静默：上报应用进程回落本地窗口（否则悬浮窗"无任何显示"）
             notifyWindowFailed("attach", t)
@@ -326,7 +358,10 @@ class RootDisplayService : IRootDisplay.Stub() {
             return
         }
         try {
-            val context = floatingView?.context ?: obtainSystemContext() ?: return
+            val context = floatingView?.context ?: obtainSystemContext() ?: run {
+                notifyWindowFailed("attachControl", IllegalStateException("systemContext unavailable"))
+                return
+            }
             val wm = windowManager
                 ?: context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
@@ -362,12 +397,13 @@ class RootDisplayService : IRootDisplay.Stub() {
             // 控制窗口可触摸、必然遮挡下层应用的触摸事件，正是
             // FLAG_WINDOW_IS_OBSCURED 的来源——root 托管后 InputDispatcher
             // 跳过 trusted overlay 的遮挡标记，下层应用无法感知本窗口存在
-            OverlayStealthManager.applyTrustedOverlay(p)
+            val trusted = applyTrustedOverlay(p)
 
             wm.addView(view, p)
             controlView = view
             controlParams = p
             windowManager = wm
+            android.util.Log.i("RootDisplay", "control attached trusted=$trusted")
         } catch (t: Throwable) {
             // 控制窗口失败同样上报（显示窗口虽在但手势全失效，整体回落本地）
             notifyWindowFailed("attachControl", t)
@@ -569,16 +605,43 @@ class RootDisplayService : IRootDisplay.Stub() {
         }
     }
 
-    /** 单击视频非边缘区域：向屏幕注入点击，透传给下层应用（等效本地模式的触摸穿透）。 */
+    // 上次注入时刻：注入的 tap 若再回流到本控制窗口会形成自激励循环
+    // （注入 → 命中自己 → onSingleTapConfirmed → 再注入 → …），须拦截
+    private var lastInjectAt = 0L
+
+    /**
+     * 单击视频非边缘区域：向屏幕注入点击，透传给下层应用（等效本地模式的触摸穿透）。
+     *
+     * 关键：注入坐标上最顶层的"可触摸"窗口是本控制窗口自己，直接注入只会命中
+     * 自己（既到不了下层应用，还会无限自环）。因此注入前瞬时把控制窗口改为
+     * FLAG_NOT_TOUCHABLE，让注入事件穿过后命中下层应用；显示窗口虽也覆盖该点
+     * 但已是 trusted 的 NOT_TOUCHABLE 穿透窗口，下层收到的 tap 不带 obscured 标志。
+     * 注入进程启动有数十毫秒延迟，updateViewLayout 的 binder 传播先行到达即可。
+     */
     private fun injectTap(e: MotionEvent) {
         val p = controlParams ?: return
+        val view = controlView ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastInjectAt < 800) return
+        lastInjectAt = now
         val absX = (p.x + e.x).toInt()
         val absY = (p.y + e.y).toInt()
+        val wm = windowManager ?: return
+        val notTouchable = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         runCatching {
+            p.flags = p.flags or notTouchable
+            wm.updateViewLayout(view, p)
             ProcessBuilder("/system/bin/input", "tap", absX.toString(), absY.toString())
                 .redirectErrorStream(true)
                 .start()
         }
+        // 恢复控制窗口可触摸（注入事件已经 InputDispatcher 异步派发落地）
+        handler.postDelayed({
+            runCatching {
+                p.flags = p.flags and notTouchable.inv()
+                wm.updateViewLayout(view, p)
+            }
+        }, 300)
     }
 
     // ---------- 手势监听 ----------
