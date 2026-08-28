@@ -134,13 +134,54 @@ class RootOverlayService : Binder() {
         //     InputChannel fd 双形态）+ 失败路径日志
         // v7：修复 IInputManager 包名错误（android.hardware.input，
         //     11-16 全版本；原误写 android.view 导致 ClassNotFoundException）
+        // v8：InputChannel fd 提取改三路策略（13+ native-ptr 形态经
+        //     writeToParcel + readFileDescriptor + dup 取 fd）
+        // v9：修复 writeToParcel 布局解析：头部 int32 initialized 标志
+        //     未跳过导致 fd 读取错位；13-16 与 11-12 两代布局按
+        //     正确字段顺序解析（InputChannelCore.aidl 核对）
+        // v10：channelPfd 全诊断版（每决策点 I/E 日志 + parcel hex dump
+        //     + 三布局解析），定位真机实际 parcel 布局
+        // v11：修复 AIDL parcelable 布局解析：pos 4 是尺寸信封
+        //     （v10 诊断确认 envelope=156=total-4），此后才是 name/
+        //     fd 标志/fd；11-12 旧格式 fd 在末尾 24 字节直取
+        // v12：修复 v11 回归——invoke 对 void 方法返回 null，被
+        //     getOrNull()?:return null 误判为失败（v10 的 isFailure 判定
+        //     在 v11 重写时丢失）
+        // v13：fd 提取改全 parcel 扫描（字段顺序跨版本/OEM 不可靠），
+        //     int map 日志 + BINDER_TYPE_FD(0x66642a85) 定位
+        // v14：读循环修复：InputChannel 为 O_NONBLOCK，改 Os.poll 等
+        //     POLLIN（原阻塞式 read 会抛 EAGAIN 杀死读线程）；
+        //     增加事件流诊断日志（type/size/action/坐标）
+        // v15：fd 校验（fstat 必须 S_ISSOCK，否则继续扫描）；读循环
+        //     显式捕获 ErrnoException（原 runCatching 静默吞掉 EBADF
+        //     导致死循环无日志）；检查 revents 的 POLLERR/HUP/NVAL
+        // v16：修复 controller 初始几何恒 (0,0,0,0)（lastX/Y/W/H 声明
+        //     后从未赋值）：命中判断恒 false → 所有触摸事件被丢弃
+        //     （"点击无响应"根因）。attach/setGeometry 均记录几何。
+        // v17：修复屏幕尺寸恒 0（maximumWindowMetrics 在 root 进程静默
+        //     失败被 runCatching 吞掉）→ updateOverlay 早退 → 移动/缩放
+        //     全部失效（图片平移不经 clamp 故正常）。改多路径解析
+        //     （DisplayManager/WM/resources）+ 失败留日志；DOWN 命中
+        //     日志含 mode + 几何；coerceIn 空区间保护。
+        // v18：缩放/平移卡顿修复：MOVE(~100Hz) 逐事件全量重绘远超
+        //     vsync 60Hz 造成积压。几何 Transaction 逐事件立即（SF
+        //     合成器侧，廉价），canvas 重绘节流 16ms 合并 + 尾随帧
+        //     保证最终帧；panImage/scaleImage/setGeometry 统一走节流。
+        //     实测更糟：节流推迟内容帧但 setBufferSize 仍逐事件触发
+        //     buffer 重分配 + SF resize 等待新 buffer，积压更严重。
+        // v19：正确方案（WMS 窗口动画同款）：resize 手势期间 buffer
+        //     冻结，SF setMatrix 合成器 GPU 缩放现有 buffer（零 canvas
+        //     零重分配，绝对跟手）；MOVE_WINDOW 纯移动只挪 position；
+        //     ACTION_UP settle：matrix 归一 + 精确 bufferSize + 一次
+        //     全量重绘。panImage/scaleImage 保留节流。手柄 live 期间
+        //     隐藏（避免非等比拉伸变形），settle 恢复。
         // （su 直连路径不经过 Shizuku，与该版本号无关）
         private val args by lazy {
             Shizuku.UserServiceArgs(
                 ComponentName(APPLICATION_ID, RootOverlayService::class.java.name)
             )
                 .processNameSuffix("overlay")
-                .version(7)
+                .version(19)
         }
 
         @Volatile
@@ -371,8 +412,8 @@ class RootOverlayService : Binder() {
     private val handlerThread = HandlerThread("RootOverlay").apply { start() }
     private val handler = Handler(handlerThread.looper)
 
-    // 渲染后端（handler 线程独占）
-    private val backend = OverlaySurfaceBackend { t -> notifyWindowFailed("backend", t) }
+    // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）
+    private val backend = OverlaySurfaceBackend(handler) { t -> notifyWindowFailed("backend", t) }
 
     // 输入监视与手势状态机（attachControl 后可用）
     private var monitor: GestureInputMonitor? = null
@@ -455,6 +496,13 @@ class RootOverlayService : Binder() {
     }
 
     private fun attachInternal(x: Int, y: Int, width: Int, height: Int) {
+        // 记录最近一次几何：attachControl 时 controller 以此为初值
+        // （原实现只声明从未赋值，恒 (0,0,0,0) → 命中判断恒 false →
+        // 所有触摸事件被丢弃，"点击无响应"的直接根因）
+        lastX = x
+        lastY = y
+        lastW = width
+        lastH = height
         if (backend.isAttached) {
             setGeometryInternal(x, y, width, height)
             return
@@ -467,17 +515,12 @@ class RootOverlayService : Binder() {
                 return
             }
 
-            // 屏幕尺寸：窗口移动/缩放的 clamp 边界
-            runCatching {
-                val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                val bounds = wm.maximumWindowMetrics.bounds
-                controller?.let {
-                    it.screenWidth = bounds.width()
-                    it.screenHeight = bounds.height()
-                }
-                screenWidth = bounds.width()
-                screenHeight = bounds.height()
-            }
+            // 屏幕尺寸：窗口移动/缩放的 clamp 边界。
+            // maximumWindowMetrics 在 root 进程（无 display context）可能
+            // 抛异常且被静默吞掉 → screenWidth=0 → updateOverlay 早退 →
+            // 移动/缩放全部失效（图片平移不经 clamp 故正常，正是该症状）。
+            // 多路径解析 + 失败必留日志。
+            resolveScreenSize(context)
 
             controller?.syncGeometry(x, y, width, height)
             backend.attach(x, y, width, height)
@@ -511,12 +554,72 @@ class RootOverlayService : Binder() {
 
     private fun setGeometryInternal(x: Int, y: Int, width: Int, height: Int) {
         if (!backend.isAttached) return
+        lastX = x
+        lastY = y
+        lastW = width
+        lastH = height
         controller?.syncGeometry(x, y, width, height)
         backend.setGeometry(x, y, width, height)
     }
 
     fun setAlpha(alpha: Float) {
         handler.post { backend.setAlpha(alpha) }
+    }
+
+    /**
+     * 屏幕尺寸多路径解析（顺序：成功即停，全部失败留 ERROR 日志）：
+     * 1. DisplayManager + Display.getRealMetrics（不依赖 display context）
+     * 2. WindowManager.maximumWindowMetrics（应用进程路径）
+     * 3. resources.displayMetrics（兜底，可能不含导航栏）
+     */
+    private fun resolveScreenSize(context: Context) {
+        // 路径 1：DisplayManager（root 进程最可靠）
+        runCatching {
+            val dm = context.getSystemService("display")
+                    as android.hardware.display.DisplayManager
+            val disp = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+            val m = android.util.DisplayMetrics()
+            disp.getRealMetrics(m)
+            if (m.widthPixels > 0 && m.heightPixels > 0) {
+                applyScreenSize(m.widthPixels, m.heightPixels, "DisplayManager")
+                return
+            }
+        }.onFailure {
+            android.util.Log.w("RootOverlay", "screen size: DisplayManager failed: $it")
+        }
+        // 路径 2：WindowManager metrics
+        runCatching {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val b = wm.maximumWindowMetrics.bounds
+            if (b.width() > 0 && b.height() > 0) {
+                applyScreenSize(b.width(), b.height(), "WindowManager")
+                return
+            }
+        }.onFailure {
+            android.util.Log.w("RootOverlay", "screen size: WindowManager failed: $it")
+        }
+        // 路径 3：resources 兜底
+        runCatching {
+            val m = context.resources.displayMetrics
+            if (m.widthPixels > 0 && m.heightPixels > 0) {
+                applyScreenSize(m.widthPixels, m.heightPixels, "resources")
+                return
+            }
+        }
+        android.util.Log.e(
+            "RootOverlay",
+            "screen size resolution FAILED: move/scale will not work"
+        )
+    }
+
+    private fun applyScreenSize(w: Int, h: Int, via: String) {
+        screenWidth = w
+        screenHeight = h
+        controller?.let {
+            it.screenWidth = w
+            it.screenHeight = h
+        }
+        android.util.Log.i("RootOverlay", "screen size via $via: ${w}x$h")
     }
 
     // ==================== 控制通道（root 托管手势） ====================

@@ -108,6 +108,12 @@ internal class OverlayGestureController(
                 ) {
                     input.pilferPointers()
                     handleDown(event)
+                    android.util.Log.i(
+                        "RootOverlay",
+                        "down HIT (${"%.0f".format(event.x)},${"%.0f".format(event.y)}) " +
+                                "window=($windowX,$windowY ${windowWidth}x${windowHeight}) " +
+                                "screen=(${screenWidth}x${screenHeight}) mode=$lockedMode"
+                    )
                 }
                 // 未命中：不 pilfer，事件自然穿透给下层应用
             }
@@ -164,8 +170,13 @@ internal class OverlayGestureController(
                     isLongPress = false
                     stopSeekLoop()
                 }
+                val wasGesture = lockedMode != Mode.NONE
                 lockedMode = Mode.NONE
                 isScaling = false
+                // 手势结束：live 合成器变换 → 精确几何 + 最终帧全量重绘
+                if (wasGesture) {
+                    backend.settleGeometry(windowX, windowY, windowWidth, windowHeight)
+                }
             }
         }
     }
@@ -235,16 +246,31 @@ internal class OverlayGestureController(
 
     /** 与本地模式相同的 clamp 规则。 */
     private fun updateOverlay(x: Int, y: Int, w: Int, h: Int) {
-        if (screenWidth <= 0 || screenHeight <= 0) return
+        if (screenWidth <= 0 || screenHeight <= 0) {
+            // 屏幕尺寸未知：clamp 边界缺失，静默丢弃正是"边框无法操作"的
+            // 隐蔽根因。一次性留 ERROR，之后避免刷屏。
+            if (!loggedScreenSizeFailure) {
+                loggedScreenSizeFailure = true
+                android.util.Log.e(
+                    "RootOverlay",
+                    "updateOverlay skipped: screen size unknown (${screenWidth}x${screenHeight})"
+                )
+            }
+            return
+        }
         val clampedW = w.coerceAtLeast(minSize).coerceAtMost(screenWidth)
         val clampedH = h.coerceAtLeast(minSize).coerceAtMost(screenHeight)
-        val maxX = screenWidth - clampedW
-        val maxY = screenHeight - clampedH
+        // coerceAtLeast(0)：窗口大于屏幕（横竖屏切换等）时避免空区间异常
+        val maxX = (screenWidth - clampedW).coerceAtLeast(0)
+        val maxY = (screenHeight - clampedH).coerceAtLeast(0)
         val clampedX = x.coerceIn(0, maxX)
         val clampedY = y.coerceIn(0, maxY)
         syncGeometry(clampedX, clampedY, clampedW, clampedH)
-        backend.setGeometry(clampedX, clampedY, clampedW, clampedH)
+        // 手势进行中：合成器变换路径（GPU 缩放/移动，零 canvas 成本）
+        backend.setGeometry(clampedX, clampedY, clampedW, clampedH, live = true)
     }
+
+    private var loggedScreenSizeFailure = false
 
     // ==================== 长按 seek 循环 ====================
 

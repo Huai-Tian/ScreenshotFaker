@@ -3,6 +3,7 @@ package fake.screenshot.services.privileged.overlay
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Parcel
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.SurfaceControl
@@ -134,33 +135,120 @@ internal object OverlayHiddenApi {
     /**
      * InputChannel → 本进程独占的 fd 副本（ParcelFileDescriptor）。
      *
-     * fd 获取入口在不同版本形态不一：getFd() 返回 int（旧）或
-     * FileDescriptor（部分新版本），个别版本为 getFileDescriptor()。
-     * 逐一尝试，返回 dup 出的独立副本（dispose 互不影响）。
+     * Java 层 InputChannel（11-16 全版本）不暴露 fd 访问器，唯一出口是
+     * writeToParcel。两种 wire 格式（AIDL 生成器单测源码 + 真机 v10 诊断
+     * 数据双重验证，dataSize=160 / envelope=156=dataSize-4 逐项吻合）：
+     *
+     * Android 13-16（android.os.InputChannelCore，AIDL parcelable）：
+     *   [int32 1][int32 信封=后续字节数][name：String16][int32 fd非空标志
+     *   +1][fd：flat binder][token：binder]
+     *   ↑ v8-v9 失败根因：pos 4 的 int32 是 AIDL 尺寸信封（156），被
+     *     readString 当成字符串长度（156 > 剩余 152 → null → 全链路错位）
+     *
+     * Android 11-12（native InputChannel::write）：
+     *   [int32 1][name：CString][token：binder 24B][fd：binder 24B]
+     *   fd 恒在末尾 24 字节，按位置直取。
      */
     fun channelPfd(inputChannel: Any?): ParcelFileDescriptor? {
-        if (inputChannel == null) return null
+        if (inputChannel == null) {
+            Log.e(TAG, "channelPfd: inputChannel is null")
+            return null
+        }
+
+        // 直接访问器（全版本均不存在，快速跳过）
         for (methodName in listOf("getFd", "getFileDescriptor")) {
             val ret = runCatching {
                 inputChannel.javaClass.getMethod(methodName).invoke(inputChannel)
             }.getOrNull() ?: continue
             when (ret) {
                 is FileDescriptor ->
-                    return runCatching { ParcelFileDescriptor.dup(ret) }.getOrNull()
+                    return runCatching { ParcelFileDescriptor.dup(ret) }
+                        .onFailure { Log.e(TAG, "dup(FileDescriptor) failed: $it") }
+                        .getOrNull()
 
                 is Int ->
                     if (ret >= 0) {
-                        // fromFd 内部 dup：返回的 PFD 独立持有副本
-                        return runCatching { ParcelFileDescriptor.fromFd(ret) }.getOrNull()
+                        return runCatching { ParcelFileDescriptor.fromFd(ret) }
+                            .onFailure { Log.e(TAG, "fromFd($ret) failed: $it") }
+                            .getOrNull()
                     }
             }
         }
-        Log.e(
-            TAG,
-            "InputChannel fd unavailable: ${inputChannel.javaClass.name} has " +
-                    "no usable getFd/getFileDescriptor"
-        )
-        return null
+
+        val parcel = Parcel.obtain()
+        try {
+            // 注意：invoke 对 void 方法返回 null，不能用 getOrNull() 判定成功
+            val wrote = runCatching {
+                inputChannel.javaClass.getMethod(
+                    "writeToParcel", Parcel::class.java, Int::class.javaPrimitiveType
+                ).invoke(inputChannel, parcel, 0)
+            }.onFailure {
+                Log.e(TAG, "writeToParcel reflection failed: $it")
+            }
+            if (wrote.isFailure) return null
+
+            val total = parcel.dataSize()
+            parcel.setDataPosition(0)
+            val initialized = runCatching { parcel.readInt() }.getOrDefault(0)
+            if (initialized != 1) {
+                Log.e(TAG, "parcel not initialized (flag=$initialized, size=$total)")
+                return null
+            }
+            val envelope = runCatching { parcel.readInt() }.getOrDefault(-1)
+            Log.i(TAG, "parcel total=$total envelope=$envelope")
+
+            // ---- 全 parcel 扫描定位 FD 对象 ----
+            // 字段顺序在不同版本/OEM 间不可靠（v10/v12 两种布局推断均失败），
+            // 但 FD 对象必为 24 字节 flat_binder_object（type=BINDER_TYPE_FD
+            // =0x66642a85），且 8 字节对齐。逐位置尝试 readFileDescriptor：
+            // 命中返回 PFD（fd 为 copyTo 在本进程 dup 的副本，数值对本进程有效）。
+            // 同时输出 int map 供人工核对布局。
+            val map = StringBuilder()
+            var p = 0
+            while (p + 4 <= total) {
+                parcel.setDataPosition(p)
+                val v = runCatching { parcel.readInt() }.getOrDefault(Int.MIN_VALUE)
+                if (v == 0x66642a85) map.append(" [FD@").append(p).append("]")
+                else map.append(' ').append(p).append(':').append(v)
+                p += 4
+            }
+            Log.i(TAG, "parcel int map:$map")
+
+            var pos = 4
+            while (pos + 24 <= total) {
+                parcel.setDataPosition(pos)
+                val found = runCatching { parcel.readFileDescriptor() }.getOrNull()
+                if (found != null) {
+                    val dup = runCatching { ParcelFileDescriptor.dup(found.fileDescriptor) }
+                        .onFailure { Log.e(TAG, "dup at pos=$pos failed: $it") }
+                        .getOrNull()
+                    if (dup != null) {
+                        val fdNum = dup.fd
+                        val statResult = runCatching {
+                            val st = android.system.Os.fstat(dup.fileDescriptor)
+                            android.system.OsConstants.S_ISSOCK(st.st_mode) to st.st_mode
+                        }.getOrNull()
+                        val isSocket = statResult?.first ?: false
+                        Log.i(
+                            TAG,
+                            "fd object found at pos=$pos (scan): fdNum=$fdNum isSocket=$isSocket " +
+                                    "mode=${statResult?.second?.let { "0x" + Integer.toHexString(it) } ?: "fstat failed"}"
+                        )
+                        // fd 必须是 socket（InputChannel 为 SOCK_SEQPACKET）。
+                        // binder handle 被误读 / stale fd 都不是 socket，跳过。
+                        if (isSocket) return dup
+                        Log.w(TAG, "fd $fdNum at pos=$pos is not a socket, skipping")
+                        runCatching { dup.close() }
+                    }
+                }
+                pos += 4
+            }
+
+            Log.e(TAG, "no usable socket fd found by scan (total=$total envelope=$envelope)")
+            return null
+        } finally {
+            parcel.recycle()
+        }
     }
 
     // ==================== SurfaceControl 反射面 ====================
@@ -243,12 +331,31 @@ internal object OverlayHiddenApi {
         }.getOrNull()
     }
 
+    // setMatrix(SurfaceControl, dsdx, dtdx, dtdy, dsdy)：SF 合成器 2x2
+    // 仿射缩放（GPU 路径，不重分配 buffer、不触发 canvas 重绘）——
+    // resize 手势 live 阶段的零成本几何变换。
+    private val setMatrixMethod by lazy {
+        runCatching {
+            txClass.getMethod(
+                "setMatrix", SurfaceControl::class.java,
+                Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+                Float::class.javaPrimitiveType, Float::class.javaPrimitiveType
+            )
+        }.getOrNull()
+    }
+
     fun txSetPosition(tx: SurfaceControl.Transaction, sc: SurfaceControl, x: Int, y: Int) {
         setPositionMethod?.invoke(tx, sc, x.toFloat(), y.toFloat())
     }
 
     fun txSetLayer(tx: SurfaceControl.Transaction, sc: SurfaceControl, layer: Int) {
         setLayerMethod?.invoke(tx, sc, layer)
+    }
+
+    /** content/handle layer 以左上角为锚点缩放 sx/sy（等比于 buffer 尺寸）。 */
+    fun txSetMatrix(tx: SurfaceControl.Transaction, sc: SurfaceControl, sx: Float, sy: Float) {
+        // matrix = [dsdx dtdx; dtdy dsdy]，纯缩放取 [sx 0; 0 sy]
+        setMatrixMethod?.invoke(tx, sc, sx, 0f, 0f, sy)
     }
 
     fun txSetBufferSize(tx: SurfaceControl.Transaction, sc: SurfaceControl, w: Int, h: Int) {

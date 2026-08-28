@@ -7,7 +7,9 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.media.MediaPlayer
+import android.os.Handler
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.view.Surface
 import android.view.SurfaceControl
 
@@ -34,9 +36,19 @@ import android.view.SurfaceControl
  *
  * 所有方法必须在同一线程（服务 handler 线程）调用。
  *
+ * @param handler 宿主 handler 线程（本类所有方法必须在该线程调用；
+ *   重绘节流的 postDelayed 也回到该线程，保证 canvas 无并发访问）
  * @param onFatal 渲染后端不可恢复错误（须触发回落）
  */
-internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
+internal class OverlaySurfaceBackend(
+    private val handler: Handler,
+    private val onFatal: (Throwable) -> Unit
+) {
+
+    private companion object {
+        /** 帧间隔（~60fps）：canvas 重绘节流目标 */
+        const val FRAME_INTERVAL_MS = 16L
+    }
 
     // ==================== 状态字段 ====================
 
@@ -130,6 +142,7 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
     }
 
     fun detach() {
+        cancelPendingRedraw()
         releasePlayer()
         videoFd?.let { runCatching { it.close() } }
         videoFd = null
@@ -151,10 +164,115 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
 
     val isAttached: Boolean get() = root != null
 
+    // ==================== 重绘节流（resize/pan/缩放手势流畅度） ====================
+    //
+    // MOVE 事件 ~100Hz 远超 vsync 60Hz：逐事件全量重绘（lock canvas +
+    // buffer 重分配 + 全图缩放绘制）必然积压卡顿。几何 Transaction 每
+    // 事件立即 apply（便宜，SF 合成器侧处理）；canvas 重绘合并到帧间隔
+    // （16ms）内至多一次，尾随 pending 保证最终帧不丢。
+
+    private var redrawPending = false
+    private var lastDrawAt = 0L
+
+    // 尾随重绘任务（持有引用：只移除自己的，绝不动宿主线程其他回调）
+    private val trailingRedraw = Runnable {
+        redrawPending = false
+        doRedraw()
+    }
+
+    /** 节流调度一次内容+手柄重绘（手势高频路径）。 */
+    private fun scheduleRedraw() {
+        if (redrawPending) return
+        val now = SystemClock.uptimeMillis()
+        val elapsed = now - lastDrawAt
+        if (elapsed >= FRAME_INTERVAL_MS) {
+            doRedraw()
+        } else {
+            redrawPending = true
+            handler.postDelayed(trailingRedraw, FRAME_INTERVAL_MS - elapsed)
+        }
+    }
+
+    private fun doRedraw() {
+        lastDrawAt = SystemClock.uptimeMillis()
+        if (isVideo) {
+            // 视频生产者按 layer bounds 重新适配
+            mediaPlayer?.let { mp -> runCatching { mp.setSurface(contentSurface) } }
+        } else {
+            drawImage()
+        }
+        drawHandles()
+    }
+
+    private fun cancelPendingRedraw() {
+        redrawPending = false
+        handler.removeCallbacks(trailingRedraw)
+    }
+
     // ==================== 几何 / 外观 ====================
 
-    fun setGeometry(x: Int, y: Int, w: Int, h: Int) {
+    // live resize 状态：手势期间 buffer 尺寸冻结在 baseW/baseH，
+    // SF 合成器 setMatrix 缩放现有 buffer（GPU 路径，零 canvas 操作）。
+    // UP 时 settle：matrix 归一 + buffer 精确尺寸 + 一次全量重绘。
+    private var liveScaling = false
+    private var baseW = 0
+    private var baseH = 0
+
+    /**
+     * @param live true = resize 手势进行中：仅合成器变换（跟手、零重绘）；
+     *   false = 精确几何（外部设置 / 手势结束 settle）
+     */
+    fun setGeometry(x: Int, y: Int, w: Int, h: Int, live: Boolean = false) {
         val r = root ?: return
+
+        // ---- 手势中：零 canvas 成本的快速路径 ----
+        if (live) {
+            // 纯移动（MOVE_WINDOW）：尺寸不变，只挪 root position，
+            // 不触碰 buffer / matrix / 重绘——单 transaction 完成。
+            if (w == width && h == height && !liveScaling) {
+                val tx = SurfaceControl.Transaction()
+                OverlayHiddenApi.txSetPosition(tx, r, x, y)
+                tx.apply()
+                return
+            }
+            // resize：进入/保持 live 缩放。buffer 冻结在进入时的尺寸，
+            // setMatrix 让 SF 在合成期拉伸现有内容——纯 GPU，跟手。
+            if (!liveScaling) {
+                liveScaling = true
+                baseW = width
+                baseH = height
+                // 手柄线条会被非等比拉伸变形：live 期间隐藏，settle 恢复
+                handleLayer?.let { hl ->
+                    val txh = SurfaceControl.Transaction()
+                    OverlayHiddenApi.txSetAlpha(txh, hl, 0f)
+                    txh.apply()
+                }
+            }
+            if (baseW > 0 && baseH > 0) {
+                val tx = SurfaceControl.Transaction()
+                OverlayHiddenApi.txSetPosition(tx, r, x, y)
+                // 以 root 原点（窗口左上角）为锚点向右下扩展——四角缩放
+                // 统一为"新矩形左上角 + 现有 buffer 拉伸到新宽高"
+                contentLayer?.let {
+                    OverlayHiddenApi.txSetMatrix(tx, it, w.toFloat() / baseW, h.toFloat() / baseH)
+                }
+                tx.apply()
+            }
+            return
+        }
+
+        // ---- 精确路径（外部设置 / settle）----
+        // live 结束：matrix 归一 + 手柄恢复 + buffer 精确 + 立即全量重绘
+        if (liveScaling) {
+            liveScaling = false
+            val txr = SurfaceControl.Transaction()
+            contentLayer?.let { OverlayHiddenApi.txSetMatrix(txr, it, 1f, 1f) }
+            handleLayer?.let {
+                OverlayHiddenApi.txSetMatrix(txr, it, 1f, 1f)
+                OverlayHiddenApi.txSetAlpha(txr, it, 1f)
+            }
+            txr.apply()
+        }
         width = w
         height = h
         val tx = SurfaceControl.Transaction()
@@ -162,13 +280,32 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
         contentLayer?.let { OverlayHiddenApi.txSetBufferSize(tx, it, w, h) }
         handleLayer?.let { OverlayHiddenApi.txSetBufferSize(tx, it, w, h) }
         tx.apply()
-        // 视频生产者按 layer bounds 重新适配；图片重绘
         if (isVideo) {
             mediaPlayer?.let { mp -> runCatching { mp.setSurface(contentSurface) } }
         } else {
             drawImage()
         }
         drawHandles()
+    }
+
+    /** 手势结束（ACTION_UP/CANCEL）时由 controller 调用：精确化最终帧。 */
+    fun settleGeometry(x: Int, y: Int, w: Int, h: Int) {
+        setGeometry(x, y, w, h, live = false)
+    }
+
+    /** 中途切换媒体等场景：撤销 live matrix（避免新内容被残留拉伸）。 */
+    private fun resetLiveScale() {
+        if (!liveScaling) return
+        liveScaling = false
+        runCatching {
+            val tx = SurfaceControl.Transaction()
+            contentLayer?.let { OverlayHiddenApi.txSetMatrix(tx, it, 1f, 1f) }
+            handleLayer?.let {
+                OverlayHiddenApi.txSetMatrix(tx, it, 1f, 1f)
+                OverlayHiddenApi.txSetAlpha(tx, it, 1f)
+            }
+            tx.apply()
+        }
     }
 
     fun setAlpha(a: Float) {
@@ -182,6 +319,7 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
     // ==================== 图片渲染 ====================
 
     fun showImage(bm: Bitmap?) {
+        resetLiveScale()
         releasePlayer()
         videoFd = null
         isVideo = false
@@ -202,7 +340,7 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
         if (newScale > 5.0f) return
         currentScale = newScale
         clampPan()
-        drawImage()
+        scheduleRedraw()
     }
 
     fun panImage(dx: Float, dy: Float) {
@@ -210,7 +348,7 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
         panX += dx
         panY += dy
         clampPan()
-        drawImage()
+        scheduleRedraw()
     }
 
     private fun drawImage() {
@@ -282,6 +420,7 @@ internal class OverlaySurfaceBackend(private val onFatal: (Throwable) -> Unit) {
     // ==================== 视频渲染 ====================
 
     fun showVideo(fd: ParcelFileDescriptor) {
+        resetLiveScale()
         clearMedia()
         isVideo = true
         videoFd = fd
