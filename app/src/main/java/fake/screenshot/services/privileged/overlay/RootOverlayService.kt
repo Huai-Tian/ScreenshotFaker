@@ -1,5 +1,6 @@
 package fake.screenshot.services.privileged
 
+import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
@@ -20,6 +21,7 @@ import android.view.WindowManager
 import fake.screenshot.Auxiliary
 import fake.screenshot.services.privileged.overlay.GestureInputMonitor
 import fake.screenshot.services.privileged.overlay.OverlayGestureController
+import fake.screenshot.services.privileged.overlay.OverlayHiddenApi
 import fake.screenshot.services.privileged.overlay.OverlaySurfaceBackend
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuApiConstants
@@ -125,12 +127,73 @@ class RootOverlayService : Binder() {
 
         private const val APPLICATION_ID = "fake.screenshot"
 
+        // version 用于让 Shizuku 服务端区分实现版本：修改本类行为/结构后
+        // 必须递增，否则服务端可能沿用旧版本缓存的类。
+        // v4：脱离旧 AIDL 接口，手写 binder 协议单文件实现
+        // v5：放弃 WindowManager 悬浮窗，改纯 Surface 双层渲染 +
+        //     InputMonitor 输入通道（Android 15 WMS session 加固绕开）
+        // v6：输入通道反射加固（monitorGestureInput 双签名回退、
+        //     InputChannel fd 双形态）+ 失败路径日志
+        // v7：修复 IInputManager 包名错误（android.hardware.input，
+        //     11-16 全版本；原误写 android.view 导致 ClassNotFoundException）
+        // v8：InputChannel fd 提取改三路策略（13+ native-ptr 形态经
+        //     writeToParcel + readFileDescriptor + dup 取 fd）
+        // v9：修复 writeToParcel 布局解析：头部 int32 initialized 标志
+        //     未跳过导致 fd 读取错位；13-16 与 11-12 两代布局按
+        //     正确字段顺序解析（InputChannelCore.aidl 核对）
+        // v10：channelPfd 全诊断版（每决策点 I/E 日志 + parcel hex dump
+        //     + 三布局解析），定位真机实际 parcel 布局
+        // v11：修复 AIDL parcelable 布局解析：pos 4 是尺寸信封
+        //     （v10 诊断确认 envelope=156=total-4），此后才是 name/
+        //     fd 标志/fd；11-12 旧格式 fd 在末尾 24 字节直取
+        // v12：修复 v11 回归——invoke 对 void 方法返回 null，被
+        //     getOrNull()?:return null 误判为失败（v10 的 isFailure 判定
+        //     在 v11 重写时丢失）
+        // v13：fd 提取改全 parcel 扫描（字段顺序跨版本/OEM 不可靠），
+        //     int map 日志 + BINDER_TYPE_FD(0x66642a85) 定位
+        // v14：读循环修复：InputChannel 为 O_NONBLOCK，改 Os.poll 等
+        //     POLLIN（原阻塞式 read 会抛 EAGAIN 杀死读线程）；
+        //     增加事件流诊断日志（type/size/action/坐标）
+        // v15：fd 校验（fstat 必须 S_ISSOCK，否则继续扫描）；读循环
+        //     显式捕获 ErrnoException（原 runCatching 静默吞掉 EBADF
+        //     导致死循环无日志）；检查 revents 的 POLLERR/HUP/NVAL
+        // v16：修复 controller 初始几何恒 (0,0,0,0)（lastX/Y/W/H 声明
+        //     后从未赋值）：命中判断恒 false → 所有触摸事件被丢弃
+        //     （"点击无响应"根因）。attach/setGeometry 均记录几何。
+        // v17：修复屏幕尺寸恒 0（maximumWindowMetrics 在 root 进程静默
+        //     失败被 runCatching 吞掉）→ updateOverlay 早退 → 移动/缩放
+        //     全部失效（图片平移不经 clamp 故正常）。改多路径解析
+        //     （DisplayManager/WM/resources）；DOWN 命中日志含 mode +
+        //     几何；coerceIn 空区间保护。
+        // v18：缩放/平移卡顿修复：MOVE(~100Hz) 逐事件全量重绘远超
+        //     vsync 60Hz 造成积压。几何 Transaction 逐事件立即（SF
+        //     合成器侧，廉价），canvas 重绘节流 16ms 合并 + 尾随帧
+        //     保证最终帧；panImage/scaleImage/setGeometry 统一走节流。
+        //     实测更糟：节流推迟内容帧但 setBufferSize 仍逐事件触发
+        //     buffer 重分配 + SF resize 等待新 buffer，积压更严重。
+        // v19：正确方案（WMS 窗口动画同款）：resize 手势期间 buffer
+        //     冻结，SF setMatrix 合成器 GPU 缩放现有 buffer（零 canvas
+        //     零重分配，绝对跟手）；MOVE_WINDOW 纯移动只挪 position；
+        //     ACTION_UP settle：matrix 归一 + 精确 bufferSize + 一次
+        //     全量重绘。panImage/scaleImage 保留节流。手柄 live 期间
+        //     隐藏（避免非等比拉伸变形），settle 恢复。
+        // v21：Android 11 截图排除：setSkipScreenshot 不存在（12+ API），
+        //     改创建期 Builder.setMetadata(METADATA_WINDOW_TYPE=441731) →
+        //     SF createLayer 检测 → primaryDisplayOnly/internalOnly（系统
+        //     圆角 overlay 同款机制，AOSP 11 源码 + 真机实测验证）。
+        //     三个 layer 均设置（capture 遍历逐层过滤）。12+ 路径不变。
+        // v22：无痕版：移除全部诊断日志与调试代码（实测 -keep 规则下
+        //     R8 不消除开关式日志的字符串常量，仅源码级移除可靠）；
+        //     固定线程名 / "sf.r." socket 前缀 / su 兜底 input 注入全部
+        //     移除或随机化（字符+长度均随机）；su 宿主进程加
+        //     --nice-name 随机名重写 /proc/cmdline。
+        // （su 直连路径不经过 Shizuku，与该版本号无关）
         private val args by lazy {
             Shizuku.UserServiceArgs(
                 ComponentName(APPLICATION_ID, RootOverlayService::class.java.name)
             )
                 .processNameSuffix("overlay")
-                .version(21)
+                .version(22)
         }
 
         @Volatile
@@ -349,16 +412,14 @@ class RootOverlayService : Binder() {
             mainHandler.post { mediaSwitchHandler?.onSwitchMedia(delta) }
         }
 
-        internal fun handleWindowFailed(reason: String) {
-            // 应用进程侧记录回落原因（与 root 端 TAG 一致，便于同过滤器抓取）
-            android.util.Log.w("RootOverlay", "falling back to normal route: $reason")
+        internal fun handleWindowFailed() {
             mainHandler.post { reportBackendFailed() }
         }
     }
 
     // ==================== root 进程侧：纯 Surface 悬浮窗宿主 ====================
 
-    private val handlerThread = HandlerThread("RootOverlay").apply { start() }
+    private val handlerThread = HandlerThread(OverlayHiddenApi.randomName()).apply { start() }
     private val handler = Handler(handlerThread.looper)
 
     // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）
@@ -468,15 +529,14 @@ class RootOverlayService : Binder() {
             // maximumWindowMetrics 在 root 进程（无 display context）可能
             // 抛异常且被静默吞掉 → screenWidth=0 → updateOverlay 早退 →
             // 移动/缩放全部失效（图片平移不经 clamp 故正常，正是该症状）。
-            // 多路径解析 + 失败必留日志。
+            // 多路径解析。
             resolveScreenSize(context)
 
             controller?.syncGeometry(x, y, width, height)
             backend.attach(x, y, width, height)
-            android.util.Log.i("RootOverlay", "surface backend attached")
         } catch (t: Throwable) {
-            // 绝不静默：上报应用进程回落本地窗口（否则悬浮窗"无任何显示"）
-            android.util.Log.e("RootOverlay", "display attach FAILED", t)
+            // 失败必须上报应用进程回落本地窗口（否则悬浮窗"无任何显示"）；
+            // 无日志：原因经回调链传达
             notifyWindowFailed("attach", t)
             detachInternal()
         }
@@ -516,7 +576,7 @@ class RootOverlayService : Binder() {
     }
 
     /**
-     * 屏幕尺寸多路径解析（顺序：成功即停，全部失败留 ERROR 日志）：
+     * 屏幕尺寸多路径解析（顺序：成功即停，静默失败轮询下一路径）：
      * 1. DisplayManager + Display.getRealMetrics（不依赖 display context）
      * 2. WindowManager.maximumWindowMetrics（应用进程路径）
      * 3. resources.displayMetrics（兜底，可能不含导航栏）
@@ -530,45 +590,36 @@ class RootOverlayService : Binder() {
             val m = android.util.DisplayMetrics()
             disp.getRealMetrics(m)
             if (m.widthPixels > 0 && m.heightPixels > 0) {
-                applyScreenSize(m.widthPixels, m.heightPixels, "DisplayManager")
+                applyScreenSize(m.widthPixels, m.heightPixels)
                 return
             }
-        }.onFailure {
-            android.util.Log.w("RootOverlay", "screen size: DisplayManager failed: $it")
         }
         // 路径 2：WindowManager metrics
         runCatching {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val b = wm.maximumWindowMetrics.bounds
             if (b.width() > 0 && b.height() > 0) {
-                applyScreenSize(b.width(), b.height(), "WindowManager")
+                applyScreenSize(b.width(), b.height())
                 return
             }
-        }.onFailure {
-            android.util.Log.w("RootOverlay", "screen size: WindowManager failed: $it")
         }
         // 路径 3：resources 兜底
         runCatching {
             val m = context.resources.displayMetrics
             if (m.widthPixels > 0 && m.heightPixels > 0) {
-                applyScreenSize(m.widthPixels, m.heightPixels, "resources")
+                applyScreenSize(m.widthPixels, m.heightPixels)
                 return
             }
         }
-        android.util.Log.e(
-            "RootOverlay",
-            "screen size resolution FAILED: move/scale will not work"
-        )
     }
 
-    private fun applyScreenSize(w: Int, h: Int, via: String) {
+    private fun applyScreenSize(w: Int, h: Int) {
         screenWidth = w
         screenHeight = h
         controller?.let {
             it.screenWidth = w
             it.screenHeight = h
         }
-        android.util.Log.i("RootOverlay", "screen size via $via: ${w}x$h")
     }
 
     // ==================== 控制通道（root 托管手势） ====================
@@ -626,7 +677,6 @@ class RootOverlayService : Binder() {
             // controller 先于事件流到达就位（start 前赋值，杜绝早期事件丢弃）
             controller = ctrl
             monitor = mon
-            android.util.Log.i("RootOverlay", "input monitor attached")
         }
     }
 
@@ -659,12 +709,8 @@ class RootOverlayService : Binder() {
 
     // ==================== root -> app 回调 ====================
 
-    /** 挂载失败上报（handler 线程内调用）。同步打日志：失败原因必须可在 logcat 直接观察。 */
+    /** 挂载失败上报（handler 线程内调用）。无日志：原因仅经回调链通知应用侧回落。 */
     private fun notifyWindowFailed(where: String, t: Throwable) {
-        android.util.Log.e(
-            "RootOverlay",
-            "window failed @ $where: ${t.javaClass.simpleName}: ${t.message}"
-        )
         invokeCallback(101) {
             it.writeString("$where: ${t.javaClass.simpleName}: ${t.message}")
         }
@@ -768,6 +814,7 @@ class RootOverlayService : Binder() {
     @Volatile
     private var systemContext: Context? = null
 
+    @SuppressLint("PrivateApi")
     private fun obtainSystemContext(): Context? {
         systemContext?.let { return it }
         return runCatching {
@@ -871,7 +918,7 @@ private class CallbackBinder : Binder() {
             }
 
             101 -> {
-                RootOverlayService.handleWindowFailed(data.readString() ?: "unknown")
+                RootOverlayService.handleWindowFailed()
                 return true
             }
         }
@@ -879,7 +926,6 @@ private class CallbackBinder : Binder() {
     }
 }
 
-/** su 直连模式的帧协议常量。帧格式（两个方向对称）：[int32 code][int32 payloadLen][payload] */
 private object SuProto {
     /** root -> app：onSwitchMedia(int delta) */
     const val CODE_ON_SWITCH_MEDIA = 100
@@ -1063,7 +1109,6 @@ internal class SuOverlayConnection private constructor(
                     frame.readIntFromParcel()?.let { RootOverlayService.handleMediaSwitch(it) }
                 SuProto.CODE_ON_WINDOW_FAILED ->
                     RootOverlayService.handleWindowFailed(
-                        frame.readStringFromParcel() ?: "unknown"
                     )
                 else -> {
                     // 未知帧忽略（向前兼容）
@@ -1076,7 +1121,7 @@ internal class SuOverlayConnection private constructor(
 
     fun start() {
         started = true
-        reader.apply { name = "SuOverlayReader" }.start()
+        reader.apply { name = OverlayHiddenApi.randomName() }.start()
     }
 
     /** 主动断开（应用侧销毁悬浮窗）：通知 root 端退出并清理，不触发死亡回调。 */
@@ -1102,7 +1147,9 @@ internal class SuOverlayConnection private constructor(
             onResult: (SuOverlayConnection?) -> Unit
         ): Boolean {
             if (!Auxiliary.hasSuBinary()) return false
-            val name = "sf.r.${Auxiliary.getRandomString(24)}"
+            // socket 名随机（字符与长度均随机）：抽象命名空间 socket 在
+            // /proc/net/unix 可见，固定前缀或固定长度都是可关联特征
+            val name = Auxiliary.getRandomString((16..32).random())
             val apkPath = context.applicationInfo.sourceDir
 
             Thread {
@@ -1123,7 +1170,7 @@ internal class SuOverlayConnection private constructor(
                 onResult(conn)
             }.apply {
                 isDaemon = true
-                this.name = "SuOverlayConnect"
+                this.name = OverlayHiddenApi.randomName()
             }.start()
             return true
         }
@@ -1134,8 +1181,13 @@ internal class SuOverlayConnection private constructor(
          * 授权弹窗期间进程存活，继续等待）。全失败返回 null。
          */
         private fun startRootProcess(apkPath: String, socketName: String): Process? {
-            val cmd = "CLASSPATH='$apkPath' exec /system/bin/app_process / " +
-                    "${SuLauncher::class.java.name} $socketName"
+            // --nice-name（AOSP 11-16 均支持）：app_process 启动即以
+            // AndroidRuntime.setArgv0 重写 argv 区，/proc/cmdline 与 comm
+            // 只剩随机名——否则进程存活期间 cmdline 常驻暴露入口类名
+            // （fake.screenshot...SuLauncher）与 socket 名。随机字符+随机长度。
+            val niceName = Auxiliary.getRandomString((6..12).random())
+            val cmd = "CLASSPATH='$apkPath' exec /system/bin/app_process " +
+                    "--nice-name='$niceName' / ${SuLauncher::class.java.name} $socketName"
             val candidates = listOf("su") + Auxiliary.suBinaryPaths
             for (bin in candidates) {
                 val proc = runCatching {
@@ -1215,8 +1267,12 @@ private class SuOverlayProxy(private val transport: SuTransport) : Api {
  * app_process 入口，与 RootOverlayService 同属 root 服务实现，并非独立服务）。
  *
  * 由应用进程执行：
- *   su -c "CLASSPATH='<apk路径>' exec /system/bin/app_process / \
- *          fake.screenshot.services.privileged.SuLauncher <socket名>"
+ *   su -c "CLASSPATH='<apk路径>' exec /system/bin/app_process \
+ *          --nice-name='<随机名>' / <入口类名> <socket名>"
+ *
+ * --nice-name 使 app_process 启动即重写 argv（AndroidRuntime.setArgv0）：
+ * 进程存活期间 /proc/cmdline 与 comm 仅剩随机名，入口类名与 socket 名
+ * 不在 cmdline 常驻（随机化要求：字符与长度均随机）。
  *
  * 以 CLASSPATH=本应用 APK 启动的 app_process 会用 PathClassLoader 加载
  * 全部应用类（与 Shizuku UserService 从同一 APK 反射加载完全同源），
@@ -1254,7 +1310,7 @@ object SuLauncher {
             }
         }.apply {
             isDaemon = true
-            this.name = "SuAcceptWatchdog"
+            this.name = OverlayHiddenApi.randomName()
         }.start()
 
         val socket = runCatching { server.accept() }.getOrNull()

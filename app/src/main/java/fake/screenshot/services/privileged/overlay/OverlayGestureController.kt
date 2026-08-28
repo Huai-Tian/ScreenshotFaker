@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.InputDevice
+import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 
@@ -108,12 +109,6 @@ internal class OverlayGestureController(
                 ) {
                     input.pilferPointers()
                     handleDown(event)
-                    android.util.Log.i(
-                        "RootOverlay",
-                        "down HIT (${"%.0f".format(event.x)},${"%.0f".format(event.y)}) " +
-                                "window=($windowX,$windowY ${windowWidth}x${windowHeight}) " +
-                                "screen=(${screenWidth}x${screenHeight}) mode=$lockedMode"
-                    )
                 }
                 // 未命中：不 pilfer，事件自然穿透给下层应用
             }
@@ -214,8 +209,8 @@ internal class OverlayGestureController(
     private fun handleScale(event: MotionEvent) {
         val dx = (event.x - initialTouchX).toInt()
         val dy = (event.y - initialTouchY).toInt()
-        var newW = initialWidth
-        var newH = initialHeight
+        var newW: Int
+        var newH: Int
         var newX = initialX
         var newY = initialY
         when (lockedMode) {
@@ -246,18 +241,9 @@ internal class OverlayGestureController(
 
     /** 与本地模式相同的 clamp 规则。 */
     private fun updateOverlay(x: Int, y: Int, w: Int, h: Int) {
-        if (screenWidth <= 0 || screenHeight <= 0) {
-            // 屏幕尺寸未知：clamp 边界缺失，静默丢弃正是"边框无法操作"的
-            // 隐蔽根因。一次性留 ERROR，之后避免刷屏。
-            if (!loggedScreenSizeFailure) {
-                loggedScreenSizeFailure = true
-                android.util.Log.e(
-                    "RootOverlay",
-                    "updateOverlay skipped: screen size unknown (${screenWidth}x${screenHeight})"
-                )
-            }
-            return
-        }
+        // 屏幕尺寸未知：clamp 边界缺失，静默丢弃（几何信息由 attach 路径
+        // 多路径解析获得，此为极端失败路径）
+        if (screenWidth <= 0 || screenHeight <= 0) return
         val clampedW = w.coerceAtLeast(minSize).coerceAtMost(screenWidth)
         val clampedH = h.coerceAtLeast(minSize).coerceAtMost(screenHeight)
         // coerceAtLeast(0)：窗口大于屏幕（横竖屏切换等）时避免空区间异常
@@ -269,8 +255,6 @@ internal class OverlayGestureController(
         // 手势进行中：合成器变换路径（GPU 缩放/移动，零 canvas 成本）
         backend.setGeometry(clampedX, clampedY, clampedW, clampedH, live = true)
     }
-
-    private var loggedScreenSizeFailure = false
 
     // ==================== 长按 seek 循环 ====================
 
@@ -350,6 +334,11 @@ internal class OverlayGestureController(
      * 直接构造 down+up 注入（uid=0 过 INJECT_EVENTS）。注入事件不经本
      * monitor 拦截（spy 只观察），直接派发到下层窗口。事件源设为
      * touchscreen 且坐标为屏幕绝对坐标——与真实触摸无差异，无注入特征。
+     *
+     * 无 shell 兜底：`/system/bin/input` 的 fork+exec 是无法掩盖的强特征
+     * （进程创建审计、/proc cmdline、input 工具自身 logcat 输出）。
+     * uid=0 下反射注入全版本可用；极端失败路径选择静默丢弃本次 tap
+     * （用户重试即可），绝不以暴露进程特征为代价。
      */
     private fun injectTap(x: Int, y: Int) {
         val now = SystemClock.elapsedRealtime()
@@ -374,31 +363,21 @@ internal class OverlayGestureController(
             0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0 // deviceId, edgeFlags, source, flags
         )
 
-        val injected = runCatching {
+        runCatching {
             val im = Class.forName("android.hardware.input.InputManager")
                 .getMethod("getInstance").invoke(null)
-            // 全版本（11-16，AOSP 逐版本核对）声明为
-            // injectInputEvent(InputEvent, int)——参数类型必须是
-            // InputEvent；用 MotionEvent 查找必抛 NoSuchMethodException，
-            // 导致永远走 shell 兜底（v20 修复）
             val inject = im.javaClass.getMethod(
                 "injectInputEvent",
-                android.view.InputEvent::class.java, Int::class.javaPrimitiveType
+                InputEvent::class.java, Int::class.javaPrimitiveType
             )
             val down = event(MotionEvent.ACTION_DOWN, downTime)
             val up = event(MotionEvent.ACTION_UP, downTime + 16)
-            val okDown = inject.invoke(im, down, 0) as Boolean
-            val okUp = inject.invoke(im, up, 0) as Boolean
-            down.recycle()
-            up.recycle()
-            okDown && okUp
-        }.getOrDefault(false)
-
-        if (!injected) {
-            // 反射不可用（理论不会发生）时兜底命令行注入
-            runCatching {
-                ProcessBuilder("/system/bin/input", "tap", x.toString(), y.toString())
-                    .redirectErrorStream(true).start()
+            try {
+                inject.invoke(im, down, 0)
+                inject.invoke(im, up, 0)
+            } finally {
+                down.recycle()
+                up.recycle()
             }
         }
     }

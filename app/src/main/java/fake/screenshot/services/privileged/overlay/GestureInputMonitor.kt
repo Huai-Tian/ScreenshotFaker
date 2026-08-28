@@ -52,8 +52,6 @@ internal class GestureInputMonitor(
 
     private var reader: Thread? = null
 
-    private val ackBuf = ByteArray(32)
-
     // ==================== 生命周期 ====================
 
     /**
@@ -111,7 +109,7 @@ internal class GestureInputMonitor(
     // ==================== 读取线程 ====================
 
     /**
-     * 读取循环（全链路诊断日志：定位"无法触摸"类问题的唯一观测面）。
+     * 读取循环。
      *
      * InputChannel socket 出厂为 O_NONBLOCK。这里改为阻塞模式：
      * read() 无数据时挂起（零 CPU），stop() 关闭 fd 唤醒线程退出。
@@ -119,13 +117,6 @@ internal class GestureInputMonitor(
      */
     private fun readLoop(fd: ParcelFileDescriptor) {
         val rawFd = fd.fileDescriptor
-        // fd 诊断：确认是 socket 且记录 fd 号
-        val diag = runCatching {
-            val st = android.system.Os.fstat(rawFd)
-            val isSocket = android.system.OsConstants.S_ISSOCK(st.st_mode)
-            "fd=${fd.fd} mode=0x${Integer.toHexString(st.st_mode)} isSocket=$isSocket"
-        }.getOrElse { "fd=${fd.fd} fstat failed: $it" }
-        android.util.Log.i("RootOverlay", "readLoop start: $diag")
 
         // 切换为阻塞模式（清除 O_NONBLOCK），read 挂起等待而非抛 EAGAIN
         runCatching {
@@ -136,92 +127,46 @@ internal class GestureInputMonitor(
                 rawFd, android.system.OsConstants.F_SETFL,
                 flags and android.system.OsConstants.O_NONBLOCK.inv()
             )
-            android.util.Log.i("RootOverlay", "fd set to blocking mode (was: flags=$flags)")
-        }.onFailure {
-            android.util.Log.w("RootOverlay", "fcntl blocking mode failed: $it (继续用非阻塞模式)")
         }
 
         java.io.FileInputStream(rawFd).use { input ->
             java.io.FileOutputStream(rawFd).use { output ->
                 val buf = ByteArray(4096)
-                var msgCount = 0
-                var motionCount = 0
-                var eagainCount = 0
                 while (running) {
                     val n = runCatching { input.read(buf) }.getOrElse { e ->
                         // 阻塞模式下不应出现 EAGAIN；若 fcntl 失败仍为非阻塞，
                         // 用短 sleep 避免 busy loop
                         if (e.message?.contains("again", ignoreCase = true) == true) {
-                            eagainCount++
-                            if (eagainCount <= 3 || eagainCount % 1000 == 0) {
-                                android.util.Log.w(
-                                    "RootOverlay", "EAGAIN #$eagainCount (fd still non-blocking?)"
-                                )
-                            }
                             runCatching { Thread.sleep(10) }
                             0
                         } else {
-                            android.util.Log.e(
-                                "RootOverlay",
-                                "readLoop read failed: ${e.javaClass.simpleName}: ${e.message}"
-                            )
                             -1
                         }
                     }
                     if (n < 0) break
                     if (n == 0) continue
-                    if (n < 8) {
-                        android.util.Log.w("RootOverlay", "short read: n=$n (min 8 for header)")
-                        continue
-                    }
+                    if (n < 8) continue
 
-                    msgCount++
                     val type = InputMessageCodec.typeOf(buf, n)
 
                     // 先 ACK 再派发：防止手势处理阻塞触发派发超时 ANR
                     runCatching {
                         InputMessageCodec.encodeFinishedAck(buf, n)?.let { output.write(it) }
-                    }.onFailure {
-                        android.util.Log.e("RootOverlay", "ack write failed: $it")
                     }
 
                     if (type != 1) continue // 只关心 MOTION
 
-                    val ev = runCatching { InputMessageCodec.parseMotion(buf, n) }.getOrElse {
-                        android.util.Log.w(
-                            "RootOverlay",
-                            "parseMotion failed: ${it.javaClass.simpleName}: ${it.message} (size=$n type=$type)"
-                        )
-                        null
-                    }
-                    if (ev == null) {
-                        android.util.Log.w(
-                            "RootOverlay",
-                            "parseMotion returned null (size=$n pointerCount@12=${wrapInt(buf, 12)})"
-                        )
-                        continue
-                    }
-                    motionCount++
-                    if (motionCount <= 20 || motionCount % 50 == 0) {
-                        // 事件流日志（前 20 条全记，之后抽样）：action + 首指坐标
-                        android.util.Log.i(
-                            "RootOverlay",
-                            "motion #$motionCount/$msgCount action=0x${Integer.toHexString(ev.actionMasked)} " +
-                                    "x=${ev.x} y=${ev.y} pointers=${ev.pointerCount}"
-                        )
-                    }
+                    val ev = runCatching { InputMessageCodec.parseMotion(buf, n) }.getOrNull()
+                        ?: continue
                     runCatching { onEvent(ev) }
                     ev.recycle()
                 }
                 if (running) {
                     running = false
-                    onFatal(IllegalStateException("input channel closed (msgCount=$msgCount)"))
+                    onFatal(IllegalStateException("input channel closed"))
                 }
             }
         }
     }
 
-    private fun wrapInt(buf: ByteArray, off: Int): Int =
-        java.nio.ByteBuffer.wrap(buf, off, 4)
-            .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
 }

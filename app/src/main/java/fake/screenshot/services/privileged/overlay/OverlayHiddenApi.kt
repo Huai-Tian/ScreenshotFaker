@@ -1,11 +1,12 @@
 package fake.screenshot.services.privileged.overlay
 
+import android.annotation.SuppressLint
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
-import android.util.Log
+
 import android.view.SurfaceControl
 import fake.screenshot.Auxiliary
 import java.io.FileDescriptor
@@ -17,18 +18,18 @@ import java.lang.reflect.Method
  * root（uid=0）进程不受 hidden API 策略约束，且已在服务启动时显式调用
  * VMRuntime.setHiddenApiExemptions("L") 双保险，这里统一封装本模块用到的
  * 反射入口，避免各组件散落 try/catch。
+ *
+ * 无痕要求：本模块不输出任何日志。诊断日志是对方案存在性的自述，且
+ * 实测 -keep 规则下 R8 不会消除 OLog 风格开关的字符串常量——唯一可靠
+ * 的无痕做法是源码级不存在的日志。
  */
 internal object OverlayHiddenApi {
 
-    private const val TAG = "RootOverlay"
-
-    /** layer / monitor / channel 名统一随机化：无特征，dump 侧不可关联到应用。 */
-    fun randomName(): String = Auxiliary.getRandomString(16)
-
-    /** 当前进程是否 uid=0（真正的 root 进程，隐藏 API 与签名权限全通过）。 */
-    val isUidRoot: Boolean by lazy {
-        runCatching { android.system.Os.getuid() == 0 }.getOrDefault(false)
-    }
+    /**
+     * layer / monitor / channel / 线程名统一随机化：字符与长度均随机
+     * （固定长度分布本身也是指纹），dump 侧不可关联到应用。
+     */
+    fun randomName(): String = Auxiliary.getRandomString((8..20).random())
 
     /**
      * IInputManager binder 代理（经 ServiceManager.getService("input")）。
@@ -43,6 +44,7 @@ internal object OverlayHiddenApi {
     @Volatile
     private var proxyResolved = false
 
+    @SuppressLint("PrivateApi")
     private fun resolveInputManagerProxy(): Any? {
         if (proxyResolved) return inputManagerProxy
         proxyResolved = true
@@ -51,10 +53,7 @@ internal object OverlayHiddenApi {
             val sm = Class.forName("android.os.ServiceManager")
             val binder = sm.getMethod("getService", String::class.java)
                 .invoke(null, "input") as? IBinder
-                ?: run {
-                    Log.e(TAG, "ServiceManager.getService(\"input\") returned null")
-                    return@runCatching null
-                }
+                ?: return@runCatching null
             val stubNames = listOf(
                 "android.hardware.input.IInputManager\$Stub", // 11-16 全版本实际包名
                 "android.view.IInputManager\$Stub"           // 未来迁移预留
@@ -64,11 +63,7 @@ internal object OverlayHiddenApi {
                 return@runCatching stub.getMethod("asInterface", IBinder::class.java)
                     .invoke(null, binder)
             }
-            Log.e(TAG, "IInputManager\$Stub not found in either package")
             null
-        }.onFailure {
-            // 此前异常被静默吞掉导致无法定位（"proxy unavailable"无原因）
-            Log.e(TAG, "IInputManager proxy reflection failed: $it")
         }.getOrNull()
         return inputManagerProxy
     }
@@ -85,10 +80,7 @@ internal object OverlayHiddenApi {
      * @return android.view.InputMonitor（实例，方法见 [callMonitor]），全部失败返回 null
      */
     fun createGestureMonitor(displayId: Int): Any? {
-        val proxy = resolveInputManagerProxy() ?: run {
-            Log.e(TAG, "IInputManager proxy unavailable (see reflection error above)")
-            return null
-        }
+        val proxy = resolveInputManagerProxy() ?: return null
         val iInt = Int::class.javaPrimitiveType!!
         val name = randomName()
         val attempts = buildList<Pair<Array<Class<*>>, Array<Any>>> {
@@ -113,12 +105,9 @@ internal object OverlayHiddenApi {
         for ((types, args) in attempts) {
             val mon = runCatching {
                 proxy.javaClass.getMethod("monitorGestureInput", *types).invoke(proxy, *args)
-            }.onFailure {
-                Log.w(TAG, "monitorGestureInput ${types.contentToString()} failed: $it")
             }.getOrNull() ?: continue
             return mon
         }
-        Log.e(TAG, "monitorGestureInput unavailable in all known signatures")
         return null
     }
 
@@ -127,8 +116,6 @@ internal object OverlayHiddenApi {
         if (monitor == null) return null
         return runCatching {
             monitor.javaClass.getMethod(method).invoke(monitor)
-        }.onFailure {
-            Log.w(TAG, "InputMonitor.$method failed: $it")
         }.getOrNull()
     }
 
@@ -150,10 +137,7 @@ internal object OverlayHiddenApi {
      *   fd 恒在末尾 24 字节，按位置直取。
      */
     fun channelPfd(inputChannel: Any?): ParcelFileDescriptor? {
-        if (inputChannel == null) {
-            Log.e(TAG, "channelPfd: inputChannel is null")
-            return null
-        }
+        if (inputChannel == null) return null
 
         // 直接访问器（全版本均不存在，快速跳过）
         for (methodName in listOf("getFd", "getFileDescriptor")) {
@@ -162,15 +146,11 @@ internal object OverlayHiddenApi {
             }.getOrNull() ?: continue
             when (ret) {
                 is FileDescriptor ->
-                    return runCatching { ParcelFileDescriptor.dup(ret) }
-                        .onFailure { Log.e(TAG, "dup(FileDescriptor) failed: $it") }
-                        .getOrNull()
+                    return runCatching { ParcelFileDescriptor.dup(ret) }.getOrNull()
 
                 is Int ->
                     if (ret >= 0) {
-                        return runCatching { ParcelFileDescriptor.fromFd(ret) }
-                            .onFailure { Log.e(TAG, "fromFd($ret) failed: $it") }
-                            .getOrNull()
+                        return runCatching { ParcelFileDescriptor.fromFd(ret) }.getOrNull()
                     }
             }
         }
@@ -182,69 +162,40 @@ internal object OverlayHiddenApi {
                 inputChannel.javaClass.getMethod(
                     "writeToParcel", Parcel::class.java, Int::class.javaPrimitiveType
                 ).invoke(inputChannel, parcel, 0)
-            }.onFailure {
-                Log.e(TAG, "writeToParcel reflection failed: $it")
             }
             if (wrote.isFailure) return null
 
             val total = parcel.dataSize()
             parcel.setDataPosition(0)
             val initialized = runCatching { parcel.readInt() }.getOrDefault(0)
-            if (initialized != 1) {
-                Log.e(TAG, "parcel not initialized (flag=$initialized, size=$total)")
-                return null
-            }
-            val envelope = runCatching { parcel.readInt() }.getOrDefault(-1)
-            Log.i(TAG, "parcel total=$total envelope=$envelope")
+            if (initialized != 1) return null
 
             // ---- 全 parcel 扫描定位 FD 对象 ----
             // 字段顺序在不同版本/OEM 间不可靠（v10/v12 两种布局推断均失败），
             // 但 FD 对象必为 24 字节 flat_binder_object（type=BINDER_TYPE_FD
             // =0x66642a85），且 8 字节对齐。逐位置尝试 readFileDescriptor：
             // 命中返回 PFD（fd 为 copyTo 在本进程 dup 的副本，数值对本进程有效）。
-            // 同时输出 int map 供人工核对布局。
-            val map = StringBuilder()
-            var p = 0
-            while (p + 4 <= total) {
-                parcel.setDataPosition(p)
-                val v = runCatching { parcel.readInt() }.getOrDefault(Int.MIN_VALUE)
-                if (v == 0x66642a85) map.append(" [FD@").append(p).append("]")
-                else map.append(' ').append(p).append(':').append(v)
-                p += 4
-            }
-            Log.i(TAG, "parcel int map:$map")
-
             var pos = 4
             while (pos + 24 <= total) {
                 parcel.setDataPosition(pos)
                 val found = runCatching { parcel.readFileDescriptor() }.getOrNull()
                 if (found != null) {
-                    val dup = runCatching { ParcelFileDescriptor.dup(found.fileDescriptor) }
-                        .onFailure { Log.e(TAG, "dup at pos=$pos failed: $it") }
-                        .getOrNull()
+                    val dup = runCatching {
+                        ParcelFileDescriptor.dup(found.fileDescriptor)
+                    }.getOrNull()
                     if (dup != null) {
-                        val fdNum = dup.fd
-                        val statResult = runCatching {
-                            val st = android.system.Os.fstat(dup.fileDescriptor)
-                            android.system.OsConstants.S_ISSOCK(st.st_mode) to st.st_mode
-                        }.getOrNull()
-                        val isSocket = statResult?.first ?: false
-                        Log.i(
-                            TAG,
-                            "fd object found at pos=$pos (scan): fdNum=$fdNum isSocket=$isSocket " +
-                                    "mode=${statResult?.second?.let { "0x" + Integer.toHexString(it) } ?: "fstat failed"}"
-                        )
                         // fd 必须是 socket（InputChannel 为 SOCK_SEQPACKET）。
                         // binder handle 被误读 / stale fd 都不是 socket，跳过。
+                        val isSocket = runCatching {
+                            val st = android.system.Os.fstat(dup.fileDescriptor)
+                            android.system.OsConstants.S_ISSOCK(st.st_mode)
+                        }.getOrDefault(false)
                         if (isSocket) return dup
-                        Log.w(TAG, "fd $fdNum at pos=$pos is not a socket, skipping")
                         runCatching { dup.close() }
                     }
                 }
                 pos += 4
             }
-
-            Log.e(TAG, "no usable socket fd found by scan (total=$total envelope=$envelope)")
             return null
         } finally {
             parcel.recycle()
