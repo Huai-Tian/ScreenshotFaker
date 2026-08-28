@@ -136,10 +136,13 @@ fun HomeCompose() {
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = Color.LightGray),
                 onClick = {
-                    try {
-                        Shizuku.requestPermission(1)
-                    } catch (_: Exception) {
-                        //request permission failed
+                    Auxiliary.refreshShellState()
+                    if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
+                        try {
+                            Shizuku.requestPermission(1)
+                        } catch (_: Exception) {
+                            //request permission failed
+                        }
                     }
                 }
             ) {
