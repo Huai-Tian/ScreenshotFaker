@@ -39,7 +39,7 @@ class ScreenRecordTileService : TileService() {
         super.onClick()
         Auxiliary.refreshShellState()
 
-        if (!Auxiliary.isShellActivated) {
+        if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
             showingNoPermission = !showingNoPermission
             if (showingNoPermission) {
                 clicked = false
@@ -75,7 +75,7 @@ class ScreenRecordTileService : TileService() {
         showingNoPermission = false
         checkAndResetIfProcessDead()
 
-        if (clicked && Auxiliary.isShellActivated) {
+        if (clicked && (Auxiliary.isShellActivated || Auxiliary.isRootActivated)) {
             clicked = false
             serviceScope.launch {
                 startRecording()

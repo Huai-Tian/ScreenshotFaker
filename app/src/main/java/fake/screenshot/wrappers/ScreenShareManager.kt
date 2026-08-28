@@ -99,7 +99,7 @@ object ScreenShareManager {
     }
 
     private fun startScreenShareInternal(): Boolean {
-        if (!(initialized && Auxiliary.isShellActivated)) return false
+        if (!(initialized && (Auxiliary.isShellActivated || Auxiliary.isRootActivated))) return false
         if (relayRunning) return true
         relayJob = scope.launch {
             val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
@@ -264,7 +264,7 @@ object ScreenShareManager {
                 notifyStateChanged()
                 return@launch
             }
-            lastError = if (!Auxiliary.isShellActivated) {
+            lastError = if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
                 context.getString(R.string.no_permission)
             } else {
                 when (initializeInternal()) {

@@ -18,7 +18,7 @@ class ScreenshotTileService : TileService() {
     private var showingNoPermission = false
 
     private fun screenshot() {
-        if (Auxiliary.isShellActivated && clicked) {
+        if ((Auxiliary.isShellActivated || Auxiliary.isRootActivated) && clicked) {
             CoroutineScope(Dispatchers.IO).launch {
                 val savePath = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
@@ -115,7 +115,7 @@ class ScreenshotTileService : TileService() {
         super.onClick()
         Auxiliary.refreshShellState()
 
-        if (!Auxiliary.isShellActivated) {
+        if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
             clicked = false
             showingNoPermission = !showingNoPermission
             updateTileUI()
@@ -133,7 +133,7 @@ class ScreenshotTileService : TileService() {
     override fun onStopListening() {
         super.onStopListening()
         Auxiliary.refreshShellState()
-        if (Auxiliary.isShellActivated && clicked) {
+        if ((Auxiliary.isShellActivated || Auxiliary.isRootActivated) && clicked) {
             screenshot()
         } else {
             showingNoPermission = false

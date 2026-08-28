@@ -40,13 +40,33 @@ object Auxiliary {
     fun hasSuBinary(): Boolean = suPaths.any { File(it).exists() }
 
     fun exec(cmd: String) = runCatching {
-        IShizukuService.Stub.asInterface(Shizuku.getBinder())
-            .newProcess(arrayOf("sh"), null, null)
-            .run {
-                ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
-                    .use { it.write(cmd.toByteArray()) }
-                waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
-            }
+        val shizukuBinder = runCatching { Shizuku.getBinder() }.getOrNull()
+        if (shizukuBinder != null && isShellActivated) {
+            IShizukuService.Stub.asInterface(shizukuBinder)
+                .newProcess(arrayOf("sh"), null, null)
+                .run {
+                    ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
+                        .use { it.write(cmd.toByteArray()) }
+                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
+                }
+        } else if (isRootActivated) {
+            ProcessBuilder("su")
+                .redirectErrorStream(true)
+                .start()
+                .run {
+                    outputStream.use { it.write(cmd.toByteArray()) }
+                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                        .also { destroy() }
+                }
+        } else {
+            ProcessBuilder("sh")
+                .redirectErrorStream(true)
+                .start()
+                .run {
+                    outputStream.use { it.write(cmd.toByteArray()) }
+                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                }
+        }
     }.getOrElse {
         1 to it.stackTraceToString()
     }
@@ -203,6 +223,6 @@ object Auxiliary {
 
 
     private val ParcelFileDescriptor.text
-        get() = ParcelFileDescriptor.AutoCloseInputStream(this)
-            .use { it.bufferedReader().readText() }
+        get() = ParcelFileDescriptor.AutoCloseInputStream(this).bufferedReader()
+            .use { it.readText() }
 }
