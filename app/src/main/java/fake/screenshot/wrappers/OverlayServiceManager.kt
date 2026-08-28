@@ -3,6 +3,9 @@ package fake.screenshot.wrappers
 import android.content.Context
 import android.net.Uri
 import android.view.WindowManager
+import android.widget.Toast
+import androidx.core.content.ContextCompat.getString
+import fake.screenshot.R
 import fake.screenshot.services.ControlOverlayService
 import fake.screenshot.services.DisplayOverlayService
 import fake.screenshot.services.privileged.RootOverlayService
@@ -89,6 +92,7 @@ object OverlayServiceManager {
         val ctx = context.applicationContext
         appContext = ctx
         paramsTouched = false
+        stealthToastShown = false
         // 外观参数与普通路线 DisplayOverlayService.onCreate 同源（DataStore）。
         // 异步读取（IO 作用域，见 configScope 文档）：root 路线的首个消费者
         // onRootConnected 经连接回调异步到达，读取完成晚于连接时补投；
@@ -295,6 +299,8 @@ object OverlayServiceManager {
     /**
      * ROOT 后端失败/断连（su 建立失败、Shizuku 死亡、root 端窗口挂载失败）：
      * 清理 ROOT 路线并回落普通悬浮窗路线，悬浮窗不中断。
+     * 隐藏性降级：root 路线承诺截图排除，普通路线仅尽力排除——
+     * Toast 告知用户当前会话截图可能包含悬浮窗（功能不受影响）。
      */
     private fun fallbackToNormalRoute() {
         val ctx = appContext ?: return
@@ -308,5 +314,30 @@ object OverlayServiceManager {
         _isDisplayRunning.value = false
         _isControlRunning.value = false
         startNormalRoute(ctx, withControl = controlDesired)
+        notifyStealthDegraded(ctx)
     }
+
+    /**
+     * 隐藏性降级统一提示。同一会话只提示一次：root 失败回落 +
+     * 普通路线排除失败都指向同一事实（截图可能包含悬浮窗），
+     * 重复弹出让用户烦躁。与会话级失效对齐（非持久化）。
+     * 公开方法：DisplayOverlayService 排除重试终态失败时同样接入。
+     */
+    fun notifyStealthDegradedPublic(ctx: Context) {
+        if (stealthToastShown) return
+        stealthToastShown = true
+        runCatching {
+            Toast.makeText(
+                ctx,
+                getString(ctx, R.string.overlay_failed),
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun notifyStealthDegraded(ctx: Context) = notifyStealthDegradedPublic(ctx)
+
+    /** [notifyStealthDegraded] 的会话级去重（悬浮窗停止时复位）。 */
+    @Volatile
+    private var stealthToastShown = false
 }

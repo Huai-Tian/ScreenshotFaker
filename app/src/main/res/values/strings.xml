@@ -150,6 +150,7 @@
     <string name="select_media_files">Select media files</string>
     <string name="select_media_files_to_be_displayed">Select the media files to be displayed</string>
     <string name="overlay_permission_required">Overlay permission is required for this function.</string>
+    <string name="overlay_failed">Stealth Mode Failed</string>
     <!--TileService-->
     <string name="no_permission">No permission</string>
     <string name="collapse_to_start">Collapse to start</string>

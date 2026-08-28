@@ -101,7 +101,8 @@ class DisplayOverlayService : Service() {
                 val mp = service.mediaPlayer ?: return
                 val duration = mp.duration
                 if (duration <= 0) return
-                val target = (mp.currentPosition + deltaMs).coerceIn(0, (duration - 250).coerceAtLeast(0))
+                val target =
+                    (mp.currentPosition + deltaMs).coerceIn(0, (duration - 250).coerceAtLeast(0))
                 mp.seekTo(target)
             }
         }
@@ -280,7 +281,7 @@ class DisplayOverlayService : Service() {
 
 
         floatingView.post {
-            floatingView.enableScreenshotExclusion()
+            applyScreenshotExclusionWithRetry()
         }
 
         mediaList = OverlayServiceManager.mediaList.value
@@ -293,6 +294,17 @@ class DisplayOverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    private fun applyScreenshotExclusionWithRetry(attempt: Int = 0) {
+        val view = floatingView
+        if (view.windowToken == null) return // 尚未 attach：等下一轮或终止
+        if (view.enableScreenshotExclusion()) return
+        if (attempt >= 2) {
+            OverlayServiceManager.notifyStealthDegradedPublic(this)
+            return
+        }
+        view.postDelayed({ applyScreenshotExclusionWithRetry(attempt + 1) }, 500)
+    }
 
     override fun onDestroy() {
         super.onDestroy()
