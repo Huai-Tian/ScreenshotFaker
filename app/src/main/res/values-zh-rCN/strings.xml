@@ -34,7 +34,6 @@
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
     <string name="filter_content_observer">过滤目标应用的截屏文件监控</string>
     <string name="backup_config">备份配置</string>
-    <string name="restore">还原</string>
     <string name="restore_config">还原配置</string>
     <string name="about">关于</string>
     <string name="detach">脱离</string>
@@ -102,7 +101,6 @@
     <string name="stealth_file_prefix">文件名前缀</string>
     <string name="stealth_file_suffix">文件后缀名</string>
     <string name="screencasting">屏幕共享中</string>
-    <string name="initializing">初始化中</string>
     <string name="tips">提示</string>
     <string name="go_to_settings">跳转到设置</string>
     <string name="Confirm">确定</string>
@@ -129,9 +127,7 @@
     <string name="retain_if_not_selected">不选择则保留原图标</string>
     <string name="packaging_failed">打包失败：</string>
     <string name="package_and_install">打包并安装</string>
-    <string name="backup">备份</string>
     <string name="view_daemon_status">查看守护进程状态</string>
-    <string name="permission_denied">没有权限</string>
     <string name="screenshot_condition">截屏条件</string>
     <string name="screenRecord_condition">录屏条件</string>
     <string name="refresh">刷新</string>

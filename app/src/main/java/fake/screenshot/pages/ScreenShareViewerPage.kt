@@ -83,6 +83,7 @@ import fake.screenshot.wrappers.ScreenShareReceiverManager
 @Composable
 fun ScreenShareViewerCompose(configId: Int) {
     val context = LocalContext.current
+    val injectFailedMessage = stringResource(R.string.receiver_inject_failed)
     var config by remember { mutableStateOf<ScreenShareReceiverConfig?>(null) }
     var receiver by remember { mutableStateOf<ScreenShareReceiver?>(null) }
     // 滚动模式：视频区单指拖动转为滚动事件（默认触摸模式直接注入触摸）
@@ -125,7 +126,7 @@ fun ScreenShareViewerCompose(configId: Int) {
                 injectError?.let { err ->
                     Toast.makeText(
                         context,
-                        "receiver_inject_failed $err",
+                        injectFailedMessage + err,
                         Toast.LENGTH_LONG
                     ).show()
                     r.injectError.value = null

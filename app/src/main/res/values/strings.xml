@@ -66,9 +66,7 @@
     <string name="packaging_success">Packaging complete. Please confirm installation in the system dialog.</string>
     <string name="packaging_failed">Packaging failed: </string>
     <string name="package_and_install">Package and install</string>
-    <string name="backup">Backup</string>
     <string name="backup_config">Backup Config</string>
-    <string name="restore">Restore</string>
     <string name="restore_config">Restore Config</string>
     <string name="about">About</string>
     <string name="refresh">Refresh</string>
@@ -156,7 +154,6 @@
     <string name="collapse_to_start">Collapse to start</string>
     <string name="stealth_screencast">Stealth Screencast</string>
     <string name="screencasting">Screencasting</string>
-    <string name="initializing">Initializing</string>
     <string name="initialize_failed">Initialize failed</string>
     <!--Style-->
     <string name="crop_icon">Crop icon</string>
@@ -174,7 +171,6 @@
     <string name="Cancel">Cancel</string>
     <string name="not_running">Not running</string>
     <string name="running">Running</string>
-    <string name="permission_denied">Permission denied</string>
     <string name="delete">Delete</string>
     <string name="add_receiver">Add receiver</string>
     <string name="edit_receiver">Edit receiver</string>
