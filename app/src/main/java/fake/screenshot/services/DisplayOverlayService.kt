@@ -140,11 +140,6 @@ class DisplayOverlayService : Service() {
         }
 
         @JvmStatic
-        fun getDisplayAlpha(): Float {
-            return instanceRef?.get()?.currentAlpha ?: 1.0f
-        }
-
-        @JvmStatic
         fun reloadMediaList() {
             instanceRef?.get()?.let { service ->
                 service.mediaList = OverlayServiceManager.mediaList.value
@@ -168,12 +163,6 @@ class DisplayOverlayService : Service() {
                 }
             }
         }
-
-        @JvmStatic
-        fun isMuted(): Boolean {
-            return instanceRef?.get()?.isMuted ?: false
-        }
-
     }
 
     private lateinit var windowManager: WindowManager
@@ -280,6 +269,10 @@ class DisplayOverlayService : Service() {
         isMuted = savedMuted
 
 
+        // 截图排除（尽力而为 + 短重试）：排除失败仅提示用户，不中断功能
+        // ——普通路线是最终兜底，失败即停会导致悬浮窗彻底不可用。
+        // 重试覆盖"SurfaceControl 未就绪"的时序性假失败；终态失败经
+        // Toast 告知（隐藏性降级，见 OverlayServiceManager 同一提示）
         floatingView.post {
             applyScreenshotExclusionWithRetry()
         }
@@ -295,6 +288,12 @@ class DisplayOverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
+    /**
+     * 截图排除重试（500ms × 3，总预算 1.5s）：View 挂载初期个别 ROM 的
+     * SurfaceControl 尚未就绪属时序性假失败，立即重试即可恢复；连续失败
+     * 判定能力缺失（隐藏 API 被封等），经 OverlayServiceManager 统一
+     * Toast 告知。服务已销毁（floatingView 为 null / 未加窗）则静默终止。
+     */
     private fun applyScreenshotExclusionWithRetry(attempt: Int = 0) {
         val view = floatingView
         if (view.windowToken == null) return // 尚未 attach：等下一轮或终止

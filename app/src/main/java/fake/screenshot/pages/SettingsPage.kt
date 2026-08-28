@@ -54,12 +54,6 @@ fun SettingsCompose(navController: NavController) {
         "daemon_socket_port",
         1234
     )
-    val daemonVerificationPassword by ConfigManager.rememberValue(
-        context,
-        "daemon_verification_password",
-        "ScreenshotFaker"
-    )
-    var daemonVerificationPasswordInputText by remember { mutableStateOf(daemonVerificationPassword) }
     var daemonSocketPortInputText by remember { mutableStateOf(daemonSocketPort.toString()) }
     val daemonConfigSeparator by ConfigManager.rememberValue(
         context,
@@ -106,7 +100,7 @@ fun SettingsCompose(navController: NavController) {
                 daemonScreenshotConfigInputText,
                 daemonScreenRecordConfigInputText,
                 daemonScreenShareConfigInputText
-            ) && daemonVerificationPasswordInputText.isNotBlank()
+            )
 
         }
     }
@@ -290,7 +284,6 @@ fun SettingsCompose(navController: NavController) {
                             )
                         },
                         onClick = {
-                            daemonVerificationPasswordInputText = daemonVerificationPassword
                             daemonSocketPortInputText = daemonSocketPort.toString()
                             daemonConfigSeparatorInputText = daemonConfigSeparator
                             daemonScreenshotConfigInputText = daemonScreenshotConfig
@@ -468,14 +461,6 @@ fun SettingsCompose(navController: NavController) {
                             singleLine = true
                         )
                         OutlinedTextField(
-                            value = daemonVerificationPasswordInputText,
-                            onValueChange = { daemonVerificationPasswordInputText = it }, // 可编辑
-                            label = { Text(stringResource(R.string.verification_password)) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
                             value = daemonConfigSeparatorInputText,
                             onValueChange = { daemonConfigSeparatorInputText = it },
                             label = { Text(stringResource(R.string.config_separator)) },
@@ -573,25 +558,14 @@ fun SettingsCompose(navController: NavController) {
                                 }
                                 val newPort = daemonSocketPortInputText.toInt()
                                 val portChanged = daemonSocketPort != newPort
-                                val passwordChanged =
-                                    daemonVerificationPassword != daemonVerificationPasswordInputText
-                                if (portChanged || passwordChanged) {
+                                if (portChanged) {
                                     val wasRunning = isDaemonRunning
                                     isDaemonRunning = !DaemonManager.stopDaemon()
-                                    if (portChanged) {
-                                        ConfigManager.saveData(
-                                            context,
-                                            "daemon_socket_port",
-                                            newPort
-                                        )
-                                    }
-                                    if (passwordChanged) {
-                                        ConfigManager.saveData(
-                                            context,
-                                            "daemon_verification_password",
-                                            daemonVerificationPasswordInputText
-                                        )
-                                    }
+                                    ConfigManager.saveData(
+                                        context,
+                                        "daemon_socket_port",
+                                        newPort
+                                    )
                                     if (wasRunning) isDaemonRunning = DaemonManager.startDaemon()
                                 }
                             }

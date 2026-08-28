@@ -396,12 +396,8 @@ fun ExtensionCompose() {
         }
     }
     //File Encrypt/Decrypt
-    val daemonVerificationPassword by ConfigManager.rememberValue(
-        context,
-        "daemon_verification_password",
-        "ScreenshotFaker"
-    )
-    var daemonVerificationPasswordInputText by remember { mutableStateOf(daemonVerificationPassword) }
+    // 密码加密为独立便携功能：不再与守护进程密钥关联，每次手动输入
+    var fileEncryptionPasswordInputText by remember { mutableStateOf("") }
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var selectedUris by remember { mutableStateOf(emptyList<Uri>()) }
@@ -709,7 +705,6 @@ fun ExtensionCompose() {
                         },
                         onClick = {
                             if (Environment.isExternalStorageManager()) {
-                                daemonVerificationPasswordInputText = daemonVerificationPassword
                                 pickFilesForPasswordLauncher.launch(arrayOf("*/*"))
                             } else {
                                 externalStorageRequireDialog = true
@@ -1896,8 +1891,8 @@ fun ExtensionCompose() {
                 title = { Text(stringResource(R.string.operation_selection)) },
                 text = {
                     OutlinedTextField(
-                        value = daemonVerificationPasswordInputText,
-                        onValueChange = { daemonVerificationPasswordInputText = it },
+                        value = fileEncryptionPasswordInputText,
+                        onValueChange = { fileEncryptionPasswordInputText = it },
                         label = { Text(stringResource(R.string.verification_password)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         modifier = Modifier.fillMaxWidth(),
@@ -1912,14 +1907,14 @@ fun ExtensionCompose() {
                                 isProcessing = true
                                 processFilesByPassword(
                                     selectedUris,
-                                    daemonVerificationPasswordInputText,
+                                    fileEncryptionPasswordInputText,
                                     encrypt = true
                                 )
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
                         },
-                        enabled = daemonVerificationPasswordInputText.isNotBlank()
+                        enabled = fileEncryptionPasswordInputText.isNotBlank()
                     ) {
                         Text(stringResource(R.string.encrypt))
                     }
@@ -1932,14 +1927,14 @@ fun ExtensionCompose() {
                                 isProcessing = true
                                 processFilesByPassword(
                                     selectedUris,
-                                    daemonVerificationPasswordInputText,
+                                    fileEncryptionPasswordInputText,
                                     encrypt = false
                                 )
                                 isProcessing = false
                                 selectedUris = emptyList()
                             }
                         },
-                        enabled = daemonVerificationPasswordInputText.isNotBlank()
+                        enabled = fileEncryptionPasswordInputText.isNotBlank()
 
                     ) {
                         Text(stringResource(R.string.decrypt))

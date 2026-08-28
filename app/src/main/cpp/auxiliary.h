@@ -33,9 +33,7 @@
 
 using namespace std;
 // ===================== 加密常量 =====================
-const string SALT = "ScreenshotFakerSalt";
-const int PBKDF2_ITERATIONS = 200000;
-const int KEY_LEN = 32;          // 256 bits
+const int KEY_LEN = 32;          // 256 bits（通信密钥，由 App 侧经 stdin 递交）
 const int TAG_LEN = 16;          // 128 bits
 const int NONCE_LEN = 12;
 const long long TIME_SKEW_SECONDS = 10;
@@ -121,9 +119,6 @@ inline string getRandomString(int length) {
 long long get_current_timestamp_seconds();
 
 bool is_timestamp_valid(long long ts);
-
-// ===================== 密钥派生 =====================
-vector<unsigned char> derive_key(const string &password);
 
 // ===================== 加密 / 解密 =====================
 vector<unsigned char> encrypt_data(const vector<unsigned char> &key, const string &plaintext);

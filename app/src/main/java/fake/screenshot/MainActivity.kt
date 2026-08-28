@@ -53,6 +53,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.crypto.tink.aead.AeadConfig
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
+import fake.screenshot.wrappers.EncryptManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -79,6 +80,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.addBinderDeadListener(deadListener)
         Shizuku.addBinderReceivedListener(receivedListener)
         DaemonManager.init(applicationContext)
+        EncryptManager.init(applicationContext)
         runBlocking {
             val enableFlagSecure =
                 ConfigManager.getDataOnce(applicationContext, "enable_flag_secure", true)

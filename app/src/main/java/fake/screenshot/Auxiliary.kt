@@ -39,6 +39,17 @@ object Auxiliary {
 
     fun hasSuBinary(): Boolean = suPaths.any { File(it).exists() }
 
+    /**
+     * 统一命令执行入口（Shizuku / 直连 su）。
+     *
+     * - Shizuku 可用 → 经 Shizuku shell（uid 决定权限，root 型 Shizuku 天然 uid=0）；
+     * - Shizuku 不可用但 root 可用 → 本地直连 su：stdin 模式递交命令（cmdline
+     *   仅剩 "su"，与 RootOverlayService 的无痕启动方式一致），redirectErrorStream
+     *   合流 stderr（对齐 Hail HShell 的行为）；
+     * - 都不可用 → 回退本地 sh（非 root，供探测类命令使用）。
+     *
+     * 任何一层失败返回 1 to 堆栈，与既有调用点约定（exitCode==0 判成功）不变。
+     */
     fun exec(cmd: String) = runCatching {
         val shizukuBinder = runCatching { Shizuku.getBinder() }.getOrNull()
         if (shizukuBinder != null && isShellActivated) {
@@ -55,6 +66,8 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
+                    // 合流后 stderr 已并入 stdout，勿再读 errorStream
+                    // （与其共享管道，读已关闭端会抛 IOException）
                     waitFor() to inputStream.bufferedReader().use { it.readText() }
                         .also { destroy() }
                 }
@@ -64,6 +77,45 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
+                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                }
+        }
+    }.getOrElse {
+        1 to it.stackTraceToString()
+    }
+
+    /**
+     * exec 的二进制 stdin 变体：命令经 argv 递交（sh -c），stdin 管道完整保留给
+     * 目标进程读取二进制数据（如守护进程的裸密钥 32 字节）。
+     *
+     * 命令不走 stdin 的原因：shell 以脚本模式读 stdin 时可能预读吞掉后续字节；
+     * sh -c 则完全不消费 stdin。cmdline 仅含 "sh -c <cmd>"，不含 stdin 数据。
+     */
+    fun execWithStdin(cmd: String, stdinData: ByteArray) = runCatching {
+        val shizukuBinder = runCatching { Shizuku.getBinder() }.getOrNull()
+        if (shizukuBinder != null && isShellActivated) {
+            IShizukuService.Stub.asInterface(shizukuBinder)
+                .newProcess(arrayOf("sh", "-c", cmd), null, null)
+                .run {
+                    ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
+                        .use { it.write(stdinData) }
+                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
+                }
+        } else if (isRootActivated) {
+            ProcessBuilder("su", "-c", cmd)
+                .redirectErrorStream(true)
+                .start()
+                .run {
+                    outputStream.use { it.write(stdinData) }
+                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                        .also { destroy() }
+                }
+        } else {
+            ProcessBuilder("sh", "-c", cmd)
+                .redirectErrorStream(true)
+                .start()
+                .run {
+                    outputStream.use { it.write(stdinData) }
                     waitFor() to inputStream.bufferedReader().use { it.readText() }
                 }
         }
@@ -153,7 +205,14 @@ object Auxiliary {
 
     private val secureRandom = java.security.SecureRandom()
 
-
+    /**
+     * 随机字符串（字母数字，密码学安全）。
+     *
+     * 全项目随机命名的统一入口：内部为 SecureRandom——观测任意数量
+     * 输出也无法恢复状态或预测后续输出（kotlin.random 的 XORWOW/
+     * PCG 状态可由数十个输出恢复，曾经的旧实现因此不可用于安全命名）。
+     * 输出不可预测即同时满足不可关联：跨会话的名字之间无统计关联。
+     */
     fun getRandomString(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         return (1..length)
@@ -161,6 +220,11 @@ object Auxiliary {
             .joinToString("")
     }
 
+    /**
+     * 随机字符串（首字符限字母数字，其余可含 '-'/'_'，密码学安全）。
+     * 语义与 [getRandomString] 一致，仅字符集扩展（文件名/组件名等
+     * 首字符受限场景），随机源同为 SecureRandom。
+     */
     fun getRandomStringEx(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         val fullChars = allowedChars + listOf('-', '_')
@@ -171,20 +235,24 @@ object Auxiliary {
         return first + rest
     }
 
+    /** 密码学安全随机整数（range 闭区间均匀分布）。 */
     fun getSecureRandomInt(range: IntRange): Int =
         range.first + secureRandom.nextInt(range.last - range.first + 1)
 
+    /** 密码学安全随机浮点（[0,1) 均匀分布）。 */
     fun getSecureRandomFloat(): Float = secureRandom.nextFloat()
 
+    /** 密码学安全随机长整数（[0,bound) 均匀分布，拒绝采样）。 */
     fun getSecureRandomLong(bound: Long): Long {
         require(bound > 0)
         while (true) {
             val bits = secureRandom.nextLong() ushr 1
             val v = bits % bound
-            if (bits - v + (bound - 1) >= 0) return v
+            if (bits - v + (bound - 1) >= 0) return v // 无偏：丢弃造成模偏差的样本
         }
     }
 
+    /** [getRandomString] 的别名（安全语义显式化场景使用）。 */
     fun getSecureRandomString(length: Int): String = getRandomString(length)
 
     @SuppressLint("BlockedPrivateApi")

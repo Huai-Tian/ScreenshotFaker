@@ -31,6 +31,8 @@ class ScreenRecordTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
+        // 磁贴可能先于 MainActivity 运行（如重启后直接点磁贴），确保 DK 上下文就绪
+        EncryptManager.init(applicationContext)
         checkAndResetIfProcessDead()
         updateTileUI()
     }

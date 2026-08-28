@@ -136,6 +136,10 @@ fun HomeCompose() {
                 shape = MaterialTheme.shapes.medium,
                 colors = CardDefaults.cardColors(containerColor = Color.LightGray),
                 onClick = {
+                    // 先刷新权限状态（root 探测在 refreshShellState 内级联）：
+                    // - su 可用 → isRootActivated 变 true，状态自动翻转为已激活，
+                    //   无需弹 Shizuku（exec 的 su 直连分支已可用）
+                    // - 仍无任何权限 → 弹 Shizuku 授权引导
                     Auxiliary.refreshShellState()
                     if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
                         try {

@@ -13,7 +13,7 @@ string ssh_options;
 atomic_bool auto_encrypt = false;
 string scrcpy_path;
 vector<unsigned char> scrcpy_data;
-// 通信密钥（main 派生后填充，之后只读；filter 线程加密输出使用）
+// 通信密钥（main 从 stdin 读取后填充，之后只读；filter 线程加密输出使用）
 vector<unsigned char> g_key;
 atomic_bool filter_update = false;
 mutex config_mutex;
@@ -884,7 +884,7 @@ void filter_thread_main() {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
+    if (argc < 2) {
         return 1;
     }
     char *endptr;
@@ -893,13 +893,23 @@ int main(int argc, char *argv[]) {
     if (errno != 0 || endptr == argv[1] || *endptr != '\0' || port < 1024 || port > 65535) {
         return 1;
     }
-    string password = argv[2];
+    // 密钥经 stdin 递交（32 字节裸密钥，由 App 侧 Keystore 包裹的随机 DK 解包而来）：
+    // - 不经 argv，避免 cmdline 泄露（exec 到读取之间无暴露窗口）；
+    // - 必须在 daemonize() 之前读取——daemonize 会将 stdin 重定向到 /dev/null。
+    vector<unsigned char> dk(KEY_LEN);
+    size_t got = 0;
+    while (got < dk.size()) {
+        ssize_t n = read(STDIN_FILENO, dk.data() + got, dk.size() - got);
+        if (n <= 0) {
+            return 1;
+        }
+        got += static_cast<size_t>(n);
+    }
     daemonize();
     signal(SIGPIPE, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
-    g_key = derive_key(password);
+    g_key = std::move(dk);
     const vector<unsigned char> &key = g_key;
-    __builtin_memset(argv[2], 0, strlen(argv[2]));
     __builtin_memset(argv[1], 0, strlen(argv[1]));
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -1130,14 +1140,6 @@ bool is_timestamp_valid(long long ts) {
     long long diff = now - ts;
     if (diff < 0) diff = -diff;
     return diff <= TIME_SKEW_SECONDS;
-}
-
-vector<unsigned char> derive_key(const string &password) {
-    vector<unsigned char> key(KEY_LEN);
-    PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.size()),
-                      (const unsigned char *) SALT.c_str(), static_cast<int>(SALT.size()),
-                      PBKDF2_ITERATIONS, EVP_sha256(), KEY_LEN, key.data());
-    return key;
 }
 
 vector<unsigned char> encrypt_data(const vector<unsigned char> &key, const string &plaintext) {

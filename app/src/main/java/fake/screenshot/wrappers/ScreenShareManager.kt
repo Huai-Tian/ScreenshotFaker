@@ -215,6 +215,10 @@ object ScreenShareManager {
             // 不含任何工具特征字样
             val stopFlag = "/data/local/tmp/.s_$relayName"
             val watchPath = "/data/local/tmp/.w_$relayName.sh"
+            // $$ 前缀（multi-dollar interpolation，Kotlin 2.2+ 默认启用）：
+            // 前缀字符串内单 $ 为字面量、$$ 才触发 Kotlin 插值。
+            // 仅 $标识符 形式（$STOP/$d/$n）需要前缀；$ 后跟标点
+            // （$(date)、$((e - s))）在普通字符串中本就是字面量，无需前缀
             val script = listOf(
                 "STOP=$stopFlag",
                 $$"rm -f \"$STOP\"",

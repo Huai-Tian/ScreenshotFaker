@@ -23,20 +23,11 @@ object DaemonManager {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
-    // 缓存密钥（密码不变则复用）
-    private var cachedPassword: String? = null
+    // 缓存密钥（DK 由 EncryptManager 经 Keystore 包裹管理，进程内复用）
     private var cachedKey: SecretKeySpec? = null
 
     fun init(context: Context) {
         appContext = context.applicationContext
-    }
-
-    private suspend fun getPassword(): String {
-        return ConfigManager.getDataOnce(
-            appContext,
-            "daemon_verification_password",
-            "ScreenshotFaker"
-        )
     }
 
     private suspend fun getPort(): Int {
@@ -47,23 +38,13 @@ object DaemonManager {
         )
     }
 
-    private suspend fun getKey(): SecretKeySpec {
-        val password = getPassword()
-        return if (cachedPassword == password && cachedKey != null) {
-            cachedKey!!
-        } else {
-            val key = EncryptManager.deriveKey(password)
-            cachedPassword = password
-            cachedKey = key
-            key
-        }
-    }
+    private fun getKey(): SecretKeySpec =
+        cachedKey ?: EncryptManager.getOrCreateDaemonKey().also { cachedKey = it }
 
     suspend fun startDaemon(): Boolean = mutex.withLock {
         if (isDaemonRunning()) return true
 
         val port = getPort()
-        val password = getPassword()
 
         // 检查端口是否被其他进程占用（仅连接测试，不发送数据）
         try {
@@ -76,7 +57,11 @@ object DaemonManager {
         }
 
         withContext(Dispatchers.IO) {
-            val (exitCode, _) = Auxiliary.exec("${appContext.applicationInfo.nativeLibraryDir}/libdaemon.so $port $password")
+            // 密钥经 stdin 递交（不经 argv，避免 cmdline 泄露），
+            // 命令行仅含二进制路径与端口
+            val key = getKey()
+            val daemonPath = "${appContext.applicationInfo.nativeLibraryDir}/libdaemon.so"
+            val (exitCode, _) = Auxiliary.execWithStdin("$daemonPath $port", key.encoded)
             if (exitCode != 0) {
                 return@withContext false
             }
