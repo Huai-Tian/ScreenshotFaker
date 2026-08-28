@@ -175,13 +175,17 @@ class RootOverlayService : Binder() {
         //     ACTION_UP settle：matrix 归一 + 精确 bufferSize + 一次
         //     全量重绘。panImage/scaleImage 保留节流。手柄 live 期间
         //     隐藏（避免非等比拉伸变形），settle 恢复。
+        // v20：跨版本审计修复：injectTap 反射参数类型 MotionEvent →
+        //     InputEvent（全版本声明为 injectInputEvent(InputEvent, int)，
+        //     原写法必抛 NoSuchMethodException → 视频单击透传一直走
+        //     /system/bin/input shell 兜底，fork 进程 + 注入特征）。
         // （su 直连路径不经过 Shizuku，与该版本号无关）
         private val args by lazy {
             Shizuku.UserServiceArgs(
                 ComponentName(APPLICATION_ID, RootOverlayService::class.java.name)
             )
                 .processNameSuffix("overlay")
-                .version(19)
+                .version(20)
         }
 
         @Volatile

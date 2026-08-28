@@ -377,8 +377,13 @@ internal class OverlayGestureController(
         val injected = runCatching {
             val im = Class.forName("android.hardware.input.InputManager")
                 .getMethod("getInstance").invoke(null)
+            // 全版本（11-16，AOSP 逐版本核对）声明为
+            // injectInputEvent(InputEvent, int)——参数类型必须是
+            // InputEvent；用 MotionEvent 查找必抛 NoSuchMethodException，
+            // 导致永远走 shell 兜底（v20 修复）
             val inject = im.javaClass.getMethod(
-                "injectInputEvent", MotionEvent::class.java, Int::class.javaPrimitiveType
+                "injectInputEvent",
+                android.view.InputEvent::class.java, Int::class.javaPrimitiveType
             )
             val down = event(MotionEvent.ACTION_DOWN, downTime)
             val up = event(MotionEvent.ACTION_UP, downTime + 16)
