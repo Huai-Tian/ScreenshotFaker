@@ -450,7 +450,7 @@ class ControlOverlayService : Service() {
         }
         val channel = NotificationChannel(
             channelId,
-            Auxiliary.getRandomString((20..30).random()),
+            Auxiliary.getRandomString(Auxiliary.getSecureRandomInt(20..30)),
             NotificationManager.IMPORTANCE_LOW
         )
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager

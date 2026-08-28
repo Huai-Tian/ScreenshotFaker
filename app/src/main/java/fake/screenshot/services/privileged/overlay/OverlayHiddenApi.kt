@@ -28,8 +28,11 @@ internal object OverlayHiddenApi {
     /**
      * layer / monitor / channel / 线程名统一随机化：字符与长度均随机
      * （固定长度分布本身也是指纹），dump 侧不可关联到应用。
+     * SecureRandom：这些名字中包含 root 通道 socket 名等直接构成通道
+     * 地址的值，必须对抗猜测（kotlin.random 的输出可预测，不适用）。
      */
-    fun randomName(): String = Auxiliary.getRandomString((8..20).random())
+    fun randomName(lengthRange: IntRange = 8..20): String =
+        Auxiliary.getSecureRandomString(Auxiliary.getSecureRandomInt(lengthRange))
 
     /**
      * IInputManager binder 代理（经 ServiceManager.getService("input")）。
@@ -265,8 +268,9 @@ internal object OverlayHiddenApi {
 
     /**
      * setSkipScreenshot(SurfaceControl, boolean)：Transaction 隐藏方法（12+）。
-     * root 进程无限制；失败不影响主流程（FLAG_SECURE 已无窗口可用，这是
-     * 截图排除的唯一手段——返回 false 提示调用方记录，不作为致命错误）。
+     * root 进程无限制。返回 false 表示本层排除失败：截图/录屏将包含
+     * 悬浮窗，直接违背无痕语义——调用方必须致命化处理（上报回落），
+     * 不得静默降级。
      */
     fun applySkipScreenshot(layer: SurfaceControl): Boolean {
         return runCatching {

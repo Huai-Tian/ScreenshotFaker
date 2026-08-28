@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 ConfigManager.saveData(
                     applicationContext,
                     "overlay_service_display_channel_name",
-                    Auxiliary.getRandomString((20..30).random())
+                    Auxiliary.getRandomString(Auxiliary.getSecureRandomInt(20..30))
                 )
             }
             if (ConfigManager.getDataOnce(
@@ -111,7 +111,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 ConfigManager.saveData(
                     applicationContext,
                     "overlay_service_display_channel_id",
-                    (1000..4999).random()
+                    Auxiliary.getSecureRandomInt(1000..4999)
                 )
             }
             if (ConfigManager.getDataOnce(
@@ -123,7 +123,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 ConfigManager.saveData(
                     applicationContext,
                     "overlay_service_control_channel_name",
-                    Auxiliary.getRandomString((31..36).random())
+                    Auxiliary.getRandomString(Auxiliary.getSecureRandomInt(31..36))
                 )
             }
             if (ConfigManager.getDataOnce(
@@ -135,7 +135,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 ConfigManager.saveData(
                     applicationContext,
                     "overlay_service_control_channel_id",
-                    (5000..9999).random()
+                    Auxiliary.getSecureRandomInt(5000..9999)
                 )
             }
         }

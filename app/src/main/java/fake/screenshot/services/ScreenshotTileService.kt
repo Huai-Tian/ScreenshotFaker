@@ -59,7 +59,7 @@ class ScreenshotTileService : TileService() {
                     if (!exists()) mkdirs()
                 }
                 val fileName = when {
-                    fullRandom -> Auxiliary.getRandomStringEx((16..24).random())
+                    fullRandom -> Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(16..24))
                     customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
                     else -> "${Auxiliary.getCurrentDateString()}_${
                         Auxiliary.getRandomString(
@@ -67,7 +67,7 @@ class ScreenshotTileService : TileService() {
                         )
                     }$suffix"
                 }
-                val tempName = Auxiliary.getRandomStringEx((20..35).random())
+                val tempName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
                 val args = listOf(
                     "screencap",
                     "-p",

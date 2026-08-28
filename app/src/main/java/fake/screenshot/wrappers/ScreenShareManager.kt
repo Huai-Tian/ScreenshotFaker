@@ -88,7 +88,7 @@ object ScreenShareManager {
                 )
             }
         }
-        relayName = Auxiliary.getRandomStringEx((20..35).random())
+        relayName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
         val src = "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
         val (exitCode, output) = Auxiliary.exec("cp $src /data/local/tmp/$relayName")
         if (exitCode != 0) {
@@ -217,18 +217,18 @@ object ScreenShareManager {
             val watchPath = "/data/local/tmp/.w_$relayName.sh"
             val script = listOf(
                 "STOP=$stopFlag",
-                "rm -f \"\$STOP\"",
+                $$"rm -f \"$STOP\"",
                 "n=0",
-                "while [ ! -f \"\$STOP\" ]; do",
-                "  s=\$(date +%s)",
+                $$"while [ ! -f \"$STOP\" ]; do",
+                "  s=$(date +%s)",
                 "  $serverCmd >/dev/null 2>&1",
-                "  e=\$(date +%s)",
-                "  d=\$((e - s))",
-                "  if [ \$d -ge 30 ]; then n=0; else n=\$((n + 1)); fi",
-                "  if [ \$n -ge 3 ]; then break; fi",
+                "  e=$(date +%s)",
+                "  d=$((e - s))",
+                $$"  if [ $d -ge 30 ]; then n=0; else n=$((n + 1)); fi",
+                $$"  if [ $n -ge 3 ]; then break; fi",
                 "  sleep 1",
                 "done",
-                "rm -f \"\$STOP\" \"$watchPath\" 2>/dev/null"
+                $$"rm -f \"$STOP\" \"$$watchPath\" 2>/dev/null"
             ).joinToString("\n")
             // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开
             Auxiliary.exec("cat > $watchPath <<'RL_EOF'\n$script\nRL_EOF")

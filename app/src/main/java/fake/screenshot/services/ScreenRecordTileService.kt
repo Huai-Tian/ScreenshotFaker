@@ -162,11 +162,11 @@ class ScreenRecordTileService : TileService() {
 
         File(savePath).apply { if (!exists()) mkdirs() }
         val fileName = when {
-            fullRandom -> Auxiliary.getRandomStringEx((16..24).random())
+            fullRandom -> Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(16..24))
             customPrefix -> "${prefix}_${Auxiliary.getRandomString(4)}$suffix"
             else -> "${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
         }
-        val tempName = Auxiliary.getRandomStringEx((20..35).random())
+        val tempName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
         val outputPath = if (encryptOutputs) tempPath + tempName else "$savePath/$fileName"
 
         lastEncryptOutputs = encryptOutputs

@@ -93,7 +93,7 @@ internal class OverlaySurfaceBackend(
 
     // ==================== 生命周期 ====================
 
-    /** 创建三层并显示。任何一步失败即上报回落（调用方 cleanup）。 */
+    /** 创建三层并显示。任何一步失败（含截图排除失败）即上报回落（调用方 cleanup）。 */
     fun attach(x: Int, y: Int, w: Int, h: Int) {
         if (root != null) {
             setGeometry(x, y, w, h)
@@ -105,7 +105,7 @@ internal class OverlaySurfaceBackend(
             // Android 11：创建期 metadata 441731 截图排除（见 builderExcludeScreenshot）；
             // 12+：创建期无需处理，下方 applySkipScreenshot 覆盖
             val rootBuilder = OverlayHiddenApi.newLayerBuilder(OverlayHiddenApi.randomName())
-            OverlayHiddenApi.builderExcludeScreenshot(rootBuilder)
+            val rootExcluded = OverlayHiddenApi.builderExcludeScreenshot(rootBuilder)
             val rootSc = rootBuilder.build()
             val tx = SurfaceControl.Transaction()
             OverlayHiddenApi.txSetLayer(tx, rootSc, 0x7FFFFFFF)
@@ -113,8 +113,8 @@ internal class OverlaySurfaceBackend(
             OverlayHiddenApi.txShow(tx, rootSc)
             tx.apply()
 
-            val content = buildChildLayer(rootSc)
-            val handle = buildChildLayer(rootSc)
+            val (content, contentExcluded) = buildChildLayer(rootSc)
+            val (handle, handleExcluded) = buildChildLayer(rootSc)
             val tx2 = SurfaceControl.Transaction()
             OverlayHiddenApi.txSetBufferSize(tx2, content, w, h)
             OverlayHiddenApi.txSetBufferSize(tx2, handle, w, h)
@@ -130,9 +130,20 @@ internal class OverlaySurfaceBackend(
             contentSurface = Surface(content)
             handleSurface = Surface(handle)
 
-            // 截图排除（非致命：失败仅记录，悬浮照常显示）
-            listOf(rootSc, content, handle).forEach {
-                OverlayHiddenApi.applySkipScreenshot(it)
+            // 截图排除是本方案的核心承诺（无痕）：任一层失败即致命。
+            // 静默降级会让悬浮窗出现在截图/录屏中，直接违背产品语义且
+            // 用户无从感知——上报后由应用侧回落普通悬浮窗路线。
+            // Android 11 验证创建期 metadata 路径（逐层独立生效）；
+            // 12+ 验证 setSkipScreenshot 路径（两者按版本二选一生效）。
+            val exclusionOk = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                listOf(rootSc, content, handle).all { OverlayHiddenApi.applySkipScreenshot(it) }
+            } else {
+                rootExcluded && contentExcluded && handleExcluded
+            }
+            if (!exclusionOk) {
+                onFatal(IllegalStateException("screenshot exclusion unavailable"))
+                detach()
+                return
             }
             drawHandles()
         } catch (t: Throwable) {
@@ -141,13 +152,14 @@ internal class OverlaySurfaceBackend(
         }
     }
 
-    private fun buildChildLayer(parent: SurfaceControl): SurfaceControl {
+    /** 返回 (layer, Android 11 创建期截图排除是否成功)。 */
+    private fun buildChildLayer(parent: SurfaceControl): Pair<SurfaceControl, Boolean> {
         val builder = OverlayHiddenApi.newLayerBuilder(OverlayHiddenApi.randomName())
         // Android 11 截图排除对每个 layer 独立生效（capture 遍历逐层过滤）
-        OverlayHiddenApi.builderExcludeScreenshot(builder)
+        val excluded = OverlayHiddenApi.builderExcludeScreenshot(builder)
         OverlayHiddenApi.builderSetFormat(builder, PixelFormat.TRANSLUCENT)
         OverlayHiddenApi.builderSetParent(builder, parent)
-        return builder.build()
+        return builder.build() to excluded
     }
 
     fun detach() {

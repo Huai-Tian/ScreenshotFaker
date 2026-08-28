@@ -131,7 +131,9 @@ class RootOverlayService : Binder() {
             Shizuku.UserServiceArgs(
                 ComponentName(APPLICATION_ID, RootOverlayService::class.java.name)
             )
-                .processNameSuffix(Auxiliary.getRandomString((6..14).random()))
+                // 进程名后缀是对外可见标识：SecureRandom（可预测的后缀可被
+                // 用于跨会话关联同一应用）
+                .processNameSuffix(Auxiliary.getSecureRandomString(Auxiliary.getSecureRandomInt(6..14)))
                 .version(23)
         }
 
@@ -872,8 +874,14 @@ private object SuProto {
     /** root -> app：onWindowFailed(String reason) */
     const val CODE_ON_WINDOW_FAILED = 101
 
+    /** root -> app：SO_PEERCRED 对端校验通过、帧派发循环就绪 */
+    const val CODE_READY = 997
+
     /** app -> root：销毁 root 端服务并退出进程 */
     const val CODE_DESTROY = 999
+
+    /** 握手行前缀（root 进程经 stdout 管道回传："SF1 <socketName>"） */
+    const val HANDSHAKE_PREFIX = "SF1"
 }
 
 /**
@@ -970,6 +978,16 @@ internal class SuTransport private constructor(private val socket: LocalSocket) 
         runCatching { socket.close() }
     }
 
+    /**
+     * 内核级对端校验（SO_PEERCRED）：对端进程 uid 必须为 0（root）。
+     * 防御 socket 名泄露后的伪造服务端（抢先绑定同名抽象 socket 诱使
+     * 本进程连接并交出媒体 fd）：伪造者非 root 即被内核凭据戳穿，
+     * 无法伪造 uid。
+     */
+    fun verifyPeerRoot(): Boolean = runCatching {
+        socket.peerCredentials.uid == 0
+    }.getOrDefault(false)
+
     companion object {
         private const val MAX_FRAME = 1 shl 20
 
@@ -1016,12 +1034,24 @@ private fun SuTransport.Frame.readStringFromParcel(): String? = runCatching {
  * 应用进程侧的 su 直连后端：经 root 管理器（Magisk/KernelSU 等）的 su
  * 直接拉起 root 宿主进程（SuLauncher），不依赖 Shizuku/Sui 存在。
  *
- * 建连流程（异步，上限 8 秒覆盖 root 管理器授权弹窗）：
- * 1. 生成不可猜测的抽象 socket 名，`su -c "CLASSPATH=<apk> app_process …"`
- *    启动 SuLauncher（stdout/stderr 重定向 /dev/null，无任何输出特征）；
- * 2. 轮询连接该 socket；
- * 3. 成功后 proxy（Api 的 socket 代理）交给 RootOverlayService companion
- *    对外暴露；读线程循环接收 root->app 帧（100/101）。
+ * ==================== 建连与信任引导（无痕导向） ====================
+ *
+ * 旧方案 `su -c "<完整命令>"` 的 su 客户端进程存活期间（即整个悬浮窗
+ * 生命周期）cmdline 常驻 APK 路径 + 入口类名 + socket 名（/proc/<pid>/cmdline
+ * 传统上全局可读）。现行方案彻底翻转机密流向：
+ *
+ * 1. 应用以无参数 su 启动（命令写入 su 进程 stdin，Magisk/KernelSU/AOSP
+ *    均支持）——su 客户端进程 cmdline 仅剩 "su"，argv 零信息；
+ * 2. root 宿主进程（SuLauncher）自选 SecureRandom socket 名，经 stdout
+ *    管道回传——socket 名不出现在任何进程的 argv / 全局可读 /proc 接口，
+ *    第三方无从知晓更无从抢注；
+ * 3. 双向内核级认证（SO_PEERCRED，uid 由内核提供不可伪造）：
+ *    - root 端校验连接者 uid == 应用 uid（期望值经 su 命令的环境前缀
+ *      传入，仅本应用可控；伪造连接一律关闭并继续 accept）；
+ *    - 应用端校验对端 uid == 0（防伪造服务端骗取媒体 fd）。
+ *
+ * 失败兜底：无参数模式不可用的个别 ROM 回退 `-c` 模式（此时命令已不含
+ * 任何机密，仅暴露可归因信息）；su 完全不可用则回落普通悬浮窗路线。
  *
  * 生命周期：连接成功/死亡/失败均经 onResult 回调；shutdown() 主动关闭
  * 不触发死亡回调（区别于意外断连：后者必须通知上层回落本地窗口）。
@@ -1047,8 +1077,7 @@ internal class SuOverlayConnection private constructor(
                 SuProto.CODE_ON_SWITCH_MEDIA ->
                     frame.readIntFromParcel()?.let { RootOverlayService.handleMediaSwitch(it) }
                 SuProto.CODE_ON_WINDOW_FAILED ->
-                    RootOverlayService.handleWindowFailed(
-                    )
+                    RootOverlayService.handleWindowFailed()
                 else -> {
                     // 未知帧忽略（向前兼容）
                 }
@@ -1077,35 +1106,29 @@ internal class SuOverlayConnection private constructor(
         private const val CONNECT_POLL_MS = 100L
         private const val PROBE_MS = 300L
 
+        /** 等待 root 端就绪帧的上限（root 端认证即时就绪，此为看门狗） */
+        private const val READY_TIMEOUT_MS = 3000L
+
         /**
-         * 异步建立 su 直连。返回 false 表示立即判定不可行（无 su 二进制/
-         * su 进程被立即拒绝），此时调用方应同步走普通路线。
+         * 异步建立 su 直连。返回 false 表示立即判定不可行（无 su 二进制），
+         * 此时调用方应同步走普通路线。
+         *
+         * 依次尝试 stdin 模式与 `-c` 兜底模式（见类文档），任一模式建连
+         * 成功即返回。
          */
         fun connectAsync(
             context: Context,
             onResult: (SuOverlayConnection?) -> Unit
         ): Boolean {
             if (!Auxiliary.hasSuBinary()) return false
-            // socket 名随机（字符与长度均随机）：抽象命名空间 socket 在
-            // /proc/net/unix 可见，固定前缀或固定长度都是可关联特征
-            val name = Auxiliary.getRandomString((16..32).random())
             val apkPath = context.applicationInfo.sourceDir
 
             Thread {
-                val proc = startRootProcess(apkPath, name)
-                if (proc == null) {
-                    onResult(null)
-                    return@Thread
+                var conn: SuOverlayConnection? = null
+                for (useStdin in booleanArrayOf(true, false)) {
+                    conn = connectOnce(apkPath, useStdin) { onResult(null) }
+                    if (conn != null) break
                 }
-                val transport = awaitTransport(name, proc)
-                if (transport == null) {
-                    runCatching { proc.destroy() }
-                    onResult(null)
-                    return@Thread
-                }
-                val proxy = SuOverlayProxy(transport)
-                val conn = SuOverlayConnection(proxy, transport, proc) { onResult(null) }
-                conn.start()
                 onResult(conn)
             }.apply {
                 isDaemon = true
@@ -1115,32 +1138,146 @@ internal class SuOverlayConnection private constructor(
         }
 
         /**
-         * 启动 root 宿主进程。先试 PATH 中的 su，再试常见绝对路径；
-         * 短暂探测存活以过滤"无授权被直接拒绝"（拒绝时 su 立即退出；
-         * 授权弹窗期间进程存活，继续等待）。全失败返回 null。
+         * 以指定模式完成一次完整建连（启动 root 进程 → 读握手行 → 连接
+         * → 双向认证 → 等就绪帧），任一环节失败返回 null 并清理现场。
          */
-        private fun startRootProcess(apkPath: String, socketName: String): Process? {
-            // --nice-name（AOSP 11-16 均支持）：app_process 启动即以
-            // AndroidRuntime.setArgv0 重写 argv 区，/proc/cmdline 与 comm
-            // 只剩随机名——否则进程存活期间 cmdline 常驻暴露入口类名
-            // （fake.screenshot...SuLauncher）与 socket 名。随机字符+随机长度。
-            val niceName = Auxiliary.getRandomString((6..12).random())
-            val cmd = "CLASSPATH='$apkPath' exec /system/bin/app_process " +
-                    "--nice-name='$niceName' / ${SuLauncher::class.java.name} $socketName"
+        private fun connectOnce(
+            apkPath: String,
+            useStdin: Boolean,
+            onDead: () -> Unit
+        ): SuOverlayConnection? {
+            val proc = startRootProcess(apkPath, useStdin) ?: return null
+            val socketName = readHandshakeLine(proc, CONNECT_TIMEOUT_MS)
+            if (socketName == null) {
+                runCatching { proc.destroy() }
+                return null
+            }
+            val transport = awaitTransport(socketName, proc)
+            if (transport == null) {
+                runCatching { proc.destroy() }
+                return null
+            }
+            if (!transport.verifyPeerRoot() || !waitReady(transport)) {
+                runCatching { transport.close() }
+                runCatching { proc.destroy() }
+                return null
+            }
+            val proxy = SuOverlayProxy(transport)
+            return SuOverlayConnection(proxy, transport, proc, onDead).also { it.start() }
+        }
+
+        /**
+         * 启动 root 宿主进程。
+         *
+         * stdin 模式（useStdin=true，优先）：su 不带参数，命令写入 su 进程
+         * stdin——su 客户端进程存活期间 cmdline 仅剩 "su"（-c 模式下完整
+         * 命令含 APK 路径/入口类名常驻 cmdline，全局可读）。写完即关写端：
+         * 管道缓冲数据保留可被对端完整读取；若 exec 失败，shell 因 EOF
+         * 退出，被存活探测过滤。
+         *
+         * `-c` 模式（useStdin=false，兜底）：个别 ROM 的 su 无参数模式
+         * 不可用时保功能。命令已不含任何机密（socket 名由 root 进程自选
+         * 经 stdout 回传），-c 暴露的只有可归因信息（APK 路径与入口类名，
+         * su 客户端的父进程归属应用本身，归因本就无法隐藏）。
+         *
+         * 命令体（两种模式共用）：
+         * - SF_UID：期望对端 uid（root 端 SO_PEERCRED 校验用），经环境
+         *   前缀传递，root 进程的 /proc/<pid>/environ 仅 root 可读；
+         * - --nice-name（AOSP 11-16 均支持）：app_process 启动即以
+         *   AndroidRuntime.setArgv0 重写 argv 区，/proc/cmdline 与 comm
+         *   只剩随机名（随机字符+随机长度）。argv 全程不含机密。
+         *
+         * 逐 su 候选尝试（PATH 优先，再常见绝对路径）；短暂探测存活以
+         * 过滤"无授权被直接拒绝"（拒绝时 su 立即退出；授权弹窗期间进程
+         * 存活，继续等待）。全失败返回 null。
+         */
+        private fun startRootProcess(apkPath: String, useStdin: Boolean): Process? {
+            val niceName = Auxiliary.getSecureRandomString(Auxiliary.getSecureRandomInt(6..12))
+            val cmd = "SF_UID=${android.os.Process.myUid()} CLASSPATH='$apkPath' " +
+                    "exec /system/bin/app_process --nice-name='$niceName' / " +
+                    SuLauncher::class.java.name
             val candidates = listOf("su") + Auxiliary.suBinaryPaths
             for (bin in candidates) {
                 val proc = runCatching {
-                    ProcessBuilder(bin, "-c", cmd)
-                        // 静默运行：无输出、不写任何可检测痕迹
-                        .redirectOutput(File("/dev/null"))
+                    ProcessBuilder(if (useStdin) listOf(bin) else listOf(bin, "-c", cmd))
+                        // stderr 静默；stdout 保持管道（root 进程经其回传握手行）
                         .redirectError(File("/dev/null"))
                         .start()
                 }.getOrNull() ?: continue
+                if (useStdin) {
+                    val wrote = runCatching {
+                        proc.outputStream.use {
+                            it.write((cmd + "\n").toByteArray())
+                            it.flush()
+                        }
+                        true
+                    }.getOrDefault(false)
+                    if (!wrote) {
+                        runCatching { proc.destroy() }
+                        continue
+                    }
+                }
                 runCatching { Thread.sleep(PROBE_MS) }
                 if (proc.isAlive) return proc
                 runCatching { proc.destroy() }
             }
             return null
+        }
+
+        /**
+         * 读取 root 进程经 stdout 管道回传的握手行（"SF1 <socketName>"）。
+         * 以前缀扫描而非按行号解析：容忍 ART 类加载注记等先行杂散输出。
+         * root 进程写入该行后立即将 stdout 重定向 /dev/null（随后 EOF），
+         * 管道不会因无人读取而阻塞 root 进程。
+         */
+        private fun readHandshakeLine(proc: Process, timeoutMs: Long): String? {
+            val deadline = SystemClock.elapsedRealtime() + timeoutMs
+            val input = proc.inputStream
+            val pending = StringBuilder()
+            val chunk = ByteArray(128)
+            while (SystemClock.elapsedRealtime() < deadline) {
+                val n = runCatching {
+                    if (input.available() > 0) input.read(chunk) else 0
+                }.getOrDefault(-1)
+                if (n < 0) return null // root 进程死亡（EOF / 流损坏）
+                if (n > 0) {
+                    pending.append(String(chunk, 0, n))
+                    while (true) {
+                        val idx = pending.indexOf('\n')
+                        if (idx < 0) break
+                        val line = pending.substring(0, idx).trim()
+                        pending.delete(0, idx + 1)
+                        val parts = line.split(' ')
+                        if (parts.size == 2 && parts[0] == SuProto.HANDSHAKE_PREFIX) {
+                            return parts[1]
+                        }
+                    }
+                } else if (!proc.isAlive) {
+                    return null
+                } else {
+                    runCatching { Thread.sleep(50) }
+                }
+            }
+            return null
+        }
+
+        /**
+         * 等待 root 端就绪帧（SO_PEERCRED 校验通过、帧派发循环启动）。
+         * 独立看门狗线程兜底：超时强制关闭 socket 解除阻塞读（root 端
+         * 认证即时就绪，正常路径毫秒级到达）。
+         */
+        private fun waitReady(transport: SuTransport): Boolean {
+            val done = AtomicBoolean(false)
+            val watchdog = Thread {
+                runCatching { Thread.sleep(READY_TIMEOUT_MS) }
+                if (!done.get()) transport.close()
+            }.apply {
+                isDaemon = true
+                start()
+            }
+            val frame = runCatching { transport.readFrame() }.getOrNull()
+            done.set(true)
+            return frame != null && frame.code == SuProto.CODE_READY
         }
 
         private fun awaitTransport(name: String, proc: Process): SuTransport? {
@@ -1205,13 +1342,20 @@ private class SuOverlayProxy(private val transport: SuTransport) : Api {
  * su 直连模式的 root 宿主进程入口（内联于本文件：su 命令行以本类名为
  * app_process 入口，与 RootOverlayService 同属 root 服务实现，并非独立服务）。
  *
- * 由应用进程执行：
- *   su -c "CLASSPATH='<apk路径>' exec /system/bin/app_process \
- *          --nice-name='<随机名>' / <入口类名> <socket名>"
+ * 由应用进程执行（无参数 su + stdin 递交，个别 ROM 兜底 `-c`）：
+ *   SF_UID=<应用uid> CLASSPATH='<apk路径>' exec /system/bin/app_process \
+ *          --nice-name='<随机名>' / <入口类名>
  *
- * --nice-name 使 app_process 启动即重写 argv（AndroidRuntime.setArgv0）：
- * 进程存活期间 /proc/cmdline 与 comm 仅剩随机名，入口类名与 socket 名
- * 不在 cmdline 常驻（随机化要求：字符与长度均随机）。
+ * ==================== 机密流向（与旧方案相反） ====================
+ *
+ * - argv 全程不含机密：入口类名是 APK 内公开字符串；--nice-name 使
+ *   app_process 启动即重写 argv（AndroidRuntime.setArgv0），存活期间
+ *   /proc/cmdline 与 comm 仅剩随机名（随机字符+随机长度）；
+ * - socket 名由本进程 SecureRandom 自选，经 stdout 管道回传应用进程：
+ *   不出现在任何进程 argv / 环境 / 全局可读 /proc 接口 → 无从知晓、
+ *   无从抢注、无从伪造（另配合应用端 SO_PEERCRED uid=0 校验）；
+ * - SF_UID（SO_PEERCRED 期望对端 uid）经 su 命令的环境前缀传入：
+ *   本进程 environ 仅 root 可读，其他进程不可控不可读。
  *
  * 以 CLASSPATH=本应用 APK 启动的 app_process 会用 PathClassLoader 加载
  * 全部应用类（与 Shizuku UserService 从同一 APK 反射加载完全同源），
@@ -1220,11 +1364,16 @@ private class SuOverlayProxy(private val transport: SuTransport) : Api {
  * 纯 Surface 渲染与 InputMonitor 输入通道均以 uid=0 直达 SF / IMS。
  *
  * 进程生命周期：
- * - 启动后在抽象命名空间监听（名字由应用进程随机生成传入，不可猜测）；
- * - 看门狗：15 秒内未等到连接则退出（应用进程侧 8 秒已放弃，防止孤儿
- *   root 进程常驻）；
- * - 连接后进入帧派发循环：payload 反序列化为 Parcel 后直接进入
- *   RootOverlayService.dispatch（其内部一律 post 到窗口线程，线程安全）；
+ * - 启动即绑定抽象 socket 并经 stdout 回传名字，随后将 stdout 重定向
+ *   /dev/null（写端关闭使应用侧读循环自然结束，管道不会缓冲填满）；
+ * - 连接准入循环：SO_PEERCRED 内核级校验对端 uid == SF_UID——内核
+ *   真相不可伪造，非本应用的连接（即使得知 socket 名）立即关闭并继续
+ *   accept（防连接抢占 DoS），无数据依赖故零等待开销；
+ * - 看门狗：15 秒内未等到合法连接则退出（应用进程侧 8 秒已放弃，防止
+ *   孤儿 root 进程常驻）；
+ * - 合法连接后发送就绪帧（997）并进入帧派发循环：payload 反序列化为
+ *   Parcel 后直接进入 RootOverlayService.dispatch（其内部一律 post 到
+ *   窗口线程，线程安全）；
  * - 收到 destroy 帧、对端关闭（应用进程死亡）或协议错误即退出——进程
  *   死亡时 layer / monitor 由系统侧 binder 死亡通知自动回收，不会泄漏。
  */
@@ -1233,11 +1382,43 @@ object SuLauncher {
     /** 无人连接时 root 进程最长存活时间（毫秒）。 */
     private const val ACCEPT_WATCHDOG_MS = 15_000L
 
+    /** 期望对端 uid 的环境变量名（应用进程经 su 命令的环境前缀传入）。 */
+    private const val ENV_PEER_UID = "SF_UID"
+
     @JvmStatic
     fun main(args: Array<String>) {
-        val name = args.getOrNull(0) ?: return
+        val expectedUid = System.getenv(ENV_PEER_UID)?.toIntOrNull() ?: return
 
-        val server = runCatching { LocalServerSocket(name) }.getOrNull() ?: return
+        // socket 名：SecureRandom 自选（62^16+ 空间，猜测不可行），
+        // 抽象命名空间 socket 在 /proc/net/unix 对 root/系统侧可见，
+        // 但名字不出现在任何全局可读接口，第三方无从抢注
+        val socketName = OverlayHiddenApi.randomName(16..32)
+        val server = runCatching { LocalServerSocket(socketName) }.getOrNull() ?: return
+
+        // 握手行经 stdout 管道回传（仅应用进程可读）。经 Os.write 直写
+        // fd 1 而非 System.out（PrintStream 吞掉 IOException，对端已死
+        // EPIPE 时无法感知），也非 FileOutputStream.use{}（close 会关闭
+        // fd 1 本身——后续 dup2 前的窗口期内该 fd 号可能被并发 open
+        // 复用，dup2 将覆盖无关文件）
+        val wrote = runCatching {
+            val line = "${SuProto.HANDSHAKE_PREFIX} $socketName\n".toByteArray()
+            android.system.Os.write(java.io.FileDescriptor.out, line, 0, line.size)
+            true
+        }.getOrDefault(false)
+        if (!wrote) {
+            // 应用进程已死：退出，不留任何进程痕迹
+            runCatching { server.close() }
+            Runtime.getRuntime().exit(0)
+        }
+        // stdout 重定向 /dev/null：管道写端关闭（应用侧随后 EOF，读循环
+        // 自然结束），本进程后续任何 native 输出不再进入管道（防填满阻塞）
+        runCatching {
+            val devNull = android.system.Os.open(
+                "/dev/null", android.system.OsConstants.O_WRONLY, 0
+            )
+            android.system.Os.dup2(devNull, 1)
+            android.system.Os.close(devNull)
+        }
 
         val connected = AtomicBoolean(false)
         Thread {
@@ -1252,12 +1433,28 @@ object SuLauncher {
             this.name = OverlayHiddenApi.randomName()
         }.start()
 
-        val socket = runCatching { server.accept() }.getOrNull()
+        // 连接准入循环：SO_PEERCRED（内核真相，uid 不可伪造）。校验无
+        // 数据依赖，非法连接零等待关闭；看门狗保证循环不会无限耗资源
+        var socket: LocalSocket? = null
+        while (true) {
+            val accepted = runCatching { server.accept() }.getOrNull() ?: break
+            val uidOk = runCatching {
+                accepted.peerCredentials.uid == expectedUid
+            }.getOrDefault(false)
+            if (uidOk) {
+                socket = accepted
+                break
+            }
+            runCatching { accepted.close() }
+        }
         connected.set(true)
         if (socket == null) {
+            runCatching { server.close() }
             Runtime.getRuntime().exit(0)
             return
         }
+        // 唯一会话已建立：停止接受新连接
+        runCatching { server.close() }
 
         // 窗口宿主：与 Shizuku UserService 共用同一实现
         val service = RootOverlayService()
@@ -1268,6 +1465,9 @@ object SuLauncher {
         // socket 帧通知。binder 对象无法跨 socket 序列化，故以发送代理
         // 对象就地注入（与 Shizuku 路径的 registerCallback binder 等效）。
         service.registerCallback(SuCallbackSender(transport))
+
+        // 就绪帧：应用侧据此确认认证通过、派发循环即将启动
+        runCatching { transport.sendFrame(SuProto.CODE_READY, ByteArray(0), null) }
 
         // 帧派发循环：本线程即"协议线程"，等价于 Shizuku 路径的 binder 线程
         while (true) {

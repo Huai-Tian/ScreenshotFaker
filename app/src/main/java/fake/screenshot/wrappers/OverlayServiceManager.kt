@@ -6,10 +6,14 @@ import android.view.WindowManager
 import fake.screenshot.services.ControlOverlayService
 import fake.screenshot.services.DisplayOverlayService
 import fake.screenshot.services.privileged.RootOverlayService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 object OverlayServiceManager {
     private val _isDisplayRunning = MutableStateFlow(false)
@@ -41,6 +45,19 @@ object OverlayServiceManager {
 
     // ==================== 参数代理：为两种悬浮窗统一提供外观/音频参数 ====================
 
+    /**
+     * 配置读写专用作用域：DataStore（加密）首读含磁盘 IO 与 Tink 密钥
+     * 解析，写入同理——绝不在主线程 runBlocking（旧实现卡顿/ANR 风险）。
+     */
+    private val configScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * start 后用户是否已显式调整过外观参数：异步读取晚到时不得覆盖
+     * 用户的显式选择（竞态窗口内 UI 可能已下发 setDisplayAlpha/setMuted）。
+     */
+    @Volatile
+    private var paramsTouched = false
+
     @Volatile
     private var displayAlphaValue = 1.0f
 
@@ -71,10 +88,28 @@ object OverlayServiceManager {
         if (_isDisplayRunning.value) return
         val ctx = context.applicationContext
         appContext = ctx
-        // 外观参数与普通路线 DisplayOverlayService.onCreate 同源（DataStore）
-        runBlocking {
-            displayAlphaValue = ConfigManager.getDataOnce(ctx, "overlay_display_alpha", 1.0f)
-            videoMutedValue = ConfigManager.getDataOnce(ctx, "overlay_video_muted", false)
+        paramsTouched = false
+        // 外观参数与普通路线 DisplayOverlayService.onCreate 同源（DataStore）。
+        // 异步读取（IO 作用域，见 configScope 文档）：root 路线的首个消费者
+        // onRootConnected 经连接回调异步到达，读取完成晚于连接时补投；
+        // 普通路线由 DisplayOverlayService 自行读取同源配置，不受影响
+        configScope.launch {
+            val alpha = runCatching {
+                ConfigManager.getDataOnce(ctx, "overlay_display_alpha", 1.0f)
+            }.getOrDefault(1.0f)
+            val muted = runCatching {
+                ConfigManager.getDataOnce(ctx, "overlay_video_muted", false)
+            }.getOrDefault(false)
+            withContext(Dispatchers.Main) {
+                if (paramsTouched) return@withContext
+                displayAlphaValue = alpha
+                videoMutedValue = muted
+                // 读取晚于连接建立：补投给已挂载的 root 端
+                if (rootRoute && RootOverlayService.isActive) {
+                    RootOverlayService.setAlpha(alpha)
+                    RootOverlayService.setMuted(muted)
+                }
+            }
         }
         if (startRootRoute(ctx)) return
         startNormalRoute(context, withControl = true)
@@ -136,6 +171,7 @@ object OverlayServiceManager {
     fun setDisplayAlpha(alpha: Float) {
         val clamped = alpha.coerceIn(0.0f, 1.0f)
         displayAlphaValue = clamped
+        paramsTouched = true
         if (rootRoute) {
             RootOverlayService.setAlpha(clamped)
         } else {
@@ -146,15 +182,19 @@ object OverlayServiceManager {
     fun getDisplayAlpha(): Float = displayAlphaValue
 
     /**
-     * 视频静音：ROOT 路线转发 root 端并由本类持久化；
-     * 普通路线转发本地服务（其内部自行持久化）。
+     * 视频静音：ROOT 路线转发 root 端并由本类异步持久化（见
+     * configScope 文档，禁止主线程阻塞写）；普通路线转发本地服务
+     * （其内部自行持久化）。
      */
     fun setMuted(muted: Boolean) {
         videoMutedValue = muted
+        paramsTouched = true
         if (rootRoute) {
             RootOverlayService.setMuted(muted)
             appContext?.let { ctx ->
-                runBlocking { ConfigManager.saveData(ctx, "overlay_video_muted", muted) }
+                configScope.launch {
+                    runCatching { ConfigManager.saveData(ctx, "overlay_video_muted", muted) }
+                }
             }
         } else {
             DisplayOverlayService.setMuted(muted)

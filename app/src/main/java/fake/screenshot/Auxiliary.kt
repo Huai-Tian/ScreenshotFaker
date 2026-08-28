@@ -131,22 +131,41 @@ object Auxiliary {
     fun getCurrentDateString(): String =
         LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
 
+    private val secureRandom = java.security.SecureRandom()
+
+
     fun getRandomString(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         return (1..length)
-            .map { allowedChars.random() }
+            .map { allowedChars[secureRandom.nextInt(allowedChars.size)] }
             .joinToString("")
     }
 
     fun getRandomStringEx(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         val fullChars = allowedChars + listOf('-', '_')
-        val first = allowedChars.random()
+        val first = allowedChars[secureRandom.nextInt(allowedChars.size)]
         val rest = (1 until length)
-            .map { fullChars.random() }
+            .map { fullChars[secureRandom.nextInt(fullChars.size)] }
             .joinToString("")
         return first + rest
     }
+
+    fun getSecureRandomInt(range: IntRange): Int =
+        range.first + secureRandom.nextInt(range.last - range.first + 1)
+
+    fun getSecureRandomFloat(): Float = secureRandom.nextFloat()
+
+    fun getSecureRandomLong(bound: Long): Long {
+        require(bound > 0)
+        while (true) {
+            val bits = secureRandom.nextLong() ushr 1
+            val v = bits % bound
+            if (bits - v + (bound - 1) >= 0) return v
+        }
+    }
+
+    fun getSecureRandomString(length: Int): String = getRandomString(length)
 
     @SuppressLint("BlockedPrivateApi")
     fun View.enableScreenshotExclusion(): Boolean {

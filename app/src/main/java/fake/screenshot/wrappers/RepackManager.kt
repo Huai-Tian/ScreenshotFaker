@@ -99,10 +99,10 @@ object RepackManager {
             // 私有缓存目录：仅本应用可读，中间产物对外不可见
             val workDir = File(
                 appContext.cacheDir,
-                Auxiliary.getRandomStringEx((20..35).random())
+                Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
             ).apply { mkdirs() }
-            val unsignedApk = File(workDir, Auxiliary.getRandomStringEx((20..35).random()))
-            val signedApk = File(workDir, Auxiliary.getRandomStringEx((20..35).random()))
+            val unsignedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
+            val signedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
 
             val replacements = buildReplacements(appContext, sourceApk, identity, icon)
             ApkBuilder.build(sourceApk, unsignedApk, replacements)
