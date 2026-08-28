@@ -260,6 +260,39 @@ internal object OverlayHiddenApi {
     fun newLayerBuilder(name: String): SurfaceControl.Builder =
         SurfaceControl.Builder().setName(name)
 
+    /**
+     * Android 11 截图排除（setSkipScreenshot 的 11 代等价物）。
+     *
+     * 机制（AOSP 11 源码逐环节核对 + 真机实测双重验证）：
+     * Builder.setMetadata(METADATA_WINDOW_TYPE=2, 441731) →
+     * SurfaceFlinger::createLayer 检测 windowType==441731
+     * （WINDOW_TYPE_DONT_SCREENSHOT，系统圆角 overlay 同款机制）→
+     * layer->setPrimaryDisplayOnly() → latchCompositionState 写入
+     * compositionState->internalOnly →
+     * - 截图遍历 traverseLayersInDisplay（belongsToDisplay(stack,false)）
+     *   排除该 layer → 截图显示下层内容（穿透）；
+     * - 虚拟显示器（MediaProjection 录屏）排除 → 录屏同样穿透。
+     *
+     * 12+ 的 setSkipScreenshot 最终映射到 outputFilter.toInternalDisplay
+     * （A15 LayerSnapshotBuilder 证实），与本机制同源同语义。
+     *
+     * 必须在 build() 前调用（检查只发生在 createLayer 时刻，
+     * Transaction.setMetadata 后设无效）。
+     */
+    fun builderExcludeScreenshot(builder: SurfaceControl.Builder): Boolean {
+        // 仅 Android 11：12+ 的 createLayer 已无 441731 检查（改由
+        // setSkipScreenshot 的 eLayerSkipScreenshot flag 承担），且 12+
+        // metadata windowType 会参与 input/trusted-overlay 判定，避免误用
+        if (android.os.Build.VERSION.SDK_INT > 30) return false
+        return runCatching {
+            val m = builderClass.getMethod(
+                "setMetadata", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
+            )
+            m.invoke(builder, 2 /* METADATA_WINDOW_TYPE */, 441731 /* WINDOW_TYPE_DONT_SCREENSHOT */)
+            true
+        }.getOrDefault(false)
+    }
+
     fun builderSetBufferSize(builder: SurfaceControl.Builder, w: Int, h: Int) {
         runCatching {
             builderClass.getMethod("setBufferSize", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)

@@ -26,9 +26,12 @@ import android.view.SurfaceControl
  * │   原因：同一 layer 上无法再叠加绘制）。
  * └── handle layer：四角缩放手柄 + 顶部中线指示（Canvas 软绘，顶层 z）。
  *
- * root layer setLayer(0x7FFFFFFF) 置顶；每层 setSkipScreenshot
- * （root 进程反射隐藏 API）使截屏/录屏完全跳过——FLAG_SECURE 在无窗口
- * 场景不可用，这是唯一的截图排除手段。
+ * root layer setLayer(0x7FFFFFFF) 置顶；截图排除双路径：
+ * 12+ 每层 setSkipScreenshot（root 进程反射隐藏 API）；Android 11 创建期
+ * metadata windowType=441731（WINDOW_TYPE_DONT_SCREENSHOT，系统圆角
+ * overlay 同款）→ primaryDisplayOnly。两者同语义（A15 LayerSnapshot 证实
+ * eLayerSkipScreenshot 即 outputFilter.toInternalDisplay）：截图与虚拟
+ * 显示器（MediaProjection 录屏）均穿透——FLAG_SECURE 在无窗口场景不可用。
  *
  * Surface(SurfaceControl) 为公开构造（API 29+）；Builder 的
  * setBufferSize/setFormat/setParent 为 @hide，经 [OverlayHiddenApi]
@@ -99,7 +102,11 @@ internal class OverlaySurfaceBackend(
         width = w
         height = h
         try {
-            val rootSc = OverlayHiddenApi.newLayerBuilder(OverlayHiddenApi.randomName()).build()
+            // Android 11：创建期 metadata 441731 截图排除（见 builderExcludeScreenshot）；
+            // 12+：创建期无需处理，下方 applySkipScreenshot 覆盖
+            val rootBuilder = OverlayHiddenApi.newLayerBuilder(OverlayHiddenApi.randomName())
+            OverlayHiddenApi.builderExcludeScreenshot(rootBuilder)
+            val rootSc = rootBuilder.build()
             val tx = SurfaceControl.Transaction()
             OverlayHiddenApi.txSetLayer(tx, rootSc, 0x7FFFFFFF)
             OverlayHiddenApi.txSetPosition(tx, rootSc, x, y)
@@ -136,6 +143,8 @@ internal class OverlaySurfaceBackend(
 
     private fun buildChildLayer(parent: SurfaceControl): SurfaceControl {
         val builder = OverlayHiddenApi.newLayerBuilder(OverlayHiddenApi.randomName())
+        // Android 11 截图排除对每个 layer 独立生效（capture 遍历逐层过滤）
+        OverlayHiddenApi.builderExcludeScreenshot(builder)
         OverlayHiddenApi.builderSetFormat(builder, PixelFormat.TRANSLUCENT)
         OverlayHiddenApi.builderSetParent(builder, parent)
         return builder.build()
