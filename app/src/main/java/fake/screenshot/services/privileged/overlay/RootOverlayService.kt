@@ -127,73 +127,12 @@ class RootOverlayService : Binder() {
 
         private const val APPLICATION_ID = "fake.screenshot"
 
-        // version 用于让 Shizuku 服务端区分实现版本：修改本类行为/结构后
-        // 必须递增，否则服务端可能沿用旧版本缓存的类。
-        // v4：脱离旧 AIDL 接口，手写 binder 协议单文件实现
-        // v5：放弃 WindowManager 悬浮窗，改纯 Surface 双层渲染 +
-        //     InputMonitor 输入通道（Android 15 WMS session 加固绕开）
-        // v6：输入通道反射加固（monitorGestureInput 双签名回退、
-        //     InputChannel fd 双形态）+ 失败路径日志
-        // v7：修复 IInputManager 包名错误（android.hardware.input，
-        //     11-16 全版本；原误写 android.view 导致 ClassNotFoundException）
-        // v8：InputChannel fd 提取改三路策略（13+ native-ptr 形态经
-        //     writeToParcel + readFileDescriptor + dup 取 fd）
-        // v9：修复 writeToParcel 布局解析：头部 int32 initialized 标志
-        //     未跳过导致 fd 读取错位；13-16 与 11-12 两代布局按
-        //     正确字段顺序解析（InputChannelCore.aidl 核对）
-        // v10：channelPfd 全诊断版（每决策点 I/E 日志 + parcel hex dump
-        //     + 三布局解析），定位真机实际 parcel 布局
-        // v11：修复 AIDL parcelable 布局解析：pos 4 是尺寸信封
-        //     （v10 诊断确认 envelope=156=total-4），此后才是 name/
-        //     fd 标志/fd；11-12 旧格式 fd 在末尾 24 字节直取
-        // v12：修复 v11 回归——invoke 对 void 方法返回 null，被
-        //     getOrNull()?:return null 误判为失败（v10 的 isFailure 判定
-        //     在 v11 重写时丢失）
-        // v13：fd 提取改全 parcel 扫描（字段顺序跨版本/OEM 不可靠），
-        //     int map 日志 + BINDER_TYPE_FD(0x66642a85) 定位
-        // v14：读循环修复：InputChannel 为 O_NONBLOCK，改 Os.poll 等
-        //     POLLIN（原阻塞式 read 会抛 EAGAIN 杀死读线程）；
-        //     增加事件流诊断日志（type/size/action/坐标）
-        // v15：fd 校验（fstat 必须 S_ISSOCK，否则继续扫描）；读循环
-        //     显式捕获 ErrnoException（原 runCatching 静默吞掉 EBADF
-        //     导致死循环无日志）；检查 revents 的 POLLERR/HUP/NVAL
-        // v16：修复 controller 初始几何恒 (0,0,0,0)（lastX/Y/W/H 声明
-        //     后从未赋值）：命中判断恒 false → 所有触摸事件被丢弃
-        //     （"点击无响应"根因）。attach/setGeometry 均记录几何。
-        // v17：修复屏幕尺寸恒 0（maximumWindowMetrics 在 root 进程静默
-        //     失败被 runCatching 吞掉）→ updateOverlay 早退 → 移动/缩放
-        //     全部失效（图片平移不经 clamp 故正常）。改多路径解析
-        //     （DisplayManager/WM/resources）；DOWN 命中日志含 mode +
-        //     几何；coerceIn 空区间保护。
-        // v18：缩放/平移卡顿修复：MOVE(~100Hz) 逐事件全量重绘远超
-        //     vsync 60Hz 造成积压。几何 Transaction 逐事件立即（SF
-        //     合成器侧，廉价），canvas 重绘节流 16ms 合并 + 尾随帧
-        //     保证最终帧；panImage/scaleImage/setGeometry 统一走节流。
-        //     实测更糟：节流推迟内容帧但 setBufferSize 仍逐事件触发
-        //     buffer 重分配 + SF resize 等待新 buffer，积压更严重。
-        // v19：正确方案（WMS 窗口动画同款）：resize 手势期间 buffer
-        //     冻结，SF setMatrix 合成器 GPU 缩放现有 buffer（零 canvas
-        //     零重分配，绝对跟手）；MOVE_WINDOW 纯移动只挪 position；
-        //     ACTION_UP settle：matrix 归一 + 精确 bufferSize + 一次
-        //     全量重绘。panImage/scaleImage 保留节流。手柄 live 期间
-        //     隐藏（避免非等比拉伸变形），settle 恢复。
-        // v21：Android 11 截图排除：setSkipScreenshot 不存在（12+ API），
-        //     改创建期 Builder.setMetadata(METADATA_WINDOW_TYPE=441731) →
-        //     SF createLayer 检测 → primaryDisplayOnly/internalOnly（系统
-        //     圆角 overlay 同款机制，AOSP 11 源码 + 真机实测验证）。
-        //     三个 layer 均设置（capture 遍历逐层过滤）。12+ 路径不变。
-        // v22：无痕版：移除全部诊断日志与调试代码（实测 -keep 规则下
-        //     R8 不消除开关式日志的字符串常量，仅源码级移除可靠）；
-        //     固定线程名 / "sf.r." socket 前缀 / su 兜底 input 注入全部
-        //     移除或随机化（字符+长度均随机）；su 宿主进程加
-        //     --nice-name 随机名重写 /proc/cmdline。
-        // （su 直连路径不经过 Shizuku，与该版本号无关）
         private val args by lazy {
             Shizuku.UserServiceArgs(
                 ComponentName(APPLICATION_ID, RootOverlayService::class.java.name)
             )
-                .processNameSuffix("overlay")
-                .version(22)
+                .processNameSuffix(Auxiliary.getRandomString((6..14).random()))
+                .version(23)
         }
 
         @Volatile
