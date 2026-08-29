@@ -244,7 +244,7 @@ internal object OverlayHiddenApi {
         // 仅 Android 11：12+ 的 createLayer 已无 441731 检查（改由
         // setSkipScreenshot 的 eLayerSkipScreenshot flag 承担），且 12+
         // metadata windowType 会参与 input/trusted-overlay 判定，避免误用
-        if (android.os.Build.VERSION.SDK_INT > 30) return false
+        if (Build.VERSION.SDK_INT > 30) return false
         return runCatching {
             val m = builderClass.getMethod(
                 "setMetadata", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
@@ -364,15 +364,4 @@ internal object OverlayHiddenApi {
     fun txShow(tx: SurfaceControl.Transaction, sc: SurfaceControl) {
         showMethod?.invoke(tx, sc)
     }
-
-    /**
-     * 诊断：Transaction 反射方法解析结果（null = 该方法在本 ROM 不存在，
-     * 所有调用静默 no-op——几何操作全面失效的唯一显性信号）。
-     * 经调用方 onDebug 通道输出。
-     */
-    fun debugTxResolution(): String =
-        "txMethods[setMatrix=${setMatrixMethod != null} " +
-                "setBufferSize=${setBufferSizeMethod != null} " +
-                "setPosition=${setPositionMethod != null} " +
-                "setAlpha=${setAlphaMethod != null} show=${showMethod != null}]"
 }

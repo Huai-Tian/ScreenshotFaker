@@ -306,7 +306,6 @@ object OverlayServiceManager {
     private fun fallbackToNormalRoute() {
         val ctx = appContext ?: return
         val reason = RootOverlayService.lastFailureReason
-        android.util.Log.w(RootOverlayService.LOG_TAG, "root 路线回落普通悬浮窗: ${reason ?: "unknown"}")
         val controlDesired = rootControlDesired
         rootRoute = false
         rootAttached = false
@@ -332,7 +331,6 @@ object OverlayServiceManager {
         stealthToastShown = true
         runCatching {
             val base = getString(ctx, R.string.overlay_failed)
-            // 原因可能含 stderr 摘录，截断防 Toast 溢出；完整内容在 logcat
             val text = reason?.take(200)?.let { "$base\n$it" } ?: base
             Toast.makeText(ctx, text, Toast.LENGTH_LONG).show()
         }

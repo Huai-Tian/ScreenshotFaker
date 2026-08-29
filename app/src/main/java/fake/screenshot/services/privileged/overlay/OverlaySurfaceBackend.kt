@@ -42,13 +42,10 @@ import android.view.SurfaceControl
  * @param handler 宿主 handler 线程（本类所有方法必须在该线程调用；
  *   重绘节流的 postDelayed 也回到该线程，保证 canvas 无并发访问）
  * @param onFatal 渲染后端不可恢复错误（须触发回落）
- * @param onDebug 诊断上报（root 进程自身保持零日志，经回调通道送达
- *   app 进程后由其决定是否落 logcat——见 [RootOverlayService] 协议码 102）
  */
 internal class OverlaySurfaceBackend(
     private val handler: Handler,
-    private val onFatal: (Throwable) -> Unit,
-    private val onDebug: ((String) -> Unit)? = null
+    private val onFatal: (Throwable) -> Unit
 ) {
 
     private companion object {
@@ -73,14 +70,42 @@ internal class OverlaySurfaceBackend(
          * 在传导交错期产生"已就绪层被拉伸 / 冻结层被归一"的错误帧
          * （图片超范围 / 不占满，单击触发的 settle 重绘即暴露点）。
          *
-         * 【matrix 必须在 unlockCanvasAndPost 之后设置】：lockHardwareCanvas
-         * 的提交经 HWUI/BLAST 自带事务上送 buffer，可能覆盖同一提交窗口
-         * 内先行 apply 的几何状态——这是"live 路径（无绘制）matrix 存活、
-         * settle 绘制路径 matrix 失效"的疑似根因（settle 后图片恒旧尺寸
-         * 且点击不修复；dumpsys 取证确认中）。
+         * 【A15 SFdump 实测定论】SF 侧实际显示 buffer 的是 BLAST 自动创建
+         * 的 bbq-wrapper 子层（parent = 我们的 content layer）。由此两条
+         * 路径可靠性截然不同：
+         * - 在 content layer 上设置的 matrix 经父子关系传导——可靠
+         *   （live 拖动数百帧跟手正常即证明）；
+         * - "live 矩阵刚变 + setBufferSize 刚 apply + 首个新尺寸 buffer
+         *   提交"三合一窗口内的 buffer/bounds 更新——不可靠：SFdump
+         *   证实松手后 700ms 内 activeBuffer/mBounds 停留旧值（提交未被
+         *   latch），而 1 秒后的同尺寸提交（单击）正常 latch。
+         *
+         * 对策（settle 拆两拍，正确性只押注可靠路径）：
+         * 第一拍（松手立即，纯 transaction 零 canvas）：以补偿 matrix 维持
+         *   live 终态显示——结构上不可能出现溢出/不占满帧；
+         * 第二拍（SECOND_BEAT_MS 后）：正统精确化（setBufferSize + 重绘 +
+         *   归一）。若其提交又未被 latch，显示不受影响（第一拍矩阵仍在），
+         *   追加重绘 + 追赶/重申机制逐步收敛。
          */
         const val CATCHUP_MS = 64L
         const val CATCHUP_MAX = 8
+
+        /** matrix 延迟重申间隔：2 个 vsync，确保晚于 BLAST 事务落地。 */
+        const val REASSERT_MS = 34L
+
+        /**
+         * settle 第二拍延迟：避开"live 矩阵 + 尺寸 + 新 buffer"三合一的
+         * 不可靠提交窗口（实测单击路径——距 live 结束 >1s 的同尺寸提交
+         * 可正常 latch）。
+         */
+        const val SECOND_BEAT_MS = 120L
+
+        /**
+         * latch 确认延迟：第二拍首绘的新尺寸提交实测可能长时间不被 SF
+         * latch（dump 实证 >150ms），此期间 matrix 冻结在补偿态；届时
+         * post 的同尺寸重绘（"必 latch"提交）完成后释放冻结并归一。
+         */
+        const val LATCH_CONFIRM_MS = 150L
     }
 
     // ==================== 状态字段 ====================
@@ -134,7 +159,7 @@ internal class OverlaySurfaceBackend(
         try {
             // Android 11：创建期 metadata 441731 截图排除（见 builderExcludeScreenshot）；
             // 12+：创建期无需处理，下方 applySkipScreenshot 覆盖
-            rootName = OverlayHiddenApi.randomName()
+            val rootName = OverlayHiddenApi.randomName()
             val rootBuilder = OverlayHiddenApi.newLayerBuilder(rootName)
             val rootExcluded = OverlayHiddenApi.builderExcludeScreenshot(rootBuilder)
             val rootSc = rootBuilder.build()
@@ -144,9 +169,9 @@ internal class OverlaySurfaceBackend(
             OverlayHiddenApi.txShow(tx, rootSc)
             tx.apply()
 
-            contentName = OverlayHiddenApi.randomName()
+            val contentName = OverlayHiddenApi.randomName()
             val (content, contentExcluded) = buildChildLayer(rootSc, contentName)
-            handleName = OverlayHiddenApi.randomName()
+            val handleName = OverlayHiddenApi.randomName()
             val (handle, handleExcluded) = buildChildLayer(rootSc, handleName)
             val tx2 = SurfaceControl.Transaction()
             OverlayHiddenApi.txSetBufferSize(tx2, content, w, h)
@@ -169,15 +194,8 @@ internal class OverlaySurfaceBackend(
             // Android 11 验证创建期 metadata 路径（逐层独立生效）；
             // 12+ 验证 setSkipScreenshot 路径（两者按版本二选一生效）。
             val exclusionOk = if (android.os.Build.VERSION.SDK_INT >= 31) {
-                val results = listOf(rootSc, content, handle).map {
-                    OverlayHiddenApi.applySkipScreenshot(it)
-                }
-                onDebug?.invoke("attach: setSkipScreenshot=$results")
-                results.all { it }
+                listOf(rootSc, content, handle).all { OverlayHiddenApi.applySkipScreenshot(it) }
             } else {
-                onDebug?.invoke(
-                    "attach: metadata441731=[$rootExcluded,$contentExcluded,$handleExcluded]"
-                )
                 rootExcluded && contentExcluded && handleExcluded
             }
             if (!exclusionOk) {
@@ -185,8 +203,6 @@ internal class OverlaySurfaceBackend(
                 detach()
                 return
             }
-            // 诊断：反射方法解析结果（null = 静默 no-op，几何操作失效）
-            onDebug?.invoke("attach: ${OverlayHiddenApi.debugTxResolution()}")
             drawHandles()
         } catch (t: Throwable) {
             onFatal(t)
@@ -217,11 +233,9 @@ internal class OverlaySurfaceBackend(
         handleCompensated = false
         actualW = 0
         actualH = 0
-        rootName = ""
-        contentName = ""
-        handleName = ""
-        lastContentCanvas = ""
-        lastHandleCanvas = ""
+        handleActualW = 0
+        handleActualH = 0
+        reassertPending = false
         runCatching { contentSurface?.release() }
         runCatching { handleSurface?.release() }
         contentSurface = null
@@ -263,12 +277,17 @@ internal class OverlaySurfaceBackend(
     private var contentCompensated = false
     private var handleCompensated = false
 
-    // ---- 诊断：layer 名（dumpsys 取证按名过滤）与 canvas 尺寸观测记录 ----
-    private var rootName = ""
-    private var contentName = ""
-    private var handleName = ""
-    private var lastContentCanvas = ""
-    private var lastHandleCanvas = ""
+    /** 手柄层最近观测的 buffer 尺寸（内容层用 actualW/H；重申矩阵按层取值）。 */
+    private var handleActualW = 0
+    private var handleActualH = 0
+
+    /**
+     * latch 冻结（见 scheduleSecondBeat）：true 期间所有绘制只上 buffer、
+     * 绝不触碰 matrix——保持第一拍的补偿矩阵，旧 buffer 显示恒正确；
+     * 直到"必 latch"的同尺寸重绘提交完成后才放开归一（identity 与新
+     * buffer 同一提交窗口落地，消除切换闪变）。
+     */
+    private var holdMatrix = false
 
     // 分辨率追赶重绘：补偿期间 buffer 一旦就绪，下一次绘制自动归一；
     // 此任务只是主动触发那次绘制（仅提升分辨率，显示正确性不依赖它）。
@@ -287,6 +306,85 @@ internal class OverlaySurfaceBackend(
         catchupCount++
         catchupPending = true
         handler.postDelayed(catchupRedraw, CATCHUP_MS)
+    }
+
+    // ==================== matrix 延迟重申 ====================
+    //
+    // A15 实测（拖动松手后图片溢出、单击才恢复）锁定的机制：首个"新尺寸
+    // buffer 提交"（BLAST）会把 lockCanvas 时刻的层几何烘焙进合成状态，
+    // 覆盖我们 post 之后 apply 的归一 matrix——且此时 canvas 已是新尺寸
+    // （compensated=false），追赶重绘被跳过，错误状态滞留到下一次任意
+    // 绘制（即"单击恢复"）。
+    //
+    // 对策：每次绘制后 2 个 vsync 延迟重申两层 matrix——此刻 BLAST 事务
+    // 已落地、无后续提交再覆盖，重申必然生效（把"单击才能恢复"变成
+    // 34ms 内自愈）。live 期间跳过：live 每帧自己设 matrix，天然自愈且
+    // 免与本任务交错。纯事务零 canvas 成本，幂等。
+    private var reassertPending = false
+    private val matrixReassert = Runnable {
+        reassertPending = false
+        if (root == null || liveScaling) return@Runnable
+        reassertMatrices()
+        // 第二遍兜底：个别 ROM 的 BLAST 落地晚于 2 vsync
+        handler.postDelayed({
+            if (root != null && !liveScaling) reassertMatrices()
+        }, REASSERT_MS)
+    }
+
+    private fun scheduleMatrixReassert() {
+        if (reassertPending || root == null) return
+        reassertPending = true
+        handler.postDelayed(matrixReassert, REASSERT_MS)
+    }
+
+    /** 无 canvas 操作地重申两层 matrix（按各层最近观测尺寸重算，幂等）。 */
+    private fun reassertMatrices() {
+        if (root == null || holdMatrix) return
+        val cxs = sxFor(actualW)
+        val cys = syFor(actualH)
+        val hxs = sxFor(handleActualW)
+        val hys = syFor(handleActualH)
+        runCatching {
+            val tx = SurfaceControl.Transaction()
+            contentLayer?.let { OverlayHiddenApi.txSetMatrix(tx, it, cxs, cys) }
+            handleLayer?.let { OverlayHiddenApi.txSetMatrix(tx, it, hxs, hys) }
+            tx.apply()
+        }
+    }
+
+    private fun sxFor(cw: Int) = if (cw > 0 && cw != width) width.toFloat() / cw else 1f
+    private fun syFor(ch: Int) = if (ch > 0 && ch != height) height.toFloat() / ch else 1f
+
+    // ==================== settle 第二拍调度 ====================
+    //
+    // 松手第一拍只做纯 transaction 补偿（显示正确性在此锁定），第二拍
+    // 延迟 SECOND_BEAT_MS 后走正统精确化（复用 setGeometry 精确路径）。
+    // 执行时若用户已开始新拖动（liveScaling）或后端已销毁则跳过——
+    // 新手势的松手会重新排程。
+    private var secondBeat: Runnable? = null
+
+    private fun scheduleSecondBeat(x: Int, y: Int, w: Int, h: Int) {
+        secondBeat?.let { handler.removeCallbacks(it) }
+        val r = Runnable {
+            secondBeat = null
+            if (root == null || liveScaling) return@Runnable
+            // 第二拍：正统精确化（setGeometry 精确路径）。holdMatrix=true：
+            // 绘制只上 buffer、matrix 保持第一拍补偿——旧 buffer 显示恒
+            // 正确，无闪变窗口。
+            holdMatrix = true
+            setGeometry(x, y, w, h, live = false)
+            // 释放任务（实测"首个新尺寸提交可能不被 latch，后续同尺寸
+            // 提交必 latch"）：post 一次同尺寸重绘，post 完成后立即放开
+            // 冻结——syncMatrixFor 在 unlockCanvasAndPost 之后归一，
+            // identity 与新 buffer 同一提交窗口落地，切换无缝
+            handler.postDelayed({
+                if (root == null || liveScaling) return@postDelayed
+                holdMatrix = false
+                doRedraw()
+            }, LATCH_CONFIRM_MS)
+        }
+        secondBeat = r
+        handler.postDelayed(r, SECOND_BEAT_MS)
     }
 
     // 尾随重绘任务（持有引用：只移除自己的，绝不动宿主线程其他回调）
@@ -323,8 +421,13 @@ internal class OverlaySurfaceBackend(
         redrawPending = false
         catchupPending = false
         catchupCount = 0
+        reassertPending = false
+        holdMatrix = false
+        secondBeat?.let { handler.removeCallbacks(it) }
+        secondBeat = null
         handler.removeCallbacks(trailingRedraw)
         handler.removeCallbacks(catchupRedraw)
+        handler.removeCallbacks(matrixReassert)
     }
 
     // ==================== 几何 / 外观 ====================
@@ -384,7 +487,7 @@ internal class OverlaySurfaceBackend(
             return
         }
 
-        // ---- 精确路径（外部设置 / settle）----
+        // ---- 精确路径（外部设置 / settle / 第二拍）----
         // live 结束：matrix 不在此归一——buffer 可能仍是冻结尺寸（Android 11
         // 的 setBufferSize 传导竞态，见 companion 文档），立即归一会得到
         // "旧尺寸内容 + identity"的错误帧。归一交由 syncMatrixFor 在绘制时
@@ -400,6 +503,37 @@ internal class OverlaySurfaceBackend(
         }
         width = w
         height = h
+
+        // ---- settle 第一拍（松手立即，仅非视频）----
+        // 纯 transaction 零 canvas：以补偿 matrix 维持 live 终态显示。
+        // SFdump 实测"live 矩阵 + 尺寸 + 新 buffer"三合一提交不可靠
+        // （见 companion 文档），故松手瞬间绝不做 setBufferSize / 绘制——
+        // 溢出/不占满帧在结构上不可能出现。正统精确化推迟到第二拍。
+        if (wasLive && !isVideo) {
+            // 新手势的 settle：清掉上一轮可能残留的 latch 冻结（beat1 直接
+            // 设 matrix，不受 hold 影响；hold 由第二拍重新置位）
+            holdMatrix = false
+            // 补偿基准 = 各层最近绘制观测的 buffer 尺寸（两层独立）
+            val cbW = if (actualW > 0) actualW else w
+            val cbH = if (actualH > 0) actualH else h
+            val hbW = if (handleActualW > 0) handleActualW else w
+            val hbH = if (handleActualH > 0) handleActualH else h
+            runCatching {
+                val tx1 = SurfaceControl.Transaction()
+                OverlayHiddenApi.txSetPosition(tx1, r, x, y)
+                contentLayer?.let {
+                    OverlayHiddenApi.txSetMatrix(tx1, it, w.toFloat() / cbW, h.toFloat() / cbH)
+                }
+                handleLayer?.let {
+                    OverlayHiddenApi.txSetMatrix(tx1, it, w.toFloat() / hbW, h.toFloat() / hbH)
+                }
+                tx1.apply()
+            }
+            // 新的尺寸变更事件：重置分辨率追赶预算（第二拍路径共用）
+            catchupCount = 0
+            scheduleSecondBeat(x, y, w, h)
+            return
+        }
         // 新的尺寸变更事件：重置分辨率追赶预算（见 scheduleCatchup）
         catchupCount = 0
         val tx = SurfaceControl.Transaction()
@@ -418,15 +552,14 @@ internal class OverlaySurfaceBackend(
         if (isVideo) {
             mediaPlayer?.let { mp -> runCatching { mp.setSurface(contentSurface) } }
         } else {
+            // 不预归一：v3 实测 identity 落地早于新 buffer latch（可滞后
+            // 100~200ms），期间"旧 buffer × identity"= 缩小闪变。settle
+            // 路径的 matrix 由 holdMatrix 机制在 latch 确认后统一归一
+            // （见 scheduleSecondBeat）；非 settle 的精确调用沿用
+            // syncMatrixFor 的 post 后归一（原行为）。
             drawImage()
         }
         drawHandles()
-        // 诊断：settle 目标 + 两时刻 dump SF 侧真实几何（见 dumpLayerState）
-        if (onDebug != null) {
-            onDebug?.invoke("settle: target ${w}x$h (live=$wasLive, video=$isVideo)")
-            dumpLayerState("t+150ms", 150L)
-            dumpLayerState("t+700ms", 700L)
-        }
     }
 
     /** 手势结束（ACTION_UP/CANCEL）时由 controller 调用：精确化最终帧。 */
@@ -501,7 +634,7 @@ internal class OverlaySurfaceBackend(
      * 经 HWUI/BLAST 自带事务上送 buffer，会覆盖同一提交窗口内先行
      * apply 的几何状态——live 路径（无 canvas 绘制）matrix 存活而
      * settle 绘制路径 matrix 失效，两组症状的差异即源于此
-     * （dumpsys 取证确认中）。
+     * （A15 SFdump 实测确认）。
      *
      * 每层独立是正确性前提：两层的尺寸传导在不同 vsync 到位，共享状态
      * 会在传导交错期以"错的那层"的观测覆盖"对的那层"的 matrix。
@@ -511,36 +644,33 @@ internal class OverlaySurfaceBackend(
      * @return true = 该层当前处于补偿态（观测尺寸 ≠ 目标）
      */
     private fun syncMatrixFor(cw: Int, ch: Int, layer: SurfaceControl?, isHandle: Boolean): Boolean {
-        if (isHandle) {
-            if (cw == width && ch == height) {
-                if (handleCompensated) {
-                    handleCompensated = false
-                    onDebug?.invoke("buflag: handle caught up ${cw}x$ch")
-                }
-            } else if (!handleCompensated) {
-                onDebug?.invoke(
-                    "buflag: handle canvas ${cw}x$ch != target ${width}x$height -> compensate"
-                )
+        // latch 冻结：只记账（刷新观测尺寸），不碰 matrix、不排追赶——
+        // 第一拍补偿矩阵保持生效，旧 buffer 显示恒正确；归一由释放任务
+        // 在"必 latch"的同尺寸重绘 post 之后执行（post→identity 同窗口）
+        if (holdMatrix) {
+            if (isHandle) {
+                handleActualW = cw
+                handleActualH = ch
+                handleCompensated = true
+            } else {
+                actualW = cw
+                actualH = ch
+                contentCompensated = true
             }
+            return false
+        }
+        if (isHandle) {
+            handleActualW = cw
+            handleActualH = ch
             handleCompensated = cw != width || ch != height
         } else {
             actualW = cw
             actualH = ch
-            if (cw == width && ch == height) {
-                if (contentCompensated) {
-                    contentCompensated = false
-                    onDebug?.invoke("buflag: content caught up ${cw}x$ch after $catchupCount catchup(s)")
-                }
-                catchupCount = 0
-            } else if (!contentCompensated) {
-                onDebug?.invoke(
-                    "buflag: content canvas ${cw}x$ch != target ${width}x$height -> compensate"
-                )
-            }
+            if (cw == width && ch == height) catchupCount = 0
             contentCompensated = cw != width || ch != height
         }
-        val sx = if (cw > 0 && cw != width) width.toFloat() / cw else 1f
-        val sy = if (ch > 0 && ch != height) height.toFloat() / ch else 1f
+        val sx = sxFor(cw)
+        val sy = syFor(ch)
         // 恒定设置（含归一）：幂等无成本；仅在该层真正需要变化时才有
         // 视觉差异
         runCatching {
@@ -548,61 +678,10 @@ internal class OverlaySurfaceBackend(
             layer?.let { OverlayHiddenApi.txSetMatrix(tx, it, sx, sy) }
             tx.apply()
         }
+        // 首个新尺寸 buffer 提交可能烘焙 lockCanvas 时刻几何覆盖本设置：
+        // 排一次延迟重申兜底（见 matrixReassert 文档）
+        scheduleMatrixReassert()
         return if (isHandle) handleCompensated else contentCompensated
-    }
-
-    /** 诊断：canvas 尺寸观测值变化时记录（传导时间线的直接证据）。 */
-    private fun logCanvasSize(which: String, cw: Int, ch: Int) {
-        val key = "${cw}x$ch"
-        val changed = if (which == "content") {
-            if (key == lastContentCanvas) false
-            else { lastContentCanvas = key; true }
-        } else {
-            if (key == lastHandleCanvas) false
-            else { lastHandleCanvas = key; true }
-        }
-        if (changed) onDebug?.invoke("canvas[$which]: $key (target ${width}x$height)")
-    }
-
-    /**
-     * 诊断取证：延迟 dump SurfaceFlinger 中本悬浮窗三层的真实几何
-     * （geomBufferSize / geomLayerSize / activeBuffer / matrix 等）。
-     *
-     * display 异常时 SF 侧状态是唯一 ground truth，可一锤定音区分互斥
-     * 假设：setBufferSize 未传导到客户端 / matrix 被绘制提交覆盖 /
-     * SF 自动贴合 buffer 到 layer 尺寸。root（uid=0）直接 dumpsys；
-     * 结果经 onDebug 通道送达 app 侧 logcat。dumpsys 在独立线程执行
-     * （全量 dump 可达数百 KB，不阻塞渲染线程）。
-     */
-    private fun dumpLayerState(reason: String, delayMs: Long) {
-        if (onDebug == null) return
-        handler.postDelayed({
-            Thread {
-                runCatching {
-                    val p = ProcessBuilder("dumpsys", "SurfaceFlinger").start()
-                    val out = p.inputStream.bufferedReader().use { it.readText() }
-                    runCatching { p.waitFor() }
-                    val sb = StringBuilder("SFdump[$reason] target=${width}x$height")
-                    for ((tag, name) in listOf("root" to rootName, "content" to contentName, "handle" to handleName)) {
-                        if (name.isBlank()) continue
-                        sb.append(" <<$tag>>")
-                        var idx = out.indexOf(name)
-                        var blocks = 0
-                        while (idx >= 0 && blocks < 2) {
-                            // 从命中行行首截取若干行（layer 详情块）
-                            val lineStart = out.lastIndexOf('\n', idx) + 1
-                            val seg = out.substring(lineStart, minOf(out.length, lineStart + 1200))
-                                .lineSequence().take(18).joinToString(" | ")
-                            sb.append("[").append(seg).append("]")
-                            blocks++
-                            idx = out.indexOf(name, idx + name.length)
-                        }
-                        if (blocks == 0) sb.append("(not found)")
-                    }
-                    onDebug?.invoke(sb.toString().take(2600))
-                }
-            }.apply { isDaemon = true }.start()
-        }, delayMs)
     }
 
     private fun drawImage() {
@@ -623,15 +702,12 @@ internal class OverlaySurfaceBackend(
             val canvas = surface.lockHardwareCanvas()
             val cw = canvas.width
             val ch = canvas.height
-            logCanvasSize("content", cw, ch)
             // 按实际 buffer 尺寸绘制；matrix 必须在 post 之后设置
             // （HWUI 提交事务会覆盖先设的几何状态，见 syncMatrixFor）
             drawBitmapFit(canvas, bm, cw, ch)
             surface.unlockCanvasAndPost(canvas)
             val compensated = syncMatrixFor(cw, ch, contentLayer, isHandle = false)
             if (compensated) scheduleCatchup()
-        }.onFailure {
-            onDebug?.invoke("drawImage: ${it.javaClass.simpleName}: ${it.message}")
         }
     }
 
@@ -675,7 +751,6 @@ internal class OverlaySurfaceBackend(
             val canvas: Canvas = surface.lockHardwareCanvas()
             val cw = canvas.width
             val ch = canvas.height
-            logCanvasSize("handle", cw, ch)
             // 与 drawImage 同理：以实际 buffer 尺寸绘制，滞后时由补偿
             // matrix 保证显示位置（四角标记天然适配任意 canvas 尺寸）。
             // 手柄层独立补偿——其 buffer 传导时序与内容层无关；

@@ -90,8 +90,6 @@ import java.util.concurrent.atomic.AtomicInteger
  * root -> app 回调码：
  *
  *   100 onSwitchMedia(delta)    101 onWindowFailed(reason)
- *   102 onDebug(msg)——root 进程零日志，诊断信息经回调送达 app 进程，
- *       由 app 进程决定落 logcat（见 handleDebug）
  *
  *   su 路径回调 binder 对象无法跨 socket 序列化，root 端启动时就地注入
  *   帧发送代理；999 为 su 路径 destroy 帧。
@@ -123,14 +121,6 @@ class RootOverlayService : Binder() {
     companion object {
 
         private const val APPLICATION_ID = "fake.screenshot"
-
-        /**
-         * app 进程侧诊断日志 tag（= 本文件开头的 package 声明，编译期
-         * 常量）。root 进程保持零日志（无痕承诺），所有 root 侧诊断经
-         * 回调（code 101/102）或建连 diag 送达 app 进程后才落 logcat——
-         * logcat 记录归属于 app 进程自身，与普通应用行为无异。
-         */
-        internal const val LOG_TAG = "fake.screenshot.services.privileged.overlay"
 
         /**
          * 最近一次 root 路线失败原因（app 进程侧记录）：
@@ -242,26 +232,22 @@ class RootOverlayService : Binder() {
             // 后端 1：Sui / 以 root 运行的 Shizuku
             if (isShizukuRoot()) {
                 try {
-                    android.util.Log.i(LOG_TAG, "bind: shizuku-root backend")
                     Shizuku.bindUserService(args, connection)
                     return true
-                } catch (t: Throwable) {
+                } catch (_: Throwable) {
                     // binder 竞态/未授权/版本不支持：落到 su 兜底
-                    android.util.Log.w(LOG_TAG, "bind: shizuku failed -> su fallback", t)
                 }
             }
 
             // 后端 2：root 管理器直接授权（su），无需 Shizuku/Sui 存在
             if (suBackend != null) return true
             val gen = generation.incrementAndGet()
-            android.util.Log.i(LOG_TAG, "bind: su direct backend")
             val pending = SuOverlayConnection.connectAsync(context) { conn, reason ->
                 mainHandler.post { handleSuResult(conn, gen, reason) }
             }
             pendingSu = pending
             if (!pending) {
                 lastFailureReason = "su: 无可用 su 二进制（常见路径均不存在）"
-                android.util.Log.w(LOG_TAG, "bind: $lastFailureReason")
             }
             return pending
         }
@@ -322,7 +308,6 @@ class RootOverlayService : Binder() {
                 api = proxy
                 isActive = true
                 lastFailureReason = null
-                android.util.Log.i(LOG_TAG, "shizuku backend connected")
                 notifyChanged()
             }
 
@@ -358,13 +343,11 @@ class RootOverlayService : Binder() {
                 api = conn.api
                 isActive = true
                 lastFailureReason = null
-                android.util.Log.i(LOG_TAG, "su backend connected (peer verified)")
                 notifyChanged()
             } else {
                 // 建立失败（无授权/超时/认证失败）或进程死亡：走 su 后端失败通知。
                 // su 是唯一在途后端（Shizuku 可用就不会走到 su），置空安全。
                 lastFailureReason = "su: ${reason?.ifBlank { "unknown" } ?: "unknown"}"
-                android.util.Log.w(LOG_TAG, "su backend failed: $lastFailureReason")
                 suBackend = null
                 api = null
                 isActive = false
@@ -385,16 +368,10 @@ class RootOverlayService : Binder() {
             mainHandler.post { mediaSwitchHandler?.onSwitchMedia(delta) }
         }
 
-        /** root 端诊断（code 102）：app 进程侧落 logcat（root 进程零日志）。 */
-        internal fun handleDebug(msg: String) {
-            mainHandler.post { android.util.Log.d(LOG_TAG, "root: $msg") }
-        }
-
         /** root 端窗口失败（code 101）：记录原因并触发回落。 */
         internal fun handleWindowFailed(reason: String) {
             mainHandler.post {
                 lastFailureReason = "window: $reason"
-                android.util.Log.w(LOG_TAG, "root window failed: $reason")
                 reportBackendFailed()
             }
         }
@@ -405,12 +382,10 @@ class RootOverlayService : Binder() {
     private val handlerThread = HandlerThread(OverlayHiddenApi.randomName()).apply { start() }
     private val handler = Handler(handlerThread.looper)
 
-    // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）。
-    // 诊断经 code 102 回调送达 app 进程（root 进程自身零日志）
+    // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）
     private val backend = OverlaySurfaceBackend(
         handler,
-        onFatal = { t -> notifyWindowFailed("backend", t) },
-        onDebug = { msg -> notifyDebug(msg) }
+        onFatal = { t -> notifyWindowFailed("backend", t) }
     )
 
     // 输入监视与手势状态机（attachControl 后可用）
@@ -708,11 +683,6 @@ class RootOverlayService : Binder() {
         invokeCallback(100) { it.writeInt(delta) }
     }
 
-    /** root 端诊断上报（handler 线程内调用）：经 code 102 送达 app 进程。 */
-    private fun notifyDebug(msg: String) {
-        invokeCallback(102) { it.writeString(msg) }
-    }
-
     /** root -> app 回调统一出口：Shizuku 路径为 binder transact；su 路径为帧发送代理。 */
     private fun invokeCallback(code: Int, write: (Parcel) -> Unit) {
         val cb = callback ?: return
@@ -914,11 +884,6 @@ private class CallbackBinder : Binder() {
                 RootOverlayService.handleWindowFailed(data.readString() ?: "unknown")
                 return true
             }
-
-            102 -> {
-                RootOverlayService.handleDebug(data.readString() ?: "")
-                return true
-            }
         }
         return super.onTransact(code, data, reply, flags)
     }
@@ -930,9 +895,6 @@ private object SuProto {
 
     /** root -> app：onWindowFailed(String reason) */
     const val CODE_ON_WINDOW_FAILED = 101
-
-    /** root -> app：onDebug(String msg)——root 进程诊断经帧送达 app 进程 */
-    const val CODE_ON_DEBUG = 102
 
     /** root -> app：SO_PEERCRED 对端校验通过、帧派发循环就绪 */
     const val CODE_READY = 997
@@ -1156,8 +1118,6 @@ internal class SuOverlayConnection private constructor(
                     RootOverlayService.handleWindowFailed(
                         frame.readStringFromParcel() ?: "unknown"
                     )
-                SuProto.CODE_ON_DEBUG ->
-                    frame.readStringFromParcel()?.let { RootOverlayService.handleDebug(it) }
                 else -> {
                     // 未知帧忽略（向前兼容）
                 }
@@ -1643,7 +1603,7 @@ internal class SuOverlayConnection private constructor(
          */
         private fun waitReady(transport: SuTransport, diag: StringBuilder): Boolean {
             val done = AtomicBoolean(false)
-            val watchdog = Thread {
+            Thread {
                 runCatching { Thread.sleep(READY_TIMEOUT_MS) }
                 if (!done.get()) transport.close()
             }.apply {
@@ -1959,12 +1919,6 @@ private class SuCallbackSender(private val transport: SuTransport) : Binder() {
             101 -> {
                 val reason = data.readString() ?: "unknown"
                 transport.sendParcelFrame(101) { it.writeString(reason) }
-                return true
-            }
-
-            102 -> {
-                val msg = data.readString() ?: ""
-                transport.sendParcelFrame(102) { it.writeString(msg) }
                 return true
             }
         }
