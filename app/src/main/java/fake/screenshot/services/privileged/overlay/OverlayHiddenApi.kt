@@ -183,18 +183,25 @@ internal object OverlayHiddenApi {
                 parcel.setDataPosition(pos)
                 val found = runCatching { parcel.readFileDescriptor() }.getOrNull()
                 if (found != null) {
-                    val dup = runCatching {
-                        ParcelFileDescriptor.dup(found.fileDescriptor)
-                    }.getOrNull()
-                    if (dup != null) {
-                        // fd 必须是 socket（InputChannel 为 SOCK_SEQPACKET）。
-                        // binder handle 被误读 / stale fd 都不是 socket，跳过。
-                        val isSocket = runCatching {
-                            val st = android.system.Os.fstat(dup.fileDescriptor)
-                            android.system.OsConstants.S_ISSOCK(st.st_mode)
-                        }.getOrDefault(false)
-                        if (isSocket) return dup
-                        runCatching { dup.close() }
+                    try {
+                        val dup = runCatching {
+                            ParcelFileDescriptor.dup(found.fileDescriptor)
+                        }.getOrNull()
+                        if (dup != null) {
+                            // fd 必须是 socket（InputChannel 为 SOCK_SEQPACKET）。
+                            // binder handle 被误读 / stale fd 都不是 socket，跳过。
+                            val isSocket = runCatching {
+                                val st = android.system.Os.fstat(dup.fileDescriptor)
+                                android.system.OsConstants.S_ISSOCK(st.st_mode)
+                            }.getOrDefault(false)
+                            if (isSocket) return dup
+                            runCatching { dup.close() }
+                        }
+                    } finally {
+                        // readFileDescriptor 的 dup 副本归本进程所有，必须
+                        // 显式关闭（返回的 dup 持有独立 fd，不受影响）——
+                        // 否则 CloseGuard 告警 + fd 泄漏
+                        runCatching { found.close() }
                     }
                 }
                 pos += 4
@@ -357,4 +364,15 @@ internal object OverlayHiddenApi {
     fun txShow(tx: SurfaceControl.Transaction, sc: SurfaceControl) {
         showMethod?.invoke(tx, sc)
     }
+
+    /**
+     * 诊断：Transaction 反射方法解析结果（null = 该方法在本 ROM 不存在，
+     * 所有调用静默 no-op——几何操作全面失效的唯一显性信号）。
+     * 经调用方 onDebug 通道输出。
+     */
+    fun debugTxResolution(): String =
+        "txMethods[setMatrix=${setMatrixMethod != null} " +
+                "setBufferSize=${setBufferSizeMethod != null} " +
+                "setPosition=${setPositionMethod != null} " +
+                "setAlpha=${setAlphaMethod != null} show=${showMethod != null}]"
 }

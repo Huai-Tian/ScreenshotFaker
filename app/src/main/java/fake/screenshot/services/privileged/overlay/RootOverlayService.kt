@@ -1,4 +1,4 @@
-package fake.screenshot.services.privileged
+package fake.screenshot.services.privileged.overlay
 
 import android.annotation.SuppressLint
 import android.content.ComponentName
@@ -19,17 +19,12 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.WindowManager
 import fake.screenshot.Auxiliary
-import fake.screenshot.services.privileged.overlay.GestureInputMonitor
-import fake.screenshot.services.privileged.overlay.OverlayGestureController
-import fake.screenshot.services.privileged.overlay.OverlayHiddenApi
-import fake.screenshot.services.privileged.overlay.OverlaySurfaceBackend
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuApiConstants
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.File
 import java.io.FileDescriptor
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
@@ -43,8 +38,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * 本文件是服务类文件，同时承载两半（分别运行于不同进程）：
  *
  * - 【root 进程侧】[RootOverlayService] 本体（继承 Binder，手写 onTransact
- *   协议，不依赖 AIDL）：实现委托至 [fake.screenshot.services.privileged.overlay]
- *   模块——纯 Surface 双层渲染 + InputMonitor 输入通道，完全不经
+ *   协议，不依赖 AIDL）：实现委托至本包（services.privileged.overlay）
+ *   其余模块——纯 Surface 双层渲染 + InputMonitor 输入通道，完全不经
  *   WindowManager / ViewRootImpl / View 体系；
  * - 【应用进程侧】[RootOverlayService] 的 companion object 即对外接口：
  *   bind/unbind 管理双后端（Shizuku UserService 优先 / su app_process 兜底），
@@ -95,6 +90,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * root -> app 回调码：
  *
  *   100 onSwitchMedia(delta)    101 onWindowFailed(reason)
+ *   102 onDebug(msg)——root 进程零日志，诊断信息经回调送达 app 进程，
+ *       由 app 进程决定落 logcat（见 handleDebug）
  *
  *   su 路径回调 binder 对象无法跨 socket 序列化，root 端启动时就地注入
  *   帧发送代理；999 为 su 路径 destroy 帧。
@@ -126,6 +123,25 @@ class RootOverlayService : Binder() {
     companion object {
 
         private const val APPLICATION_ID = "fake.screenshot"
+
+        /**
+         * app 进程侧诊断日志 tag（= 本文件开头的 package 声明，编译期
+         * 常量）。root 进程保持零日志（无痕承诺），所有 root 侧诊断经
+         * 回调（code 101/102）或建连 diag 送达 app 进程后才落 logcat——
+         * logcat 记录归属于 app 进程自身，与普通应用行为无异。
+         */
+        internal const val LOG_TAG = "fake.screenshot.services.privileged.overlay"
+
+        /**
+         * 最近一次 root 路线失败原因（app 进程侧记录）：
+         * - su 建连各环节失败（spawn/握手/连接/认证/就绪 + stderr 摘录）；
+         * - root 端窗口挂载失败（code 101 透传的原因）；
+         * - Shizuku 服务断连。
+         * 供 OverlayServiceManager 降级 Toast / 排查使用；成功连接时清空。
+         */
+        @Volatile
+        var lastFailureReason: String? = null
+            private set
 
         private val args by lazy {
             Shizuku.UserServiceArgs(
@@ -226,20 +242,27 @@ class RootOverlayService : Binder() {
             // 后端 1：Sui / 以 root 运行的 Shizuku
             if (isShizukuRoot()) {
                 try {
+                    android.util.Log.i(LOG_TAG, "bind: shizuku-root backend")
                     Shizuku.bindUserService(args, connection)
                     return true
-                } catch (_: Throwable) {
+                } catch (t: Throwable) {
                     // binder 竞态/未授权/版本不支持：落到 su 兜底
+                    android.util.Log.w(LOG_TAG, "bind: shizuku failed -> su fallback", t)
                 }
             }
 
             // 后端 2：root 管理器直接授权（su），无需 Shizuku/Sui 存在
             if (suBackend != null) return true
             val gen = generation.incrementAndGet()
-            val pending = SuOverlayConnection.connectAsync(context) { conn ->
-                mainHandler.post { handleSuResult(conn, gen) }
+            android.util.Log.i(LOG_TAG, "bind: su direct backend")
+            val pending = SuOverlayConnection.connectAsync(context) { conn, reason ->
+                mainHandler.post { handleSuResult(conn, gen, reason) }
             }
             pendingSu = pending
+            if (!pending) {
+                lastFailureReason = "su: 无可用 su 二进制（常见路径均不存在）"
+                android.util.Log.w(LOG_TAG, "bind: $lastFailureReason")
+            }
             return pending
         }
 
@@ -298,6 +321,8 @@ class RootOverlayService : Binder() {
                 }
                 api = proxy
                 isActive = true
+                lastFailureReason = null
+                android.util.Log.i(LOG_TAG, "shizuku backend connected")
                 notifyChanged()
             }
 
@@ -305,6 +330,7 @@ class RootOverlayService : Binder() {
                 if (suBackend != null) return
                 api = null
                 isActive = false
+                lastFailureReason = "shizuku: 服务断连"
                 notifyChanged()
             }
         }
@@ -318,8 +344,10 @@ class RootOverlayService : Binder() {
         /**
          * su 后端结果（成功连接 / 失败 / 进程死亡）统一入口，主线程执行。
          * gen 不匹配说明该请求已被 unbind/rebind 作废：直接销毁连接。
+         * reason 仅在失败时非空：su 建连各环节的失败诊断（见
+         * [SuOverlayConnection.connectAsync]），记录后由降级路径透出。
          */
-        private fun handleSuResult(conn: SuOverlayConnection?, gen: Int) {
+        private fun handleSuResult(conn: SuOverlayConnection?, gen: Int, reason: String?) {
             if (gen != generation.get()) {
                 conn?.shutdown()
                 return
@@ -329,10 +357,14 @@ class RootOverlayService : Binder() {
                 suBackend = conn
                 api = conn.api
                 isActive = true
+                lastFailureReason = null
+                android.util.Log.i(LOG_TAG, "su backend connected (peer verified)")
                 notifyChanged()
             } else {
-                // 建立失败（无授权/超时）或进程死亡：走 su 后端失败通知。
+                // 建立失败（无授权/超时/认证失败）或进程死亡：走 su 后端失败通知。
                 // su 是唯一在途后端（Shizuku 可用就不会走到 su），置空安全。
+                lastFailureReason = "su: ${reason?.ifBlank { "unknown" } ?: "unknown"}"
+                android.util.Log.w(LOG_TAG, "su backend failed: $lastFailureReason")
                 suBackend = null
                 api = null
                 isActive = false
@@ -353,8 +385,18 @@ class RootOverlayService : Binder() {
             mainHandler.post { mediaSwitchHandler?.onSwitchMedia(delta) }
         }
 
-        internal fun handleWindowFailed() {
-            mainHandler.post { reportBackendFailed() }
+        /** root 端诊断（code 102）：app 进程侧落 logcat（root 进程零日志）。 */
+        internal fun handleDebug(msg: String) {
+            mainHandler.post { android.util.Log.d(LOG_TAG, "root: $msg") }
+        }
+
+        /** root 端窗口失败（code 101）：记录原因并触发回落。 */
+        internal fun handleWindowFailed(reason: String) {
+            mainHandler.post {
+                lastFailureReason = "window: $reason"
+                android.util.Log.w(LOG_TAG, "root window failed: $reason")
+                reportBackendFailed()
+            }
         }
     }
 
@@ -363,8 +405,13 @@ class RootOverlayService : Binder() {
     private val handlerThread = HandlerThread(OverlayHiddenApi.randomName()).apply { start() }
     private val handler = Handler(handlerThread.looper)
 
-    // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）
-    private val backend = OverlaySurfaceBackend(handler) { t -> notifyWindowFailed("backend", t) }
+    // 渲染后端（handler 线程独占；节流重绘 postDelayed 同线程无并发）。
+    // 诊断经 code 102 回调送达 app 进程（root 进程自身零日志）
+    private val backend = OverlaySurfaceBackend(
+        handler,
+        onFatal = { t -> notifyWindowFailed("backend", t) },
+        onDebug = { msg -> notifyDebug(msg) }
+    )
 
     // 输入监视与手势状态机（attachControl 后可用）
     private var monitor: GestureInputMonitor? = null
@@ -661,6 +708,11 @@ class RootOverlayService : Binder() {
         invokeCallback(100) { it.writeInt(delta) }
     }
 
+    /** root 端诊断上报（handler 线程内调用）：经 code 102 送达 app 进程。 */
+    private fun notifyDebug(msg: String) {
+        invokeCallback(102) { it.writeString(msg) }
+    }
+
     /** root -> app 回调统一出口：Shizuku 路径为 binder transact；su 路径为帧发送代理。 */
     private fun invokeCallback(code: Int, write: (Parcel) -> Unit) {
         val cb = callback ?: return
@@ -859,7 +911,12 @@ private class CallbackBinder : Binder() {
             }
 
             101 -> {
-                RootOverlayService.handleWindowFailed()
+                RootOverlayService.handleWindowFailed(data.readString() ?: "unknown")
+                return true
+            }
+
+            102 -> {
+                RootOverlayService.handleDebug(data.readString() ?: "")
                 return true
             }
         }
@@ -873,6 +930,9 @@ private object SuProto {
 
     /** root -> app：onWindowFailed(String reason) */
     const val CODE_ON_WINDOW_FAILED = 101
+
+    /** root -> app：onDebug(String msg)——root 进程诊断经帧送达 app 进程 */
+    const val CODE_ON_DEBUG = 102
 
     /** root -> app：SO_PEERCRED 对端校验通过、帧派发循环就绪 */
     const val CODE_READY = 997
@@ -991,16 +1051,32 @@ internal class SuTransport private constructor(private val socket: LocalSocket) 
     companion object {
         private const val MAX_FRAME = 1 shl 20
 
-        /** 应用端连接 root 端监听的抽象命名空间 socket；失败返回 null。 */
-        fun connect(name: String, timeoutMs: Int): SuTransport? {
-            return runCatching {
+        /**
+         * 应用端连接 root 端监听的抽象命名空间 socket；失败返回 null。
+         *
+         * 必须用单参数 connect(endpoint)——带 timeout 的重载经
+         * LocalSocketImpl.connect(addr, timeout) 恒抛
+         * UnsupportedOperationException（AF_UNIX 不支持连接超时，
+         * AOSP 未实现该路径）。抽象 socket 连接是即时的（成功或
+         * ECONNREFUSED 立即返回），无需超时参数；外层 awaitTransport
+         * 的轮询 deadline 兜底。
+         *
+         * [lastError] 非空时写入本次异常摘要（每次失败覆盖，保留最后
+         * 一次）：EACCES → SELinux 拒绝；ECONNREFUSED → socket 不存在
+         * （root 端尚未绑定或已退出）。
+         */
+        fun connect(name: String, timeoutMs: Int, lastError: StringBuilder? = null): SuTransport? {
+            return try {
                 val s = LocalSocket()
-                s.connect(
-                    LocalSocketAddress(name, LocalSocketAddress.Namespace.ABSTRACT),
-                    timeoutMs
-                )
+                s.connect(LocalSocketAddress(name, LocalSocketAddress.Namespace.ABSTRACT))
                 SuTransport(s)
-            }.getOrNull()
+            } catch (t: Throwable) {
+                lastError?.apply {
+                    setLength(0)
+                    append("${t.javaClass.simpleName}: ${t.message}")
+                }
+                null
+            }
         }
 
         /** root 端包装 accept() 得到的已连接 socket。 */
@@ -1077,7 +1153,11 @@ internal class SuOverlayConnection private constructor(
                 SuProto.CODE_ON_SWITCH_MEDIA ->
                     frame.readIntFromParcel()?.let { RootOverlayService.handleMediaSwitch(it) }
                 SuProto.CODE_ON_WINDOW_FAILED ->
-                    RootOverlayService.handleWindowFailed()
+                    RootOverlayService.handleWindowFailed(
+                        frame.readStringFromParcel() ?: "unknown"
+                    )
+                SuProto.CODE_ON_DEBUG ->
+                    frame.readStringFromParcel()?.let { RootOverlayService.handleDebug(it) }
                 else -> {
                     // 未知帧忽略（向前兼容）
                 }
@@ -1114,22 +1194,115 @@ internal class SuOverlayConnection private constructor(
          * 此时调用方应同步走普通路线。
          *
          * 依次尝试 stdin 模式与 `-c` 兜底模式（见类文档），任一模式建连
-         * 成功即返回。
+         * 成功即返回。失败时 onResult 第二参数携带逐环节诊断
+         * （spawn/握手/连接/认证/就绪 + stderr 摘录），由 app 进程落日志。
          */
         fun connectAsync(
             context: Context,
-            onResult: (SuOverlayConnection?) -> Unit
+            onResult: (SuOverlayConnection?, String?) -> Unit
         ): Boolean {
             if (!Auxiliary.hasSuBinary()) return false
             val apkPath = context.applicationInfo.sourceDir
 
             Thread {
+                val diag = StringBuilder()
                 var conn: SuOverlayConnection? = null
                 for (useStdin in booleanArrayOf(true, false)) {
-                    conn = connectOnce(apkPath, useStdin) { onResult(null) }
+                    diag.append(if (useStdin) "[stdin模式] " else "[-c模式] ")
+                    conn = connectOnce(apkPath, useStdin, diag) {
+                        onResult(null, "root 进程死亡/断连")
+                    }
                     if (conn != null) break
                 }
-                onResult(conn)
+                if (conn == null) {
+                    // 兜底取证：main 入口之前的失败（VM 创建/类加载）仍只进
+                    // logcat，管道零输出——以 root 身份 dump AndroidRuntime/
+                    // appproc 错误与 crash 缓冲，按本次启动的随机进程名
+                    // （--nice-name，已记录在 diag 的 cmd 串中）精确归因，
+                    // 排除其他应用的崩溃噪声
+                    runCatching {
+                        val names = Regex("nice-name='([^']+)'")
+                            .findAll(diag).map { it.groupValues[1] }.toList()
+                        val p = ProcessBuilder(
+                            "su", "-c",
+                            "logcat -d -b main -b crash -s AndroidRuntime:E appproc:E -t 200"
+                        ).start()
+                        runCatching { Thread.sleep(PROBE_MS * 2) }
+                        if (runCatching { p.exitValue() }.getOrNull() == null) {
+                            runCatching { p.destroy() }
+                        } else {
+                            val logs = runCatching {
+                                p.inputStream.bufferedReader().use { it.readText() }
+                            }.getOrDefault("")
+                            if (logs.isNotBlank()) {
+                                val lines = logs.lineSequence().toList()
+                                // 崩溃头行含 "Process: <nice-name>"；据此定位
+                                // 本进程崩溃块，截取头行上下文若干行
+                                val idx = lines.indexOfFirst { l ->
+                                    names.any { l.contains(it) }
+                                }
+                                if (idx >= 0) {
+                                    val from = maxOf(0, idx - 2)
+                                    val to = minOf(lines.size, idx + 25)
+                                    diag.append(
+                                        "crash缓冲[本次进程]: ${
+                                            lines.subList(from, to).joinToString(" | ").take(500)
+                                        }; "
+                                    )
+                                } else if (logs.contains("could not find class") ||
+                                    logs.contains("JNI_CreateJavaVM")
+                                ) {
+                                    // 无进程名归因时的次选：这两类错误只会在
+                                    // app_process 启动时产生，基本必属本进程
+                                    diag.append(
+                                        "logcat[app_process错误]: ${
+                                            logs.trim().replace('\n', ' ').take(400)
+                                        }; "
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    // SELinux 拒绝取证：若 connect 卡在 EACCES（untrusted_app
+                    // → root 域 unix_stream_socket connect 未放行），内核
+                    // avc 拒绝记录落在 logcat 环形缓冲，进程死后仍在——
+                    // 过滤 unix_socket 相关行，与本次 socket 名交叉印证
+                    runCatching {
+                        val sockNames = Regex("socket\\(name=([^,)]+)")
+                            .findAll(diag).map { it.groupValues[1] }.toSet()
+                        val p = ProcessBuilder(
+                            "su", "-c", "logcat -d -s avc -t 300"
+                        ).start()
+                        runCatching { Thread.sleep(PROBE_MS * 2) }
+                        if (runCatching { p.exitValue() }.getOrNull() == null) {
+                            runCatching { p.destroy() }
+                        } else {
+                            val avc = runCatching {
+                                p.inputStream.bufferedReader().use { it.readText() }
+                            }.getOrDefault("")
+                            val hits = avc.lineSequence()
+                                .filter { line ->
+                                    (line.contains("unix_stream_socket") ||
+                                            line.contains("unix_stream") ||
+                                            line.contains("unix_dgram")) &&
+                                            (line.contains("connect") ||
+                                                    sockNames.any { line.contains(it) })
+                                }
+                                .toList()
+                            diag.append(
+                                if (hits.isEmpty()) {
+                                    "AVC[unix]: 无相关拒绝记录; "
+                                } else {
+                                    "AVC[unix拒绝]: ${hits.joinToString(" | ").take(400)}; "
+                                }
+                            )
+                        }
+                    }
+                }
+                onResult(
+                    conn,
+                    if (conn == null) diag.toString().trim().ifBlank { "unknown" } else null
+                )
             }.apply {
                 isDaemon = true
                 this.name = OverlayHiddenApi.randomName()
@@ -1139,31 +1312,78 @@ internal class SuOverlayConnection private constructor(
 
         /**
          * 以指定模式完成一次完整建连（启动 root 进程 → 读握手行 → 连接
-         * → 双向认证 → 等就绪帧），任一环节失败返回 null 并清理现场。
+         * → 双向认证 → 等就绪帧），任一环节失败向 [diag] 追加该环节的
+         * 诊断描述并返回 null（调用方据此定位失败点）。
          */
         private fun connectOnce(
             apkPath: String,
             useStdin: Boolean,
+            diag: StringBuilder,
             onDead: () -> Unit
         ): SuOverlayConnection? {
-            val proc = startRootProcess(apkPath, useStdin) ?: return null
-            val socketName = readHandshakeLine(proc, CONNECT_TIMEOUT_MS)
+            val proc = startRootProcess(apkPath, useStdin, diag) ?: return null
+            val socketName = readHandshakeLine(proc, CONNECT_TIMEOUT_MS, diag)
             if (socketName == null) {
                 runCatching { proc.destroy() }
                 return null
             }
-            val transport = awaitTransport(socketName, proc)
+            val transport = awaitTransport(socketName, proc, diag)
             if (transport == null) {
                 runCatching { proc.destroy() }
                 return null
             }
-            if (!transport.verifyPeerRoot() || !waitReady(transport)) {
+            if (!transport.verifyPeerRoot()) {
+                diag.append("auth: SO_PEERCRED 对端非 root; ")
+                runCatching { transport.close() }
+                runCatching { proc.destroy() }
+                return null
+            }
+            if (!waitReady(transport, diag)) {
                 runCatching { transport.close() }
                 runCatching { proc.destroy() }
                 return null
             }
             val proxy = SuOverlayProxy(transport)
             return SuOverlayConnection(proxy, transport, proc, onDead).also { it.start() }
+        }
+
+        /**
+         * 仅收集 stderr（handshake / connect 阶段使用：stdout 可能携带
+         * 握手行，绝不可在此消费）。失败路径调用，不阻塞。
+         */
+        private fun drainStderr(proc: Process): String = runCatching {
+            val es = proc.errorStream
+            val avail = es.available()
+            if (avail <= 0) "" else {
+                val buf = ByteArray(avail)
+                es.read(buf)
+                // 600：容纳 SuLauncher 顶层 catch 写入的 FATAL + 栈帧摘要
+                String(buf).trim().replace('\n', ' ').take(600)
+            }
+        }.getOrDefault("")
+
+        /**
+         * 非阻塞收集 su / root 进程 stdout + stderr（root 管理器拒绝授权、
+         * shell 语法错误等信息写这里——部分实现（如 KernelSU 未授权）
+         * 静默 exit(1) 两流皆空；部分写 stderr；也有写 stdout 的）。
+         * 仅在 spawn 失败路径调用（进程已死，读 stdout 不会吞掉握手行），
+         * available() 探测保证不阻塞。
+         */
+        private fun drainOutput(proc: Process): String {
+            fun drain(stream: java.io.InputStream): String = runCatching {
+                val avail = stream.available()
+                if (avail <= 0) "" else {
+                    val buf = ByteArray(avail)
+                    stream.read(buf)
+                    String(buf).trim().replace('\n', ' ').take(200)
+                }
+            }.getOrDefault("")
+
+            val err = drain(proc.errorStream)
+            val out = drain(proc.inputStream)
+            return listOf(err, out).filter { it.isNotBlank() }
+                .joinToString(" | ") { it }
+                .ifBlank { "" }
         }
 
         /**
@@ -1187,23 +1407,57 @@ internal class SuOverlayConnection private constructor(
          *   AndroidRuntime.setArgv0 重写 argv 区，/proc/cmdline 与 comm
          *   只剩随机名（随机字符+随机长度）。argv 全程不含机密。
          *
+         * stderr 保持管道（不重定向 /dev/null）：root 管理器拒绝授权等
+         * 错误写这里，失败时经 drainOutput 收进诊断；root 端握手完成后
+         * 自行将 fd 2 重定向 /dev/null（见 SuLauncher），运行期噪声不会
+         * 填满管道阻塞 root 进程。
+         *
          * 逐 su 候选尝试（PATH 优先，再常见绝对路径）；短暂探测存活以
          * 过滤"无授权被直接拒绝"（拒绝时 su 立即退出；授权弹窗期间进程
-         * 存活，继续等待）。全失败返回 null。
+         * 存活，继续等待）。全失败返回 null（各候选死因记入 diag）。
          */
-        private fun startRootProcess(apkPath: String, useStdin: Boolean): Process? {
+        private fun startRootProcess(
+            apkPath: String,
+            useStdin: Boolean,
+            diag: StringBuilder
+        ): Process? {
             val niceName = Auxiliary.getSecureRandomString(Auxiliary.getSecureRandomInt(6..12))
+            // app_process 参数序（AOSP 11-16 一致）：[vm-options] cmd-dir [内部参数] 类名 [args]
+            // —— --nice-name 必须位于 cmd-dir（"/"）之后。放在它之前会被 VM option
+            // 解析循环吞掉传给 JNI_CreateJavaVM，而 AndroidRuntime 以
+            // ignoreUnrecognized=FALSE 初始化 VM，未知 option 直接令 VM 创建失败：
+            // 进程毫秒级静默退出（错误仅写 logcat 的 AndroidRuntime tag，
+            // stdout/stderr 零输出）——即此前"su 正常 / env 前缀正常 / 命令体
+            // exit=1 无输出"探针组合的根因
             val cmd = "SF_UID=${android.os.Process.myUid()} CLASSPATH='$apkPath' " +
-                    "exec /system/bin/app_process --nice-name='$niceName' / " +
+                    "exec /system/bin/app_process / --nice-name='$niceName' " +
                     SuLauncher::class.java.name
+            // 诊断：完整命令串原样入 diag（失败时随 Toast/logcat 输出），
+            // 供直接比对 shell 语义/引号/长度问题
+            diag.append("cmd=[$cmd]; ")
+            // 混淆自检：app_process 经 JNI 按 "main" 方法名定位入口（见
+            // SuLauncher 文档与 proguard-rules.pro 的 keepclassmembers 规则）。
+            // 规则缺失时方法名被 R8 混淆 → root 进程静默 exit=1（错误仅进
+            // logcat 的 AndroidRuntime tag，stderr 零输出）——提前拦截，
+            // 给出可读原因而非逐 su 候选盲试
+            runCatching {
+                SuLauncher::class.java.getMethod("main", Array<String>::class.java)
+            }.onFailure {
+                diag.append(
+                    "SuLauncher.main 无法反射定位（混淆 keep 规则缺失，" +
+                            "方法名已被 R8 改写）: ${it.message}; "
+                )
+                return null
+            }
             val candidates = listOf("su") + Auxiliary.suBinaryPaths
             for (bin in candidates) {
                 val proc = runCatching {
                     ProcessBuilder(if (useStdin) listOf(bin) else listOf(bin, "-c", cmd))
-                        // stderr 静默；stdout 保持管道（root 进程经其回传握手行）
-                        .redirectError(File("/dev/null"))
                         .start()
-                }.getOrNull() ?: continue
+                }.getOrNull() ?: run {
+                    diag.append("spawn[$bin]: 启动失败; ")
+                    continue
+                }
                 if (useStdin) {
                     val wrote = runCatching {
                         proc.outputStream.use {
@@ -1213,13 +1467,127 @@ internal class SuOverlayConnection private constructor(
                         true
                     }.getOrDefault(false)
                     if (!wrote) {
+                        diag.append("spawn[$bin]: stdin 写入失败; ")
                         runCatching { proc.destroy() }
                         continue
                     }
                 }
                 runCatching { Thread.sleep(PROBE_MS) }
                 if (proc.isAlive) return proc
+                diag.append(
+                    "spawn[$bin]: ${PROBE_MS}ms 内退出" +
+                            runCatching { "(exit=${proc.exitValue()})" }.getOrDefault("") +
+                            " ${drainOutput(proc)}; "
+                )
                 runCatching { proc.destroy() }
+            }
+            // 最小探针：与命令体无关的 su -c id。区分两类失败：
+            // - exit=0 且输出 uid=0 → su 链路完全正常，问题在命令体
+            //   （环境变量前缀 + exec app_process 组合在该 su 的 shell
+            //   下解析/执行失败）；
+            // - 非 0 / 无输出 → su 对本应用整体拒绝（授权未生效/uid 判定
+            //   不匹配/管理器策略），与我们的命令写法无关
+            var suNormal = false
+            for (bin in listOf("su", "/system/bin/su")) {
+                val probe = runCatching {
+                    ProcessBuilder(bin, "-c", "id").start()
+                }.getOrNull() ?: continue
+                // id 毫秒级完成；给 su 授权判定留余量
+                runCatching { Thread.sleep(PROBE_MS) }
+                val exited = runCatching { probe.exitValue() }.getOrNull()
+                val out = drainOutput(probe)
+                runCatching { probe.destroy() }
+                if (exited == null) {
+                    // 仍存活：授权弹窗挂起或命令未归（罕见）
+                    diag.append("probe[$bin -c id]: 仍存活(可能弹窗等待); ")
+                    continue
+                }
+                diag.append("probe[$bin -c id]: exit=$exited ${out.ifBlank { "(无输出)" }}; ")
+                if (exited == 0 && out.contains("uid=0")) {
+                    suNormal = true
+                    diag.append("(su 正常→命令体问题); ")
+                }
+                break
+            }
+            if (suNormal) {
+                // 分段探针：su 正常但命令体失败时，进一步区分失败层级。
+                // 探针2（环境前缀语法）：`SF_UID=1 id` 若失败 → 该 su 的
+                //   shell 不支持环境变量前缀写法，需改 export/env 形式；
+                // 探针3（完整命令体 + stderr 合流）：若 app_process 崩溃，
+                //   Java 栈会进入 stdout 被 diag 捕获（根因直读）；
+                //   若进程存活 → 命令体可正常运行，矛盾于 spawn 存活判定；
+                // 探针4（root 侧 logcat）：app_process 的 VM 创建失败
+                //   （JNI_CreateJavaVM failed）与类加载失败（could not
+                //   find class）只经 ALOGE 写 logcat（AndroidRuntime /
+                //   appproc tag），stderr 零输出——探针3 "exit!=0 无输出"
+                //   的根因只躺在这里，需以 root 身份 dump 才能拿到
+                runCatching {
+                    val p2 = ProcessBuilder("su", "-c", "SF_UID=1 id").start()
+                    runCatching { Thread.sleep(PROBE_MS) }
+                    val p2Exit = runCatching { p2.exitValue() }.getOrNull()
+                    diag.append(
+                        "probe2[env前缀]: exit=$p2Exit ${drainOutput(p2).ifBlank { "(无输出)" }}; "
+                    )
+                    runCatching { p2.destroy() }
+                }
+                runCatching {
+                    val p3 = ProcessBuilder("su", "-c", "$cmd 2>&1").start()
+                    runCatching { Thread.sleep(PROBE_MS * 3) }
+                    val p3Exit = runCatching { p3.exitValue() }.getOrNull()
+                    if (p3Exit == null) {
+                        diag.append("probe3[命令体]: 进程存活(命令可运行); ")
+                        // 真实 SuLauncher 进程：握手行已写 stdout（被本探针读走
+                        // 属预期），看门狗 15s 自动回收；主动 destroy 免等
+                        runCatching { p3.destroy() }
+                    } else {
+                        // 崩溃输出（Java 栈）截断防 diag 超长
+                        val trace = runCatching {
+                            p3.inputStream.bufferedReader().use { it.readText() }
+                        }.getOrDefault("")
+                        diag.append(
+                            "probe3[命令体]: exit=$p3Exit ${
+                                trace.trim().replace('\n', ' ').take(400).ifBlank { "(无输出)" }
+                            }; "
+                        )
+                    }
+                }
+                runCatching {
+                    // 进程已退出（exit 已知）后完整读流不会阻塞；
+                    // logcat -d 落盘即退，仍存活属异常（个别 ROM 的 su 会话
+                    // 挂起），销毁跳过
+                    val p4 = ProcessBuilder(
+                        "su", "-c",
+                        "logcat -d -b main -b crash -s AndroidRuntime:E appproc:E -t 60"
+                    ).start()
+                    runCatching { Thread.sleep(PROBE_MS) }
+                    val p4Exit = runCatching { p4.exitValue() }.getOrNull()
+                    if (p4Exit == null) {
+                        diag.append("probe4[logcat]: 仍存活(异常); ")
+                        runCatching { p4.destroy() }
+                    } else {
+                        val logs = runCatching {
+                            p4.inputStream.bufferedReader().use { it.readText() }
+                        }.getOrDefault("")
+                        // 关键词过滤：logcat 的 AndroidRuntime tag 混有其他
+                        // 应用崩溃栈，只保留 app_process 启动链相关行
+                        val hits = logs.lineSequence()
+                            .filter { line ->
+                                listOf(
+                                    "JNI_CreateJavaVM", "find class", "FATAL",
+                                    "Exception", "app_process", "RuntimeInit",
+                                    "Caused by", "SuLauncher"
+                                ).any { line.contains(it, ignoreCase = true) }
+                            }
+                            .toList()
+                        diag.append(
+                            if (hits.isEmpty()) {
+                                "probe4[logcat]: exit=$p4Exit (无相关条目); "
+                            } else {
+                                "probe4[logcat]: exit=$p4Exit ${hits.joinToString(" | ").take(500)}; "
+                            }
+                        )
+                    }
+                }
             }
             return null
         }
@@ -1229,8 +1597,10 @@ internal class SuOverlayConnection private constructor(
          * 以前缀扫描而非按行号解析：容忍 ART 类加载注记等先行杂散输出。
          * root 进程写入该行后立即将 stdout 重定向 /dev/null（随后 EOF），
          * 管道不会因无人读取而阻塞 root 进程。
+         *
+         * 失败时向 [diag] 追加具体环节（超时 / 进程退出 / EOF）+ stderr 摘录。
          */
-        private fun readHandshakeLine(proc: Process, timeoutMs: Long): String? {
+        private fun readHandshakeLine(proc: Process, timeoutMs: Long, diag: StringBuilder): String? {
             val deadline = SystemClock.elapsedRealtime() + timeoutMs
             val input = proc.inputStream
             val pending = StringBuilder()
@@ -1239,7 +1609,10 @@ internal class SuOverlayConnection private constructor(
                 val n = runCatching {
                     if (input.available() > 0) input.read(chunk) else 0
                 }.getOrDefault(-1)
-                if (n < 0) return null // root 进程死亡（EOF / 流损坏）
+                if (n < 0) {
+                    diag.append("handshake: 管道 EOF（进程退出）${drainStderr(proc)}; ")
+                    return null // root 进程死亡（EOF / 流损坏）
+                }
                 if (n > 0) {
                     pending.append(String(chunk, 0, n))
                     while (true) {
@@ -1253,20 +1626,22 @@ internal class SuOverlayConnection private constructor(
                         }
                     }
                 } else if (!proc.isAlive) {
+                    diag.append("handshake: 进程提前退出${drainStderr(proc)}; ")
                     return null
                 } else {
                     runCatching { Thread.sleep(50) }
                 }
             }
+            diag.append("handshake: ${timeoutMs}ms 内未收到握手行${drainStderr(proc)}; ")
             return null
         }
 
         /**
          * 等待 root 端就绪帧（SO_PEERCRED 校验通过、帧派发循环启动）。
          * 独立看门狗线程兜底：超时强制关闭 socket 解除阻塞读（root 端
-         * 认证即时就绪，正常路径毫秒级到达）。
+         * 认证即时就绪，正常路径毫秒级到达）。失败细节记入 [diag]。
          */
-        private fun waitReady(transport: SuTransport): Boolean {
+        private fun waitReady(transport: SuTransport, diag: StringBuilder): Boolean {
             val done = AtomicBoolean(false)
             val watchdog = Thread {
                 runCatching { Thread.sleep(READY_TIMEOUT_MS) }
@@ -1277,17 +1652,33 @@ internal class SuOverlayConnection private constructor(
             }
             val frame = runCatching { transport.readFrame() }.getOrNull()
             done.set(true)
-            return frame != null && frame.code == SuProto.CODE_READY
+            if (frame == null) {
+                diag.append("ready: ${READY_TIMEOUT_MS}ms 内未收到就绪帧; ")
+                return false
+            }
+            if (frame.code != SuProto.CODE_READY) {
+                diag.append("ready: 异常帧 code=${frame.code}; ")
+                return false
+            }
+            return true
         }
 
-        private fun awaitTransport(name: String, proc: Process): SuTransport? {
+        private fun awaitTransport(name: String, proc: Process, diag: StringBuilder): SuTransport? {
             val deadline = SystemClock.elapsedRealtime() + CONNECT_TIMEOUT_MS
+            val lastErr = StringBuilder()
             while (SystemClock.elapsedRealtime() < deadline) {
-                SuTransport.connect(name, 1500)?.let { return it }
+                SuTransport.connect(name, 1500, lastErr)?.let { return it }
                 // su client 随宿主存活；退出即失败（拒绝/崩溃）
-                if (!proc.isAlive) return null
+                if (!proc.isAlive) {
+                    diag.append("connect: su 进程在连接重试期间退出${drainStderr(proc)}; ")
+                    return null
+                }
                 runCatching { Thread.sleep(CONNECT_POLL_MS) }
             }
+            diag.append(
+                "connect: ${CONNECT_TIMEOUT_MS}ms 内无法连接 socket(name=$name, " +
+                        "进程存活, lastErr=${lastErr.toString().take(120).ifBlank { "(无异常)" }}); "
+            )
             return null
         }
     }
@@ -1344,7 +1735,11 @@ private class SuOverlayProxy(private val transport: SuTransport) : Api {
  *
  * 由应用进程执行（无参数 su + stdin 递交，个别 ROM 兜底 `-c`）：
  *   SF_UID=<应用uid> CLASSPATH='<apk路径>' exec /system/bin/app_process \
- *          --nice-name='<随机名>' / <入口类名>
+ *          / --nice-name='<随机名>' <入口类名>
+ * （--nice-name 必须位于 cmd-dir（"/"）之后：放在其前会被 app_process 的
+ *   VM option 解析循环吞掉传给 JNI_CreateJavaVM，AndroidRuntime 以
+ *   ignoreUnrecognized=FALSE 初始化 VM，未知 option 直接令 VM 创建失败，
+ *   进程毫秒级静默退出——错误仅写 logcat 的 AndroidRuntime tag）
  *
  * ==================== 机密流向（与旧方案相反） ====================
  *
@@ -1385,15 +1780,61 @@ object SuLauncher {
     /** 期望对端 uid 的环境变量名（应用进程经 su 命令的环境前缀传入）。 */
     private const val ENV_PEER_UID = "SF_UID"
 
+    /**
+     * 启动期诊断直写 fd 2（stderr 管道，应用侧失败路径经 drainStderr 收取）。
+     * 仅在 dup2(/dev/null) 之前的启动阶段使用；经 Os.write 绕开
+     * PrintStream（其吞掉 IOException）。写失败（管道已断）静默忽略。
+     */
+    private fun diagErr(msg: String) {
+        runCatching {
+            val b = (msg + "\n").toByteArray()
+            android.system.Os.write(java.io.FileDescriptor.err, b, 0, b.size)
+        }
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
-        val expectedUid = System.getenv(ENV_PEER_UID)?.toIntOrNull() ?: return
+        // 顶层兜底：app_process 下未捕获异常只进 logcat crash 缓冲，
+        // 应用侧管道零输出——写 stderr 让应用侧直读根因，再非零退出
+        try {
+            runMain(args)
+        } catch (t: Throwable) {
+            // 逐层展开 cause 链：ExceptionInInitializerError 的真实根因在
+            // 被包裹的 cause 里（wrapper 自身 message 为 null）
+            var depth = 0
+            var cur: Throwable? = t
+            while (cur != null && depth < 5) {
+                diagErr(
+                    if (depth == 0) "FATAL: ${cur.javaClass.name}: ${cur.message}"
+                    else "Caused by(${depth}): ${cur.javaClass.name}: ${cur.message}"
+                )
+                if (depth == 0) {
+                    // 完整栈只在最外层打（cause 栈是其子集的前缀）
+                    cur.stackTrace.take(12).forEach { diagErr("  at $it") }
+                } else {
+                    cur.stackTrace.take(3).forEach { diagErr("  at $it") }
+                }
+                cur = cur.cause
+                depth++
+            }
+            runCatching { Runtime.getRuntime().exit(1) }
+        }
+    }
+
+    private fun runMain(args: Array<String>) {
+        val expectedUid = System.getenv(ENV_PEER_UID)?.toIntOrNull() ?: run {
+            diagErr("SF_UID 环境变量缺失（su 命令的环境前缀未生效）")
+            return
+        }
 
         // socket 名：SecureRandom 自选（62^16+ 空间，猜测不可行），
         // 抽象命名空间 socket 在 /proc/net/unix 对 root/系统侧可见，
         // 但名字不出现在任何全局可读接口，第三方无从抢注
         val socketName = OverlayHiddenApi.randomName(16..32)
-        val server = runCatching { LocalServerSocket(socketName) }.getOrNull() ?: return
+        val server = runCatching { LocalServerSocket(socketName) }.getOrNull() ?: run {
+            diagErr("LocalServerSocket 绑定失败（SELinux/命名空间限制）")
+            return
+        }
 
         // 握手行经 stdout 管道回传（仅应用进程可读）。经 Os.write 直写
         // fd 1 而非 System.out（PrintStream 吞掉 IOException，对端已死
@@ -1410,13 +1851,16 @@ object SuLauncher {
             runCatching { server.close() }
             Runtime.getRuntime().exit(0)
         }
-        // stdout 重定向 /dev/null：管道写端关闭（应用侧随后 EOF，读循环
-        // 自然结束），本进程后续任何 native 输出不再进入管道（防填满阻塞）
+        // stdout 与 stderr 均重定向 /dev/null：stdout 管道写端关闭（应用侧
+        // 随后 EOF，读循环自然结束）；stderr 同步关闭——启动期错误（ART
+        // init 注记等）已留在管道供应用侧失败诊断读取，握手完成后本进程
+        // 不再向两管道写入任何字节（防填满阻塞）
         runCatching {
             val devNull = android.system.Os.open(
                 "/dev/null", android.system.OsConstants.O_WRONLY, 0
             )
             android.system.Os.dup2(devNull, 1)
+            android.system.Os.dup2(devNull, 2)
             android.system.Os.close(devNull)
         }
 
@@ -1515,6 +1959,12 @@ private class SuCallbackSender(private val transport: SuTransport) : Binder() {
             101 -> {
                 val reason = data.readString() ?: "unknown"
                 transport.sendParcelFrame(101) { it.writeString(reason) }
+                return true
+            }
+
+            102 -> {
+                val msg = data.readString() ?: ""
+                transport.sendParcelFrame(102) { it.writeString(msg) }
                 return true
             }
         }

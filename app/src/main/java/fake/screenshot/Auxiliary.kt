@@ -19,23 +19,43 @@ object Auxiliary {
         "/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sd/bin/su",
         "/vendor/bin/su", "/product/bin/su", "/data/local/xbin/su", "/data/local/bin/su"
     )
+    private val moduleActivatedState by lazy { mutableStateOf(false) }
     val suBinaryPaths: Array<String> get() = suPaths
-    var isModuleActivated by mutableStateOf(false)
-    var isShellActivated by mutableStateOf(
-        try {
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        } catch (_: Exception) {
-            false
+    var isModuleActivated: Boolean
+        get() = moduleActivatedState.value
+        set(value) {
+            moduleActivatedState.value = value
         }
-    )
 
-    var isRootActivated by mutableStateOf(
-        try {
-            (isShellActivated && Shizuku.getUid() == 0) || suPaths.any { File(it).exists() }
-        } catch (_: Exception) {
-            false
+    private val shellActivatedState by lazy {
+        mutableStateOf(
+            try {
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            } catch (_: Exception) {
+                false
+            }
+        )
+    }
+    var isShellActivated: Boolean
+        get() = shellActivatedState.value
+        set(value) {
+            shellActivatedState.value = value
         }
-    )
+
+    private val rootActivatedState by lazy {
+        mutableStateOf(
+            try {
+                (isShellActivated && Shizuku.getUid() == 0) || suPaths.any { File(it).exists() }
+            } catch (_: Exception) {
+                false
+            }
+        )
+    }
+    var isRootActivated: Boolean
+        get() = rootActivatedState.value
+        set(value) {
+            rootActivatedState.value = value
+        }
 
     fun hasSuBinary(): Boolean = suPaths.any { File(it).exists() }
 

@@ -6,3 +6,6 @@
     public <init>();
 }
 -keep,allowobfuscation class fake.screenshot.services.privileged.** { *; }
+-keepclassmembers class fake.screenshot.services.privileged.overlay.SuLauncher {
+    public static void main(java.lang.String[]);
+}

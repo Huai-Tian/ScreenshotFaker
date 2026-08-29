@@ -8,7 +8,7 @@ import androidx.core.content.ContextCompat.getString
 import fake.screenshot.R
 import fake.screenshot.services.ControlOverlayService
 import fake.screenshot.services.DisplayOverlayService
-import fake.screenshot.services.privileged.RootOverlayService
+import fake.screenshot.services.privileged.overlay.RootOverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -300,10 +300,13 @@ object OverlayServiceManager {
      * ROOT 后端失败/断连（su 建立失败、Shizuku 死亡、root 端窗口挂载失败）：
      * 清理 ROOT 路线并回落普通悬浮窗路线，悬浮窗不中断。
      * 隐藏性降级：root 路线承诺截图排除，普通路线仅尽力排除——
-     * Toast 告知用户当前会话截图可能包含悬浮窗（功能不受影响）。
+     * Toast 告知用户当前会话截图可能包含悬浮窗（功能不受影响），并携带
+     * 具体失败原因（RootOverlayService 逐环节诊断，便于无 adb 定位）。
      */
     private fun fallbackToNormalRoute() {
         val ctx = appContext ?: return
+        val reason = RootOverlayService.lastFailureReason
+        android.util.Log.w(RootOverlayService.LOG_TAG, "root 路线回落普通悬浮窗: ${reason ?: "unknown"}")
         val controlDesired = rootControlDesired
         rootRoute = false
         rootAttached = false
@@ -314,28 +317,29 @@ object OverlayServiceManager {
         _isDisplayRunning.value = false
         _isControlRunning.value = false
         startNormalRoute(ctx, withControl = controlDesired)
-        notifyStealthDegraded(ctx)
+        notifyStealthDegraded(ctx, reason)
     }
 
     /**
      * 隐藏性降级统一提示。同一会话只提示一次：root 失败回落 +
      * 普通路线排除失败都指向同一事实（截图可能包含悬浮窗），
      * 重复弹出让用户烦躁。与会话级失效对齐（非持久化）。
-     * 公开方法：DisplayOverlayService 排除重试终态失败时同样接入。
+     * 公开方法：DisplayOverlayService 排除重试终态失败时同样接入
+     * （reason 为空——普通路线无 root 侧诊断链）。
      */
-    fun notifyStealthDegradedPublic(ctx: Context) {
+    fun notifyStealthDegradedPublic(ctx: Context, reason: String? = null) {
         if (stealthToastShown) return
         stealthToastShown = true
         runCatching {
-            Toast.makeText(
-                ctx,
-                getString(ctx, R.string.overlay_failed),
-                Toast.LENGTH_LONG
-            ).show()
+            val base = getString(ctx, R.string.overlay_failed)
+            // 原因可能含 stderr 摘录，截断防 Toast 溢出；完整内容在 logcat
+            val text = reason?.take(200)?.let { "$base\n$it" } ?: base
+            Toast.makeText(ctx, text, Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun notifyStealthDegraded(ctx: Context) = notifyStealthDegradedPublic(ctx)
+    private fun notifyStealthDegraded(ctx: Context, reason: String? = null) =
+        notifyStealthDegradedPublic(ctx, reason)
 
     /** [notifyStealthDegraded] 的会话级去重（悬浮窗停止时复位）。 */
     @Volatile
