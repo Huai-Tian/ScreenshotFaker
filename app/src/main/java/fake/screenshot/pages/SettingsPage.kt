@@ -49,6 +49,8 @@ fun SettingsCompose(navController: NavController) {
     val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
     val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", false)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
+    val definedTimestamp by ConfigManager.rememberValue(context, "defined_timestamp", "")
+    var definedTimestampInputText by remember { mutableStateOf(definedTimestamp) }
     val daemonSocketPort by ConfigManager.rememberValue(
         context,
         "daemon_socket_port",
@@ -105,6 +107,7 @@ fun SettingsCompose(navController: NavController) {
         }
     }
     var daemonConfigDialog by remember { mutableStateOf(false) }
+    var timestampConfigDialog by remember { mutableStateOf(false) }
     var externalStorageRequireDialog by remember { mutableStateOf(false) }
     var fileEncryptionWarnings by remember { mutableStateOf(false) }
     var hideIconWarnings by remember { mutableStateOf(false) }
@@ -221,7 +224,9 @@ fun SettingsCompose(navController: NavController) {
                                         ConfigManager.saveData(context, "encrypt_outputs", false)
                                         DaemonManager.syncConfig()
                                     }
-                                    Environment.isExternalStorageManager() -> fileEncryptionWarnings = true
+
+                                    Environment.isExternalStorageManager() -> fileEncryptionWarnings =
+                                        true
 
                                     else -> externalStorageRequireDialog = true
                                 }
@@ -290,6 +295,25 @@ fun SettingsCompose(navController: NavController) {
                             daemonScreenRecordConfigInputText = daemonScreenRecordConfig
                             daemonScreenShareConfigInputText = daemonScreenShareConfig
                             daemonConfigDialog = true
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.AutoFixHigh,
+                        title = stringResource(R.string.customize_file_timestamp),
+                        subtitle = stringResource(R.string.customize_file_timestamp_description),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            definedTimestampInputText = definedTimestamp
+                            timestampConfigDialog = true
                         }
                     )
                 }
@@ -610,6 +634,33 @@ fun SettingsCompose(navController: NavController) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
+            )
+        }
+        if (timestampConfigDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { timestampConfigDialog = false },
+                title = { Text(stringResource(R.string.customize_file_timestamp)) },
+                text = {
+                    Column {
+                        OutlinedTextField(
+                            value = definedTimestampInputText,
+                            onValueChange = { definedTimestampInputText = it },
+                            label = { Text(stringResource(R.string.disable_if_empty)) },
+                            placeholder = {
+                                Text(
+                                    "e.g. ${
+                                        java.time.LocalDateTime.now()
+                                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                                    }"
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {}
             )
         }
         if (hideIconWarnings) {

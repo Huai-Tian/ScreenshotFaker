@@ -34,6 +34,8 @@
     <string name="hide_application_icon_warnings">This operation will hide desktop icon (Some devices require reboot to hide completely). You can open this application via Settings-Apps-ScreenshotFaker-SettingsInApplication</string>
     <string name="hide_from_recent">Hide from recent tasks</string>
     <string name="hide_this_application_from_recent_tasks">Hide this application from recent tasks</string>
+    <string name="customize_file_timestamp">Customize file timestamps</string>
+    <string name="customize_file_timestamp_description">Apply a custom modified time to all output files</string>
     <string name="start_daemon">Start daemon</string>
     <string name="start_daemon_to_work_background">Start a daemon to work background</string>
     <string name="view_daemon_status">View daemon working status</string>
@@ -51,8 +53,8 @@
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
     <string name="filter_content_observer">Filter monitoring of screenshot files from the target app</string>
     <!--Custom application features-->
-    <string name="custom_application_features">Custom application features</string>
-    <string name="custom_application_features_description">Custom application features to bypass detection</string>
+    <string name="custom_application_features">Customize application features</string>
+    <string name="custom_application_features_description">Customize application features to bypass detection</string>
     <string name="install_package_permission_required">Package installation permission is required for this function.</string>
     <string name="new_package_name">New package name</string>
     <string name="application_name_english">Application name (English)</string>
