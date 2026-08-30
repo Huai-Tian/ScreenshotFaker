@@ -10,6 +10,7 @@ import fake.screenshot.wrappers.EncryptManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class ScreenshotTileService : TileService() {
@@ -57,6 +58,18 @@ class ScreenshotTileService : TileService() {
                     key = "encrypt_outputs",
                     defaultValue = false
                 )
+                // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
+                // 此时若继续，明文会先落 /data/local/tmp 再删——绝不给这个窗口
+                if (encryptOutputs && !EncryptManager.isDaemonKeyReady()) {
+                    withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(
+                            this@ScreenshotTileService,
+                            getString(R.string.unlock_app_first),
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return@launch
+                }
                 val definedTimestamp = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
                     key = "defined_timestamp",

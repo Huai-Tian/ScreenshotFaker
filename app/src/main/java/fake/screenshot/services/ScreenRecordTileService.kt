@@ -161,6 +161,19 @@ class ScreenRecordTileService : TileService() {
             key = "encrypt_outputs",
             defaultValue = false
         )
+        // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
+        // screenrecord 全程向 tmp 写明文，未就绪时启动 = 明文全程暴露
+        if (encryptOutputs && !EncryptManager.isDaemonKeyReady()) {
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    this@ScreenRecordTileService,
+                    getString(R.string.unlock_app_first),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+                updateTileUI()
+            }
+            return
+        }
 
         File(savePath).apply { if (!exists()) mkdirs() }
         val fileName = when {

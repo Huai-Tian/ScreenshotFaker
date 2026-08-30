@@ -26,6 +26,10 @@ object DaemonManager {
     // 缓存密钥（DK 由 EncryptManager 经 Keystore 包裹管理，进程内复用）
     private var cachedKey: SecretKeySpec? = null
 
+    // daemon 续期节流：touch 高频调用（10s 心跳），socket 往返约 1 次/分钟足够
+    @Volatile
+    private var lastRenewAtMillis = 0L
+
     fun init(context: Context) {
         appContext = context.applicationContext
     }
@@ -38,8 +42,9 @@ object DaemonManager {
         )
     }
 
-    private fun getKey(): SecretKeySpec =
-        cachedKey ?: EncryptManager.getOrCreateDaemonKey().also { cachedKey = it }
+    /** 可空：DK 拆分激活且本会话未解锁组装时无密钥可用（fail-closed） */
+    private fun getKey(): SecretKeySpec? =
+        cachedKey ?: EncryptManager.getDaemonKeyOrNull()?.also { cachedKey = it }
 
     /** 胁迫销毁后清信道密钥缓存：后续操作走重新生成的 DK，不复用已销毁密钥 */
     fun clearCachedKey() {
@@ -63,8 +68,10 @@ object DaemonManager {
 
         withContext(Dispatchers.IO) {
             // 密钥经 stdin 递交（不经 argv，避免 cmdline 泄露），
-            // 命令行仅含二进制路径与端口
-            val key = getKey()
+            // 命令行仅含二进制路径与端口。
+            // DK 拆分激活且未组装 → 无密钥 → 启动失败（fail-closed：
+            // 解锁一次即可恢复，绝不在无密钥状态下给出半可用语义）
+            val key = getKey() ?: return@withContext false
             val daemonPath = "${appContext.applicationInfo.nativeLibraryDir}/libdaemon.so"
             val (exitCode, _) = Auxiliary.execWithStdin("$daemonPath $port", key.encoded)
             if (exitCode != 0) {
@@ -83,8 +90,34 @@ object DaemonManager {
         return false
     }
 
+    /**
+     * daemon 进程是否仍存活（按端口特征探测，不依赖加密信道）。
+     * 自拷贝体 cmdline："/data/local/tmp/.<rand> <port>"；
+     * 就地运行回落态 cmdline 含 "libdaemon.so <port>"
+     */
+    private fun daemonProcessAlive(port: Int): Boolean {
+        val pat1 = "^/data/local/tmp/\\.[A-Za-z0-9]+ $port$"
+        val pat2 = "libdaemon\\.so $port$"
+        return Auxiliary.exec("pgrep -f '$pat1'").first == 0 ||
+                Auxiliary.exec("pgrep -f '$pat2'").first == 0
+    }
+
     suspend fun stopDaemon(): Boolean = mutex.withLock {
-        sendCommand("stop") ?: return !isDaemonRunning()
+        if (sendCommand("stop") == null) {
+            // 信道不可用（如进程重启后 DK 未组装、daemon 无响应）：
+            // 按端口特征兜底杀进程——否则销毁序列会带着内存中的旧 DK
+            // 放任 daemon 存活到死线（root 可 dump 其内存解密历史产物）。
+            // daemon 的 SIGTERM handler 负责锚点/自拷贝/密钥清理
+            val port = getPort()
+            val pat1 = "^/data/local/tmp/\\.[A-Za-z0-9]+ $port$"
+            val pat2 = "libdaemon\\.so $port$"
+            Auxiliary.exec("pkill -f '$pat1'; pkill -f '$pat2'")
+            repeat(20) {
+                if (!daemonProcessAlive(port)) return true
+                delay(100.milliseconds)
+            }
+            return !daemonProcessAlive(port)
+        }
         // 发送成功，等待进程退出
         repeat(20) {
             if (!isDaemonRunning()) return true
@@ -111,7 +144,8 @@ object DaemonManager {
             val result = withContext(Dispatchers.IO) context@{
                 try {
                     val port = getPort()
-                    val key = getKey()
+                    // DK 拆分激活且未组装 → 无密钥 → 信道不可用（fail-closed）
+                    val key = getKey() ?: return@context null
                     Socket("127.0.0.1", port).use { socket ->
                         socket.soTimeout = 3000
                         // 1. 构造并发送加密命令
@@ -364,10 +398,47 @@ object DaemonManager {
                 "${ConfigManager.getDataOnce(appContext, "encrypt_outputs", false)}"
             val definedTimestamp =
                 ConfigManager.getDataOnce(appContext, "defined_timestamp", "").trim()
-            listOf(relayPath, autoEncrypt, definedTimestamp).joinToString("\u001F")
+            // —— 超时看门狗信任链（daemon 侧独立计时，不依赖 app 存活）——
+            // deadline 为绝对时刻（秒），由 app 侧 idle_ts 锚点 + limit 推导；
+            // daemon 自身另持 uptime/wall 双锚点防冻结与回拨（详见 daemon.cpp）
+            val idleLimit = runCatching {
+                ConfigManager.getDataOnce(appContext, "idle_limit", 0L)
+            }.getOrDefault(0L)
+            val idleDeadline = runCatching {
+                val ts = ConfigManager.getDataOnce(appContext, "idle_ts", "")
+                // 锚点末段恒为墙钟毫秒（三段式 boot,er,wc 与旧两段式 er,wc 均如此）
+                val wc0 = ts.split(",").lastOrNull()?.toLongOrNull()
+                if (idleLimit <= 0) 0L
+                else (wc0 ?: System.currentTimeMillis()) + idleLimit * 60_000L
+            }.getOrDefault(0L) / 1000L
+            // root 模式下 daemon 过期时的可达擦除范围（shell 模式不可达，仅尽力）
+            val appDataDir = appContext.applicationInfo.dataDir ?: ""
+            val appUid = appContext.applicationInfo.uid
+            listOf(
+                relayPath,
+                autoEncrypt,
+                definedTimestamp,
+                idleLimit.toString(),
+                idleDeadline.toString(),
+                appDataDir,
+                appUid.toString()
+            ).joinToString("\u001F")
         }
         val command =
             "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"
         return sendCommand(command) == "fine"
+    }
+
+    /**
+     * 向守护进程续期超时死线（touchIdle 捎带调用，daemon 不在线则静默跳过）。
+     * 节流至约 1 次/分钟：心跳 10s 触发但 socket 往返无必要如此频繁。
+     */
+    suspend fun renewIdleDeadline(limitMinutes: Long) {
+        if (limitMinutes <= 0) return
+        val now = System.currentTimeMillis()
+        if (now - lastRenewAtMillis < 55_000L) return
+        lastRenewAtMillis = now
+        val deadlineSec = (now + limitMinutes * 60_000L) / 1000L
+        runCatching { sendCommand("renew:$deadlineSec") }
     }
 }

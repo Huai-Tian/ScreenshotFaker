@@ -82,6 +82,7 @@
     <string name="overlay_permission_required">此功能需要被授予 悬浮窗 权限</string>
     <string name="overlay_failed">无痕化失败</string>
     <string name="no_permission">无权限</string>
+    <string name="unlock_app_first">请先解锁应用</string>
     <string name="collapse_to_start">收起后开始</string>
     <string name="stealth_screencast">无痕投屏</string>
     <string name="stealth_screenshot">无痕截图</string>

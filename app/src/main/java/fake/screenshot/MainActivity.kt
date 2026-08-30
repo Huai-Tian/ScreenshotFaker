@@ -54,7 +54,9 @@ import kotlin.concurrent.Volatile
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.crypto.tink.aead.AeadConfig
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
@@ -135,13 +137,20 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         }
     }
 
-    /** 10s 心跳：已解锁会话内持续续期，防"停留超档位"误毁 */
+    /**
+     * 10s 心跳：仅 RESUMED（前台可见）时续期，防"停留超档位"误毁。
+     * 挂 repeatOnLifecycle(RESUMED)：onStop 即暂停——旧实现挂裸
+     * lifecycleScope，Activity 退后台（未销毁）仍每 10s 续期，叠加前台服务
+     * 保活进程后超时自毁永不触发。
+     */
     private fun startHeartbeat() {
         if (heartbeatJob?.isActive == true) return
         heartbeatJob = lifecycleScope.launch {
-            while (true) {
-                delay(10_000.milliseconds)
-                GateManager.touchIdle()
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    delay(10_000.milliseconds)
+                    GateManager.touchIdle()
+                }
             }
         }
     }
@@ -220,8 +229,11 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
     override fun onStart() {
         super.onStart()
         LSPosedServiceManager.addServiceStateListener(this, true)
-        // 回前台 = 恢复使用：touch 锚点（已解锁会话内；未解锁的门禁页不 touch）
-        lifecycleScope.launch { GateManager.touchIdle() }
+        // 回前台 = 恢复使用：先检查后续期（旧实现只 touch 不检查——Activity
+        // 长驻后台未销毁时，重回前台的这次检查是唯一的机会）
+        lifecycleScope.launch {
+            if (!GateManager.checkIdleExpired()) GateManager.touchIdle()
+        }
     }
 
     override fun onStop() {

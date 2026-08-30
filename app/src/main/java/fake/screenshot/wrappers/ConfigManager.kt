@@ -38,12 +38,29 @@ object ConfigManager {
     // 常量引用"默认名"，非空 = 随机名
     private const val DATA_REF_DEFAULT = ""
 
+    @Synchronized
     private fun currentDataRef(context: Context): String {
         var ref = dataStoreRef
         if (ref == null) {
-            ref = context.applicationContext
-                .getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_DATA_REF, DATA_REF_DEFAULT)!!
+            val appContext = context.applicationContext
+            val prefs = appContext.getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
+            ref = prefs.getString(KEY_DATA_REF, null)
+            if (ref == null) {
+                // 首次运行：立即随机化。此后"从未销毁"与"销毁后"均持随机 ref，
+                // 状态机不可区分，消除"是否销毁过"侧信道。
+                // 注意此处 ref 可能为随机名而非 DATA_REF_DEFAULT
+                ref = Auxiliary.getSecureRandomString(32)
+                // 旧版本升级迁移：默认名文件存在则复制到新随机名（避免升级丢配置）
+                val def = dataStoreFile(appContext, DATA_REF_DEFAULT)
+                if (def.exists()) {
+                    runCatching {
+                        def.copyTo(dataStoreFile(appContext, ref), overwrite = true)
+                    }
+                    def.delete()
+                    File(def.path + ".tmp").delete()
+                }
+                prefs.edit(commit = true) { putString(KEY_DATA_REF, ref) }
+            }
             dataStoreRef = ref
         }
         return ref
@@ -87,18 +104,43 @@ object ConfigManager {
      * 无法取消，同路径重建会触发 "multiple DataStores active for the same
      * file"，因此清缓存后让新实例走随机新路径（旧实例随进程结束释放）。
      * 随机名不可反推销毁次数，无侧信道。
+     * 清扫整个 datastore 目录而非仅当前文件：多次销毁/在途写入复活的历史
+     * 文件若残留，磁盘上多文件并存本身就是"发生过销毁"的侧信道。
      */
     fun resetForCoercion(context: Context) {
         val appContext = context.applicationContext
         synchronized(this) {
-            val oldFile = dataStoreFile(appContext, currentDataRef(appContext))
+            // 确保旧 ref 已解析（目录清扫需知道当前文件位置）
+            currentDataRef(appContext)
             val newRef = Auxiliary.getSecureRandomString(32)
             appContext.getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
                 .edit(commit = true) { putString(KEY_DATA_REF, newRef) }
             dataStoreRef = newRef
             dataStoreCache.remove(appContext)
-            oldFile.delete()
-            File(oldFile.path + ".tmp").delete()
+            sweepDatastoreDirLocked(appContext)
+        }
+    }
+
+    /**
+     * 二次清扫（公开入口，销毁序列末尾调用兜底）：
+     * 旧 DataStore 实例在途写入可能复活已删除的旧文件，延迟后清除。
+     */
+    fun sweepDatastoreDir(context: Context) {
+        val appContext = context.applicationContext
+        synchronized(this) {
+            sweepDatastoreDirLocked(appContext)
+        }
+    }
+
+    /** 删除 datastore 目录下除当前 ref 指向文件外的全部文件（含 .tmp） */
+    private fun sweepDatastoreDirLocked(appContext: Context) {
+        val keep = dataStoreFile(appContext, currentDataRef(appContext))
+        val dir = keep.parentFile ?: return
+        dir.listFiles()?.forEach { f ->
+            if (f.absolutePath != keep.absolutePath) {
+                f.delete()
+                File(f.path + ".tmp").delete()
+            }
         }
     }
 

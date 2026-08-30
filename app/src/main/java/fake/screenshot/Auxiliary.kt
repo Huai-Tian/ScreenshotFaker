@@ -156,6 +156,7 @@ object Auxiliary {
     }
 
     fun isConfigValid(vararg config: String) = config.all {
+        // 注意：不含 ':'——tag 带冒号会拼出畸形的 logcat tag:pri 过滤器
         val special = setOf(
             '_',
             '-',
@@ -163,7 +164,6 @@ object Auxiliary {
             '.',
             '+',
             '@',
-            ':',
             '=',
             '%',
             ','
@@ -182,6 +182,10 @@ object Auxiliary {
         }
         val cppIncompatible = pattern.contains("(?<=") ||          // 后顾断言
                 pattern.contains("(?<!") ||                        // 负后顾断言
+                // 命名分组（如 (?<name>...)）：Kotlin 放行而 libc++ std::regex
+                // 构造抛异常 → daemon 侧 isRegexValid 拒绝 → 触发规则被静默禁用，
+                // 必须在此侧同步拦下
+                Regex("\\(\\?<[^=!]").containsMatchIn(pattern) ||
                 pattern.contains("++") ||                           // 所有格量词（如 a++）
                 Regex("\\\\p\\{").containsMatchIn(pattern) ||       // Unicode 属性（如 \p{L}）
                 pattern.contains("\\A") ||                          // 输入开头锚点

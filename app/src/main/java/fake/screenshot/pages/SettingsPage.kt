@@ -893,13 +893,14 @@ fun SettingsCompose(navController: NavController) {
                                     !currentOk -> currentPasswordWrong = true
                                     newPasswordInputText.isEmpty() -> {
                                         // 当前密码已验证，三项全空 = 移除保护
-                                        GateManager.removeGate()
+                                        GateManager.removeGate(currentPasswordInputText)
                                         gateEnabled = false
                                         passwordConfigDialog = false
                                     }
 
                                     else -> {
                                         GateManager.setPasswords(
+                                            currentPasswordInputText,
                                             newPasswordInputText,
                                             coercionPasswordInputText
                                         )

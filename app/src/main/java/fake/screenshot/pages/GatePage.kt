@@ -89,7 +89,11 @@ fun GateCompose(onUnlocked: () -> Unit) {
                     verifying = true
                     scope.launch {
                         when (GateManager.verifyGate(password)) {
-                            GateResult.SECURITY -> onUnlocked()
+                            GateResult.SECURITY -> {
+                                // 组装/激活 DK 拆分（失败不阻断解锁，DK 功能 fail-closed）
+                                GateManager.onSecurityUnlock(password)
+                                onUnlocked()
+                            }
                             GateResult.COERCION -> {
                                 GateManager.destroyForCoercion()
                                 onUnlocked()

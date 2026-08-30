@@ -183,6 +183,7 @@
     <string name="overlay_failed">Stealth Mode Failed</string>
     <!--TileService-->
     <string name="no_permission">No permission</string>
+    <string name="unlock_app_first">Unlock the app first</string>
     <string name="collapse_to_start">Collapse to start</string>
     <string name="stealth_screencast">Stealth Screencast</string>
     <string name="screencasting">Screencasting</string>
