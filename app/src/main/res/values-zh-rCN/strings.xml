@@ -36,6 +36,8 @@
     <string name="confirm_new_password">确认新密码</string>
     <string name="coercion_password">胁迫密码（可选）</string>
     <string name="coercion_password_hint">启动时输入此密码将永久销毁所有密钥与数据并恢复默认状态</string>
+    <string name="coercion_password_same">胁迫密码不能与新密码相同</string>
+    <string name="coercion_password_clear">留空将移除已设置的胁迫密码</string>
     <string name="password_mismatch">两次输入的密码不一致</string>
     <string name="password_empty_hint">新密码留空并确认可移除密码保护</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>

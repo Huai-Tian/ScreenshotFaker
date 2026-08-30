@@ -128,10 +128,14 @@ fun SettingsCompose(navController: NavController) {
         derivedStateOf {
             val currentOk = !gateEnabled || currentPasswordInputText.isNotEmpty()
             val matchOk = newPasswordInputText == confirmPasswordInputText
+            // 两级密码相同会使胁迫密码永不命中（verifyGate 先查安全密码），
+            // 必须禁止——否则用户误以为有胁迫保护，实际是死密码
+            val coercionDistinct = coercionPasswordInputText.isEmpty() ||
+                    coercionPasswordInputText != newPasswordInputText
             // 新密码非空 = 设置/修改；已启用且三项全空 = 移除保护
             val actionOk = newPasswordInputText.isNotEmpty() ||
                     (gateEnabled && confirmPasswordInputText.isEmpty() && coercionPasswordInputText.isEmpty())
-            currentOk && matchOk && actionOk
+            currentOk && matchOk && coercionDistinct && actionOk
         }
     }
     val isTimestampValid by remember {
@@ -809,11 +813,25 @@ fun SettingsCompose(navController: NavController) {
                             value = coercionPasswordInputText,
                             onValueChange = { coercionPasswordInputText = it },
                             label = { Text(stringResource(R.string.coercion_password)) },
+                            isError = coercionPasswordInputText.isNotEmpty() &&
+                                    coercionPasswordInputText == newPasswordInputText,
                             supportingText = {
                                 Text(
-                                    text = stringResource(R.string.coercion_password_hint),
+                                    text = when {
+                                        coercionPasswordInputText.isNotEmpty() &&
+                                                coercionPasswordInputText == newPasswordInputText ->
+                                            stringResource(R.string.coercion_password_same)
+
+                                        gateEnabled && coercionPasswordInputText.isEmpty() ->
+                                            stringResource(R.string.coercion_password_clear)
+
+                                        else -> stringResource(R.string.coercion_password_hint)
+                                    },
                                     fontSize = 9.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = if (coercionPasswordInputText.isNotEmpty() &&
+                                        coercionPasswordInputText == newPasswordInputText
+                                    ) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             },
                             visualTransformation = PasswordVisualTransformation(),

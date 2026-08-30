@@ -37,6 +37,8 @@
     <string name="confirm_new_password">Confirm new password</string>
     <string name="coercion_password">Duress password (optional)</string>
     <string name="coercion_password_hint">Entering this password at startup permanently destroys all keys and data and resets the app to defaults</string>
+    <string name="coercion_password_same">The duress password must differ from the new password</string>
+    <string name="coercion_password_clear">Leave blank to remove the current duress password</string>
     <string name="password_mismatch">Passwords do not match</string>
     <string name="password_empty_hint">Leave the new password fields blank and confirm to remove protection</string>
     <string name="encrypt_outputs">Encrypt outputs</string>
