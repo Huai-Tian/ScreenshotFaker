@@ -43,7 +43,7 @@ It allows you to customize how your personal information is protected during scr
 
 - **Ultimate duress protection**  
   Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.  
-  Force-enable the timeout self-destruct setting: if the user fails to log in normally within the specified time, it will be treated as duress and data will be self‑destructed.  
+  Force-enable the timeout self‑destruct setting: if normal usage is not detected within the user‑defined time, it will be treated as duress and trigger automatic data self‑destruction.  
   Built-in tamper protection: any unauthorized data injection or modification will be treated as an anomaly and trigger automatic data self‑destruction.
 
 - **Comprehensive screen sharing**  
