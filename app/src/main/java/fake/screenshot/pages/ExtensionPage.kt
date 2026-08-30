@@ -53,7 +53,7 @@ fun ExtensionCompose() {
     val screenshotSavePath by ConfigManager.rememberValue(
         context,
         "screenshot_save_path",
-        "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_SCREENSHOTS).path
     )
     val screenshotPrefix by ConfigManager.rememberValue(
         context,
@@ -106,7 +106,7 @@ fun ExtensionCompose() {
     val screenRecordSavePath by ConfigManager.rememberValue(
         context,
         "screenRecord_save_path",
-        "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES).path
     )
     val screenRecordPrefix by ConfigManager.rememberValue(
         context,

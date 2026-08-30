@@ -23,7 +23,9 @@ class ScreenshotTileService : TileService() {
                 val savePath = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
                     key = "screenshot_save_path",
-                    defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
+                    defaultValue = Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_SCREENSHOTS
+                    ).path
                 )
                 val prefix = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,

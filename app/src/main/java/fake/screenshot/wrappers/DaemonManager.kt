@@ -183,7 +183,9 @@ object DaemonManager {
             val savePath = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenshot_save_path",
-                defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Screenshots"
+                defaultValue = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_SCREENSHOTS
+                ).path
             )
             val suffix = ConfigManager.getDataOnce(
                 context = appContext,
@@ -207,7 +209,7 @@ object DaemonManager {
             val savePath = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_save_path",
-                defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
+                defaultValue = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES).path
             )
             val duration = ConfigManager.getDataOnce(
                 context = appContext,

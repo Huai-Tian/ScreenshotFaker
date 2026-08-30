@@ -109,7 +109,7 @@ class ScreenRecordTileService : TileService() {
         val savePath = ConfigManager.getDataOnce(
             context = this,
             key = "screenRecord_save_path",
-            defaultValue = "${Environment.getExternalStorageDirectory().path}/Pictures/ScreenshotFaker/Records"
+            defaultValue = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES).path
         )
         val duration = ConfigManager.getDataOnce(
             context = this,
