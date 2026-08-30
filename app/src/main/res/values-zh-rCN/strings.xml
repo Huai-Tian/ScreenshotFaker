@@ -112,7 +112,6 @@
     <string name="auto_encrypt_outputs">截录屏后自动加密输出的文件</string>
     <string name="full_storage_access_required">此功能需要 所有文件访问权限 用于加解密文件</string>
     <string name="hardware_encryption_warnings">此功能基于硬件加解密。卸载本软件前，请务必先解密所有已加密的文件，否则文件将永久无法解密，即使重新安装本软件也无法恢复。</string>
-    <string name="software_hardware_encryption_warnings">本功能基于软件和硬件加密。卸载前，请务必解密所有硬件加密文件，否则文件将永久不可解密，重装亦无法恢复。软件加密文件不受此限，只需记住密码，重装后仍可正常解密。</string>
     <string name="hide_application_icon_description">可以在 设置-应用-截图伪装-应用内的其他设置 打开应用</string>
     <string name="hide_application_icon_warnings">此操作会隐藏桌面图标（一些设备需要重启才能完全隐藏），你可以在 设置-应用-截图伪装-应用内的其他设置 打开本应用</string>
     <string name="hide_from_recent">从最近任务隐藏</string>

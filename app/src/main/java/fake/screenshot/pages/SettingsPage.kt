@@ -629,7 +629,7 @@ fun SettingsCompose(navController: NavController) {
                     Text(text = stringResource(R.string.warning))
                 },
                 text = {
-                    Text(stringResource(R.string.software_hardware_encryption_warnings))
+                    Text(stringResource(R.string.hardware_encryption_warnings))
                 },
                 confirmButton = {
                     TextButton(
