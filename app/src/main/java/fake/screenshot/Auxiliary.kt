@@ -201,6 +201,17 @@ object Auxiliary {
     fun getCurrentDateString(): String =
         LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"))
 
+    fun applyDefinedTimestamp(timestamp: String, path: String) {
+        val t = timestamp.trim()
+        if (t.isEmpty()) return
+        val fmt = runCatching {
+            java.time.LocalDateTime.parse(
+                t, DateTimeFormatter.ofPattern("yyyy-M-d H:m")
+            ).format(DateTimeFormatter.ofPattern("yyyyMMddHHmm.ss"))
+        }.getOrNull() ?: return
+        exec("touch -m -t $fmt '$path'")
+    }
+
     private val secureRandom = java.security.SecureRandom()
 
     /**

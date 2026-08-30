@@ -119,7 +119,7 @@ fun SettingsCompose(navController: NavController) {
                 it.isEmpty() || try {
                     java.time.LocalDateTime.parse(
                         it,
-                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-M-d H:m")
                     )
                     true
                 } catch (_: Exception) {
@@ -669,6 +669,7 @@ fun SettingsCompose(navController: NavController) {
                                     }"
                                 )
                             },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

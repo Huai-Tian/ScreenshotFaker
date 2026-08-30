@@ -55,6 +55,11 @@ class ScreenshotTileService : TileService() {
                     key = "encrypt_outputs",
                     defaultValue = false
                 )
+                val definedTimestamp = ConfigManager.getDataOnce(
+                    context = this@ScreenshotTileService,
+                    key = "defined_timestamp",
+                    defaultValue = ""
+                )
                 File(savePath).apply {
                     if (!exists()) mkdirs()
                 }
@@ -87,6 +92,7 @@ class ScreenshotTileService : TileService() {
                         Auxiliary.exec("rm -f ${tempPath + tempName}")
                     }
                 }
+                Auxiliary.applyDefinedTimestamp(definedTimestamp, "$savePath/$fileName")
             }
         }
     }

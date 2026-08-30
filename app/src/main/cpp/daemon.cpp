@@ -11,6 +11,11 @@ string share_gesture;
 string share_command;
 string ssh_options;
 atomic_bool auto_encrypt = false;
+// 自定义输出文件 mtime（epoch 秒；-1 = 禁用）。
+// custom_mtime_raw 为原始输入串（"yyyy-M-d H:m"，config_mutex 保护，detail 输出用），
+// 用户填什么就写什么，不做任何调整
+atomic<long long> custom_mtime{-1};
+string custom_mtime_raw;
 string scrcpy_path;
 vector<unsigned char> scrcpy_data;
 // 通信密钥（main 从 stdin 读取后填充，之后只读；filter 线程加密输出使用）
@@ -61,8 +66,34 @@ string random_tmp_name() {
     return "/data/local/tmp/" + getRandomString(dist(gen));
 }
 
+// "yyyy-M-d H:m" 原始串 → epoch 秒（按设备本地时区，与 Kotlin 侧
+// ZoneId.systemDefault() 语义一致；bionic 无 TZ 时读 persist.sys.timezone）。
+// strptime 逐字符严格匹配且校验尾部无残留；空/格式非法 → -1（禁用）。
+// 防崩兜底而非校验：真正的格式把关在 UI
+long long parse_defined_mtime(const string &text) {
+    if (text.empty()) return -1;
+    struct tm t{};
+    t.tm_isdst = -1;                            // DST 交由系统判定
+    const char *rest = strptime(text.c_str(), "%Y-%m-%d %H:%M", &t);
+    if (rest == nullptr || *rest != '\0') return -1;
+    time_t secs = mktime(&t);
+    return secs < 0 ? -1 : static_cast<long long>(secs);
+}
+
+// 自定义输出文件 mtime：原样写入用户指定的 epoch 秒。
+// atime 不动（UTIME_OMIT）；必须在最终落盘（含加密回写）之后调用；
+// 失败静默——只是时间戳，不影响产物
+void set_custom_mtime(const string &path) {
+    long long base = custom_mtime.load();
+    if (base < 0) return;
+    timespec ts[2]{};
+    ts[0].tv_nsec = UTIME_OMIT;            // atime 保持原值
+    ts[1].tv_sec = static_cast<time_t>(base);
+    utimensat(AT_FDCWD, path.c_str(), ts, 0);
+}
+
 // 流式 AES-256-GCM 文件加密：输出 nonce(12) + 密文 + tag(16)，
-// 与 Kotlin 端 EncryptManager 软件加密格式互通（软件解密输入通信密码即可解开）
+// 与 Kotlin 端 EncryptManager 软件加密互通（软件解密输入通信密码即可解开）
 bool encrypt_file(const vector<unsigned char> &key, const string &plain_path,
                   const string &cipher_path) {
     if (key.empty()) return false;
@@ -607,16 +638,22 @@ void filter_thread_main() {
                     record_running.store(true);
                 }
                 // 收尾线程：等命令结束（screencap 秒级，screenrecord 跑满 time-limit）
-                // 后加密回写并清状态，不阻塞 filter 线程继续匹配
-                if (encrypt || is_record) {
+                // 后加密回写并清状态，不阻塞 filter 线程继续匹配。
+                // 自定义 mtime 启用时纯明文 screencap 也需要收尾（否则直接落盘的文件
+                // 没有机会改时间戳），故条件追加 mtime 开关
+                bool want_mtime = custom_mtime.load() >= 0;
+                if (encrypt || is_record || want_mtime) {
                     const string &output = i.back();
-                    thread([pid, encrypt, is_record, output, target]() {
+                    thread([pid, encrypt, is_record, output, target, want_mtime]() {
                         wait_process(pid);
                         if (encrypt) {
                             encrypt_file(g_key, output, target);
                             // 加密失败也删明文：宁可丢失不留明文（与 Kotlin 端一致）
                             remove(output.c_str());
                         }
+                        // 最终产物已落盘（明文=target 直写 / 密文=encrypt_file 回写），
+                        // 此后无写入，mtime 定格；失败静默（函数内部吞错）
+                        if (want_mtime) set_custom_mtime(target);
                         if (is_record) {
                             lock_guard<mutex> lock(record_mutex);
                             record_pid = -1;
@@ -999,8 +1036,9 @@ int main(int argc, char *argv[]) {
                 return text + result + '\n';
             };
             string cap_gs, rec_gs, sha_gs;
-            string cap_cmd, rec_cmd, sha_cmd, ssh;
+            string cap_cmd, rec_cmd, sha_cmd, ssh, mtime_raw;
             bool encrypt, scrcpy_ready;
+            long long mtime;
             {
                 lock_guard<mutex> lock(config_mutex);
                 cap_gs = capture_gesture;
@@ -1012,6 +1050,8 @@ int main(int argc, char *argv[]) {
                 ssh = ssh_options;
                 encrypt = auto_encrypt;
                 scrcpy_ready = !scrcpy_data.empty();
+                mtime = custom_mtime.load();
+                mtime_raw = custom_mtime_raw;
             }
             reply_plain = "ScreenshotFakerDaemon:\n";
             reply_plain.append(
@@ -1030,6 +1070,9 @@ int main(int argc, char *argv[]) {
             reply_plain.append(processOtherOptions("auto_encrypt= ", encrypt));
             reply_plain.append(processOtherOptions("relay_state= ", scrcpy_ready));
             reply_plain.append(processOtherOptions("share_state= ", share_running.load()));
+            // 自定义时间戳：启用输出用户输入的原始串，禁用输出 Disabled
+            reply_plain.append(
+                    "timestamp= " + (mtime >= 0 ? mtime_raw : string("Disabled")) + "\n");
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
         } else if (command == "stop") {
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
@@ -1105,6 +1148,10 @@ int main(int argc, char *argv[]) {
                         scrcpy_data.clear();
                     }
                     auto_encrypt = others[1] == "true";
+                    // 第 3 段：自定义 mtime 原始串（"yyyy-M-d H:m"），daemon 自行换算。
+                    // 换算失败（空/格式非法）→ 禁用，这是防崩兜底而非校验
+                    custom_mtime_raw = others.size() > 2 ? others[2] : string();
+                    custom_mtime.store(parse_defined_mtime(custom_mtime_raw));
                     ssh_options = std::move(partsD[2]);
                     capture_gesture = std::move(cap_gs);
                     record_gesture = std::move(rec_gs);

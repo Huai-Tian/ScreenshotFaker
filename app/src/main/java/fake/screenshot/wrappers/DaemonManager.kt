@@ -355,7 +355,9 @@ object DaemonManager {
                 "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
             val autoEncrypt =
                 "${ConfigManager.getDataOnce(appContext, "encrypt_outputs", false)}"
-            listOf(relayPath, autoEncrypt).joinToString("\u001F")
+            val definedTimestamp =
+                ConfigManager.getDataOnce(appContext, "defined_timestamp", "").trim()
+            listOf(relayPath, autoEncrypt, definedTimestamp).joinToString("\u001F")
         }
         val command =
             "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"

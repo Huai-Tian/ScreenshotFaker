@@ -241,8 +241,30 @@ class ScreenRecordTileService : TileService() {
                     Auxiliary.exec("rm -f ${tempPath + temp}")
                     isEncrypting = false
                 }
+                applyDefinedTimestamp("$save/$file")
+            }
+        } else {
+            val save = lastSavePath
+            val file = lastFileName
+            serviceScope.launch {
+                var waited = 0
+                while (waited < 5) {
+                    if (pid == null || !isProcessAlive(pid)) break
+                    delay(500.milliseconds)
+                    waited++
+                }
+                applyDefinedTimestamp("$save/$file")
             }
         }
+    }
+
+    private suspend fun applyDefinedTimestamp(path: String) {
+        val definedTimestamp = ConfigManager.getDataOnce(
+            context = this@ScreenRecordTileService,
+            key = "defined_timestamp",
+            defaultValue = ""
+        )
+        Auxiliary.applyDefinedTimestamp(definedTimestamp, path)
     }
 
     private fun checkAndResetIfProcessDead() {
@@ -268,6 +290,13 @@ class ScreenRecordTileService : TileService() {
                         Auxiliary.exec("rm -f ${tempPath + temp}")
                         isEncrypting = false
                     }
+                    applyDefinedTimestamp("$save/$file")
+                }
+            } else if (!lastEncryptOutputs) {
+                val save = lastSavePath
+                val file = lastFileName
+                serviceScope.launch {
+                    applyDefinedTimestamp("$save/$file")
                 }
             }
             updateTileUI()
