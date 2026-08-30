@@ -40,7 +40,11 @@ It allows you to customize how your personal information is protected during scr
   Supports automatic high‑strength encryption for screenshot and screen recording files;  
   Filenames support full randomization;  
   All port communications are secured with high‑strength encryption;  
-  Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.
+
+- **Ultimate duress protection**  
+  Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.  
+  Force-enable the timeout self-destruct setting: if the user fails to log in normally within the specified time, it will be treated as duress and data will be self‑destructed.  
+  Built-in tamper protection: any unauthorized data injection or modification will be treated as an anomaly and trigger automatic data self‑destruction.
 
 - **Comprehensive screen sharing**  
   Supports receiving screen sharing, initiating LAN screen sharing, and remote sharing via SSH.
