@@ -678,11 +678,14 @@ fun SettingsCompose(navController: NavController) {
                     TextButton(
                         onClick = {
                             scope.launch {
-                                ConfigManager.saveData(
-                                    context,
-                                    "defined_timestamp",
-                                    definedTimestampInputText
-                                )
+                                if (definedTimestamp != definedTimestampInputText) {
+                                    ConfigManager.saveData(
+                                        context,
+                                        "defined_timestamp",
+                                        definedTimestampInputText
+                                    )
+                                    DaemonManager.syncConfig()
+                                }
                             }
                             timestampConfigDialog = false
                         },
