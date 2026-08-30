@@ -669,7 +669,7 @@ fun SettingsCompose(navController: NavController) {
                                     }"
                                 )
                             },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.DateTime),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
