@@ -13,6 +13,7 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -405,7 +406,9 @@ fun ExtensionCompose() {
     var showPasswordOperationDialog by remember { mutableStateOf(false) }
     var isProcessing by remember { mutableStateOf(false) }
     val pickFilesForKeystoreLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
+        contract = OpenMultipleDocumentsAt(
+            safDirInitialUri(Environment.DIRECTORY_DOWNLOADS)
+        )
     ) { uris ->
         if (uris.isNotEmpty()) {
             selectedUris = uris
@@ -413,7 +416,9 @@ fun ExtensionCompose() {
         }
     }
     val pickFilesForPasswordLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments()
+        contract = OpenMultipleDocumentsAt(
+            safDirInitialUri(Environment.DIRECTORY_DOCUMENTS)
+        )
     ) { uris ->
         if (uris.isNotEmpty()) {
             selectedUris = uris
@@ -1953,3 +1958,26 @@ private fun getLocalIpv4Addresses(): List<String> = runCatching {
         .mapNotNull { it.hostAddress }
         .toList()
 }.getOrDefault(emptyList())
+
+private fun safDirInitialUri(dirName: String): Uri? = runCatching {
+    DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents", "primary:$dirName"
+    )
+}.getOrNull()
+
+private class OpenMultipleDocumentsAt(
+    private val initialUri: Uri?
+) : ActivityResultContract<Array<String>, List<Uri>>() {
+    override fun createIntent(context: Context, input: Array<String>): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            .apply { initialUri?.let { putExtra(DocumentsContract.EXTRA_INITIAL_URI, it) } }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): List<Uri> {
+        if (resultCode != android.app.Activity.RESULT_OK || intent == null) return emptyList()
+        val clip = intent.clipData ?: return emptyList()
+        return (0 until clip.itemCount).map { clip.getItemAt(it).uri }
+    }
+}
