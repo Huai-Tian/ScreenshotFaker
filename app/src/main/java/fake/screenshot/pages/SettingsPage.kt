@@ -665,7 +665,7 @@ fun SettingsCompose(navController: NavController) {
                                 Text(
                                     "e.g. ${
                                         java.time.LocalDateTime.now()
-                                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-M-d H:m"))
                                     }"
                                 )
                             },
