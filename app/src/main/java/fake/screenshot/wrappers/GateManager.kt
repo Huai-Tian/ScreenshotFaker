@@ -31,7 +31,9 @@ object GateManager {
     private const val KEY_COERCION_SALT = "backup_seed"
 
     // 未使用自动销毁（TG 账号超时销毁式，独立于门禁）：
-    // armed 哨兵（明文，永不清除）+ idle_limit/idle_ts（密文 DataStore）
+    // armed 哨兵（明文，永不清除）+ idle_limit/idle_ts（密文 DataStore）。
+    // armed 随验证器同写（setPasswords）：验证器存在而 armed 消失
+    // = sync_preferences 被定向篡改 = 直接自毁
     private const val KEY_ARMED = "armed"
     private const val CONFIG_KEY_IDLE_LIMIT = "idle_limit"
     private const val CONFIG_KEY_IDLE_TS = "idle_ts"
@@ -106,6 +108,8 @@ object GateManager {
     suspend fun setPasswords(security: String, coercion: String) =
         withContext(Dispatchers.Default) {
             prefs().edit {
+                // armed 随验证器同写：设过密码的用户，armed 消失即判篡改
+                putBoolean(KEY_ARMED, true)
                 val securitySalt = ByteArray(SALT_LENGTH).also { SecureRandom().nextBytes(it) }
                 putString(
                     KEY_SECURITY_SALT,
@@ -159,6 +163,12 @@ object GateManager {
      * @return true = 已触发销毁（调用方无需额外处理，销毁含复位）
      */
     suspend fun checkIdleExpired(): Boolean {
+        // 验证器存在而 armed 消失 = sync_preferences 被定向篡改 = 自毁
+        if (isGateEnabled() && !isIdleArmed()) {
+            destroyForCoercion()
+            return true
+        }
+        // 未 armed 且未设门禁 = 从未启用（全新安装/存量未使用用户），正常流程
         if (!isIdleArmed()) return false
 
         val limitMinutes = ConfigManager.getDataOnce(
@@ -167,6 +177,10 @@ object GateManager {
         val tsRaw = ConfigManager.getDataOnce(
             appContext, CONFIG_KEY_IDLE_TS, ""
         )
+
+        // armed 但 idle 两个 key 均从未写入 = 只设过门禁未启用超时（armed 随
+        // 验证器同写的合法态），正常流程；单 key 缺失/垃圾值仍落入雷管
+        if (limitMinutes <= 0L && tsRaw.isEmpty()) return false
 
         // ---- 合法性判定：任一不满足 = 雷管 ----
         if (limitMinutes <= 0 || limitMinutes !in idleTimeoutOptions) {
@@ -218,6 +232,14 @@ object GateManager {
         return false
     }
 
+    /** 超时销毁是否真正启用过（limit+ts 已写入，区别于 armed-only 的门禁态） */
+    private suspend fun isIdleActivated(): Boolean {
+        if (!isIdleArmed()) return false
+        val v = ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_LIMIT, 0L)
+        val ts = ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_TS, "")
+        return v > 0 && ts.isNotEmpty()
+    }
+
     /**
      * 刷新计时锚点（写入双锚点）。只在"有效使用"时调用：
      * 无门禁冷启动判定后 / 门禁验证通过后 / onStart 回前台 / 10s 心跳。
@@ -226,7 +248,7 @@ object GateManager {
      * 首个 onStart）对计时器透明，防止胁迫者在门禁页停留/反复打开续命。
      */
     suspend fun touchIdle() {
-        if (!isIdleArmed()) return
+        if (!isIdleActivated()) return
         if (isGateEnabled() && !sessionUnlocked) return
         val ts = "${SystemClock.elapsedRealtime()},${System.currentTimeMillis()}"
         ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_TS, ts)
@@ -248,10 +270,12 @@ object GateManager {
 
     /**
      * 销毁后复位：防连环雷管自毁循环（销毁清空 DataStore → 读默认 0 → 再引爆）。
-     * 写默认档 + 当前锚点，计时器自愈。armed 永不清除。
+     * 仅"真正启用过"（曾写入 limit+ts）时写默认档 + 当前锚点，计时器自愈；
+     * armed-only（只设过门禁未启用超时）销毁后回到未启用态 = 全新状态语义。
+     * armed 永不清除。
      */
     private suspend fun resetIdleAfterDestroy() {
-        if (!isIdleArmed()) return
+        if (!isIdleActivated()) return
         ConfigManager.saveData(
             appContext, CONFIG_KEY_IDLE_LIMIT, DEFAULT_IDLE_LIMIT_MINUTES
         )
@@ -263,9 +287,10 @@ object GateManager {
      * 胁迫销毁序列，顺序严格：
      * 1. 先停守护进程（此时密钥/配置仍在，stop 依赖端口与信道密钥）；
      * 2. 删 Keystore 条目（Tink 主密钥、硬件密钥）与密文文件（keyset、硬件 DK）；
-     * 3. 删除密文配置并推进 DataStore 代次（同进程重建走新文件路径，
-     *    规避 "multiple DataStores active for the same file"）；
-     * 4. 清进程内信道密钥缓存。
+     * 3. 删除密文配置并轮换 DataStore 文件随机名（同进程重建走新路径，
+     *    规避 "multiple DataStores active for the same file"，且不暴露销毁史）；
+     * 4. 清进程内信道密钥缓存；
+     * 5. armed 存在时复位写默认档（防连环雷管）。
      * 验证器保留，销毁幂等（重复触发无副作用）。
      */
     suspend fun destroyForCoercion() = withContext(Dispatchers.IO) {
