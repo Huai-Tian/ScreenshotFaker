@@ -113,6 +113,21 @@ fun SettingsCompose(navController: NavController) {
     var hideIconWarnings by remember { mutableStateOf(false) }
     var installPackageRequireDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
+    val isTimestampValid by remember {
+        derivedStateOf {
+            definedTimestampInputText.let {
+                it.isEmpty() || try {
+                    java.time.LocalDateTime.parse(
+                        it,
+                        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+                    )
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        }
+    }
     //Repack
     var repackConfigDialog by remember { mutableStateOf(false) }
     var repackPackageNameInputText by remember { mutableStateOf("") }
@@ -659,8 +674,28 @@ fun SettingsCompose(navController: NavController) {
                         )
                     }
                 },
-                confirmButton = {},
-                dismissButton = {}
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                ConfigManager.saveData(
+                                    context,
+                                    "defined_timestamp",
+                                    definedTimestampInputText
+                                )
+                            }
+                            timestampConfigDialog = false
+                        },
+                        enabled = isTimestampValid
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { timestampConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
             )
         }
         if (hideIconWarnings) {
