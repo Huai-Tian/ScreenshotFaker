@@ -15,14 +15,37 @@ import com.google.crypto.tink.integration.android.AndroidKeysetManager
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import androidx.core.content.edit
 
 private const val DATA_STORE_FILE_NAME = "encrypted_settings.preferences_pb"
 private const val KEYSTORE_PREF_NAME = "tink_keyset"
 private const val MASTER_KEY_URI = "android-keystore://tink_master_key"
+private const val INDEX_PREFS_NAME = "sync_preferences"
+private const val KEY_DATA_INDEX = "data_index"
 
 object ConfigManager {
     private val dataStoreCache = ConcurrentHashMap<Context, DataStore<Preferences>>()
+
+    @Volatile
+    private var dataStoreGeneration: Int = -1
+
+    private fun currentGeneration(context: Context): Int {
+        var gen = dataStoreGeneration
+        if (gen < 0) {
+            gen = context.applicationContext
+                .getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
+                .getInt(KEY_DATA_INDEX, 0)
+            dataStoreGeneration = gen
+        }
+        return gen
+    }
+
+    private fun dataStoreFile(context: Context, gen: Int): File {
+        val name = if (gen == 0) DATA_STORE_FILE_NAME else "$DATA_STORE_FILE_NAME$gen"
+        return context.applicationContext.filesDir.resolve("datastore/$name")
+    }
 
     private fun getEncryptedDataStore(context: Context): DataStore<Preferences> {
         val appContext = context.applicationContext
@@ -46,8 +69,22 @@ object ConfigManager {
 
             DataStoreFactory.create(
                 serializer = serializer,
-                produceFile = { appContext.filesDir.resolve("datastore/$DATA_STORE_FILE_NAME") }
+                produceFile = { dataStoreFile(appContext, currentGeneration(appContext)) }
             )
+        }
+    }
+
+    fun resetForCoercion(context: Context) {
+        val appContext = context.applicationContext
+        synchronized(this) {
+            val oldFile = dataStoreFile(appContext, currentGeneration(appContext))
+            val newGen = currentGeneration(appContext) + 1
+            appContext.getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit(commit = true) { putInt(KEY_DATA_INDEX, newGen) }
+            dataStoreGeneration = newGen
+            dataStoreCache.remove(appContext)
+            oldFile.delete()
+            File(oldFile.path + ".tmp").delete()
         }
     }
 

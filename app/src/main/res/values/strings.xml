@@ -24,6 +24,21 @@
     <string name="auto_check_update">Automatically checks whether there is the latest version after the application is launched</string>
     <string name="enable_page_protection">Enable page protection</string>
     <string name="protect_pages_from_screenshotting">Protect pages from screenshotting</string>
+    <!--Gate-->
+    <string name="app_lock">Startup verification</string>
+    <string name="app_lock_description">Require a password to open this application</string>
+    <string name="app_lock_enabled">Enabled. Tap to change the password</string>
+    <string name="enter_password">Password</string>
+    <string name="incorrect_password">Incorrect password</string>
+    <string name="set_password">Set password</string>
+    <string name="change_password">Change password</string>
+    <string name="current_password">Current password</string>
+    <string name="new_password">New password</string>
+    <string name="confirm_new_password">Confirm new password</string>
+    <string name="coercion_password">Duress password (optional)</string>
+    <string name="coercion_password_hint">Entering this password at startup permanently destroys all keys and data and resets the app to defaults</string>
+    <string name="password_mismatch">Passwords do not match</string>
+    <string name="password_empty_hint">Leave the new password fields blank and confirm to remove protection</string>
     <string name="encrypt_outputs">Encrypt outputs</string>
     <string name="auto_encrypt_outputs">Automatically encrypt outputs after screenshotting or recording</string>
     <string name="full_storage_access_required">Full storage access is required for this feature to encrypt and decrypt files.</string>

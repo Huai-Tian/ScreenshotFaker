@@ -41,6 +41,11 @@ object DaemonManager {
     private fun getKey(): SecretKeySpec =
         cachedKey ?: EncryptManager.getOrCreateDaemonKey().also { cachedKey = it }
 
+    /** 胁迫销毁后清信道密钥缓存：后续操作走重新生成的 DK，不复用已销毁密钥 */
+    fun clearCachedKey() {
+        cachedKey = null
+    }
+
     suspend fun startDaemon(): Boolean = mutex.withLock {
         if (isDaemonRunning()) return true
 

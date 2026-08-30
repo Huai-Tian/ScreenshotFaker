@@ -22,7 +22,11 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -37,6 +41,7 @@ import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.GalleryCompose
+import fake.screenshot.pages.GateCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.ReceiveScreenSharingCompose
 import fake.screenshot.pages.ScreenShareViewerCompose
@@ -54,6 +59,7 @@ import com.google.crypto.tink.aead.AeadConfig
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.wrappers.EncryptManager
+import fake.screenshot.wrappers.GateManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -81,16 +87,53 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.addBinderReceivedListener(receivedListener)
         DaemonManager.init(applicationContext)
         EncryptManager.init(applicationContext)
-        runBlocking {
-            val enableFlagSecure =
-                ConfigManager.getDataOnce(applicationContext, "enable_flag_secure", true)
-            val hideFromRecent =
-                ConfigManager.getDataOnce(applicationContext, "hide_from_recent", false)
-            if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            getSystemService(ActivityManager::class.java)
-                .appTasks.forEach { it.setExcludeFromRecents(hideFromRecent) }
+        GateManager.init(applicationContext)
+        // 门禁启用时验证前不触碰任何加密配置（DataStore 实例化会缓存进程内密钥，
+        // 胁迫销毁需要干净的进程状态），密码输入界面本身始终防截屏
+        val gateRequired = GateManager.isGateEnabled() && !GateManager.sessionUnlocked
+        if (gateRequired) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            runBlocking { applyWindowSecurityConfig() }
+            randomizeChannelNames()
         }
+        WindowCompat.getInsetsController(window, window.decorView).let {
+            it.hide(WindowInsetsCompat.Type.statusBars())
+            it.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        setContent {
+            var unlocked by remember { mutableStateOf(!gateRequired) }
+            if (!unlocked) {
+                GateCompose(
+                    onUnlocked = {
+                        GateManager.markUnlocked()
+                        unlocked = true
+                        // 解锁后再加载配置（安全密码读真实配置；胁迫路径此时已恢复默认值）
+                        lifecycleScope.launch { applyWindowSecurityConfig() }
+                        randomizeChannelNames()
+                    }
+                )
+            } else {
+                MainContent()
+            }
+        }
+    }
+
+    /** 应用窗口安全配置（防截屏 / 最近任务隐藏），随配置变化调用 */
+    private suspend fun applyWindowSecurityConfig() {
+        val enableFlagSecure =
+            ConfigManager.getDataOnce(applicationContext, "enable_flag_secure", true)
+        val hideFromRecent =
+            ConfigManager.getDataOnce(applicationContext, "hide_from_recent", false)
+        if (enableFlagSecure) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        getSystemService(ActivityManager::class.java)
+            .appTasks.forEach { it.setExcludeFromRecents(hideFromRecent) }
+    }
+
+    /** 通知渠道名/ID 随机化（默认值检测到才改写） */
+    private fun randomizeChannelNames() {
         lifecycleScope.launch(Dispatchers.IO) {
             if (ConfigManager.getDataOnce(
                     applicationContext,
@@ -141,83 +184,6 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                 )
             }
         }
-        WindowCompat.getInsetsController(window, window.decorView).let {
-            it.hide(WindowInsetsCompat.Type.statusBars())
-            it.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        }
-        setContent {
-            val navController = rememberNavController()
-            val currentDestination by navController.currentBackStackEntryAsState()
-            val currentRoute = currentDestination?.destination?.route ?: ""
-
-            // 动态过滤需要显示在底部导航栏的目标
-            val visibleDestinations = AppDestinations.entries.filter { destination ->
-                when (destination) {
-                    AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated
-                    else -> true
-                }
-            }
-            val visibleBottomBarRoutes = visibleDestinations.map { it.route }.toSet()
-
-            Scaffold(
-                bottomBar = {
-                    if (currentRoute in visibleBottomBarRoutes) {
-                        NavigationBar {
-                            visibleDestinations.forEach { destination ->
-                                NavigationBarItem(
-                                    icon = { Icon(destination.icon, contentDescription = null) },
-                                    label = {
-                                        Text(
-                                            when (destination.label) {
-                                                "Home" -> stringResource(R.string.home)
-                                                "Settings" -> stringResource(R.string.settings)
-                                                "Gallery" -> stringResource(R.string.gallery)
-                                                "Application" -> stringResource(R.string.application)
-                                                "Extension" -> stringResource(R.string.extension)
-                                                else -> stringResource(R.string.unknown)
-                                            }
-                                        )
-                                    },
-                                    selected = currentRoute == destination.route,
-                                    onClick = {
-                                        navController.navigate(destination.route) {
-                                            popUpTo(navController.graph.startDestinationId) {
-                                                saveState = true
-                                            }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            ) {
-                NavHost(
-                    navController = navController,
-                    startDestination = AppDestinations.HOME.route,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(bottom = it.calculateBottomPadding())
-                ) {
-                    composable(AppDestinations.HOME.route) { HomeCompose() }
-                    composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
-                    composable(AppDestinations.GALLERY.route) { GalleryCompose() }
-                    composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
-                    composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
-                    composable("daemon_status") { DaemonStatusCompose() }
-                    composable("about") { AboutCompose() }
-                    composable("receive_screen_sharing") { ReceiveScreenSharingCompose(navController) }
-                    composable("receive_viewer/{configId}") { entry ->
-                        ScreenShareViewerCompose(
-                            entry.arguments?.getString("configId")?.toIntOrNull() ?: -1
-                        )
-                    }
-                }
-            }
-        }
     }
 
     override fun onServiceStateChanged(service: XposedService?) {
@@ -249,6 +215,81 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         Shizuku.removeRequestPermissionResultListener(listener)
         Shizuku.removeBinderDeadListener(deadListener)
         Shizuku.removeBinderReceivedListener(receivedListener)
+    }
+}
+
+/** 主界面：底部导航 + 各页面路由（门禁通过后组合） */
+@Composable
+fun MainContent() {
+    val navController = rememberNavController()
+    val currentDestination by navController.currentBackStackEntryAsState()
+    val currentRoute = currentDestination?.destination?.route ?: ""
+
+    // 动态过滤需要显示在底部导航栏的目标
+    val visibleDestinations = AppDestinations.entries.filter { destination ->
+        when (destination) {
+            AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated
+            else -> true
+        }
+    }
+    val visibleBottomBarRoutes = visibleDestinations.map { it.route }.toSet()
+
+    Scaffold(
+        bottomBar = {
+            if (currentRoute in visibleBottomBarRoutes) {
+                NavigationBar {
+                    visibleDestinations.forEach { destination ->
+                        NavigationBarItem(
+                            icon = { Icon(destination.icon, contentDescription = null) },
+                            label = {
+                                Text(
+                                    when (destination.label) {
+                                        "Home" -> stringResource(R.string.home)
+                                        "Settings" -> stringResource(R.string.settings)
+                                        "Gallery" -> stringResource(R.string.gallery)
+                                        "Application" -> stringResource(R.string.application)
+                                        "Extension" -> stringResource(R.string.extension)
+                                        else -> stringResource(R.string.unknown)
+                                    }
+                                )
+                            },
+                            selected = currentRoute == destination.route,
+                            onClick = {
+                                navController.navigate(destination.route) {
+                                    popUpTo(navController.graph.startDestinationId) {
+                                        saveState = true
+                                    }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    ) {
+        NavHost(
+            navController = navController,
+            startDestination = AppDestinations.HOME.route,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = it.calculateBottomPadding())
+        ) {
+            composable(AppDestinations.HOME.route) { HomeCompose() }
+            composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
+            composable(AppDestinations.GALLERY.route) { GalleryCompose() }
+            composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
+            composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
+            composable("daemon_status") { DaemonStatusCompose() }
+            composable("about") { AboutCompose() }
+            composable("receive_screen_sharing") { ReceiveScreenSharingCompose(navController) }
+            composable("receive_viewer/{configId}") { entry ->
+                ScreenShareViewerCompose(
+                    entry.arguments?.getString("configId")?.toIntOrNull() ?: -1
+                )
+            }
+        }
     }
 }
 

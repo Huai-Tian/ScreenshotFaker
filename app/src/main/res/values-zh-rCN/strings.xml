@@ -23,6 +23,21 @@
     <string name="warning">警告</string>
     <string name="check_update">检查更新</string>
     <string name="auto_check_update">在应用启动后自动检查是否有最新版</string>
+    <!--Gate-->
+    <string name="app_lock">启动验证</string>
+    <string name="app_lock_description">打开应用时需要验证密码</string>
+    <string name="app_lock_enabled">已启用，点击可修改密码</string>
+    <string name="enter_password">密码</string>
+    <string name="incorrect_password">密码错误</string>
+    <string name="set_password">设置密码</string>
+    <string name="change_password">修改密码</string>
+    <string name="current_password">当前密码</string>
+    <string name="new_password">新密码</string>
+    <string name="confirm_new_password">确认新密码</string>
+    <string name="coercion_password">胁迫密码（可选）</string>
+    <string name="coercion_password_hint">启动时输入此密码将永久销毁所有密钥与数据并恢复默认状态</string>
+    <string name="password_mismatch">两次输入的密码不一致</string>
+    <string name="password_empty_hint">新密码留空并确认可移除密码保护</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
     <string name="socket_port">通信端口</string>

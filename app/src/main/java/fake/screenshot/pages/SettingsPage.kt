@@ -36,6 +36,8 @@ import androidx.core.net.toUri
 import fake.screenshot.wrappers.RepackIdentity
 import androidx.core.graphics.scale
 import fake.screenshot.wrappers.RepackManager
+import fake.screenshot.wrappers.GateManager
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -113,6 +115,25 @@ fun SettingsCompose(navController: NavController) {
     var hideIconWarnings by remember { mutableStateOf(false) }
     var installPackageRequireDialog by remember { mutableStateOf(false) }
     var isDaemonRunning by remember { mutableStateOf(false) }
+    //Gate
+    var gateEnabled by remember { mutableStateOf(GateManager.isGateEnabled()) }
+    var passwordConfigDialog by remember { mutableStateOf(false) }
+    var currentPasswordInputText by remember { mutableStateOf("") }
+    var newPasswordInputText by remember { mutableStateOf("") }
+    var confirmPasswordInputText by remember { mutableStateOf("") }
+    var coercionPasswordInputText by remember { mutableStateOf("") }
+    var currentPasswordWrong by remember { mutableStateOf(false) }
+    var passwordWorking by remember { mutableStateOf(false) }
+    val isPasswordConfigValid by remember {
+        derivedStateOf {
+            val currentOk = !gateEnabled || currentPasswordInputText.isNotEmpty()
+            val matchOk = newPasswordInputText == confirmPasswordInputText
+            // 新密码非空 = 设置/修改；已启用且三项全空 = 移除保护
+            val actionOk = newPasswordInputText.isNotEmpty() ||
+                    (gateEnabled && confirmPasswordInputText.isEmpty() && coercionPasswordInputText.isEmpty())
+            currentOk && matchOk && actionOk
+        }
+    }
     val isTimestampValid by remember {
         derivedStateOf {
             definedTimestampInputText.let {
@@ -221,6 +242,30 @@ fun SettingsCompose(navController: NavController) {
                                 else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                                 ConfigManager.saveData(context, "enable_flag_secure", it)
                             }
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.Password,
+                        title = stringResource(R.string.app_lock),
+                        subtitle = if (gateEnabled) stringResource(R.string.app_lock_enabled)
+                        else stringResource(R.string.app_lock_description),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            currentPasswordInputText = ""
+                            newPasswordInputText = ""
+                            confirmPasswordInputText = ""
+                            coercionPasswordInputText = ""
+                            currentPasswordWrong = false
+                            passwordConfigDialog = true
                         }
                     )
                 }
@@ -697,6 +742,133 @@ fun SettingsCompose(navController: NavController) {
                 },
                 dismissButton = {
                     TextButton(onClick = { timestampConfigDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (passwordConfigDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { if (!passwordWorking) passwordConfigDialog = false },
+                title = {
+                    Text(
+                        stringResource(
+                            if (gateEnabled) R.string.change_password else R.string.set_password
+                        )
+                    )
+                },
+                text = {
+                    Column {
+                        if (gateEnabled) {
+                            OutlinedTextField(
+                                value = currentPasswordInputText,
+                                onValueChange = {
+                                    currentPasswordInputText = it
+                                    currentPasswordWrong = false
+                                },
+                                label = { Text(stringResource(R.string.current_password)) },
+                                isError = currentPasswordWrong,
+                                supportingText = if (currentPasswordWrong) {
+                                    { Text(stringResource(R.string.incorrect_password)) }
+                                } else null,
+                                visualTransformation = PasswordVisualTransformation(),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        OutlinedTextField(
+                            value = newPasswordInputText,
+                            onValueChange = { newPasswordInputText = it },
+                            label = { Text(stringResource(R.string.new_password)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = confirmPasswordInputText,
+                            onValueChange = { confirmPasswordInputText = it },
+                            label = { Text(stringResource(R.string.confirm_new_password)) },
+                            isError = confirmPasswordInputText.isNotEmpty() &&
+                                    confirmPasswordInputText != newPasswordInputText,
+                            supportingText = if (confirmPasswordInputText.isNotEmpty() &&
+                                confirmPasswordInputText != newPasswordInputText
+                            ) {
+                                { Text(stringResource(R.string.password_mismatch)) }
+                            } else null,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = coercionPasswordInputText,
+                            onValueChange = { coercionPasswordInputText = it },
+                            label = { Text(stringResource(R.string.coercion_password)) },
+                            supportingText = {
+                                Text(
+                                    text = stringResource(R.string.coercion_password_hint),
+                                    fontSize = 9.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        if (gateEnabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = stringResource(R.string.password_empty_hint),
+                                fontSize = 9.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            passwordWorking = true
+                            scope.launch {
+                                val currentOk = !gateEnabled ||
+                                        GateManager.verifyGatePassword(currentPasswordInputText)
+                                when {
+                                    !currentOk -> currentPasswordWrong = true
+                                    newPasswordInputText.isEmpty() -> {
+                                        // 当前密码已验证，三项全空 = 移除保护
+                                        GateManager.removeGate()
+                                        gateEnabled = false
+                                        passwordConfigDialog = false
+                                    }
+
+                                    else -> {
+                                        GateManager.setPasswords(
+                                            newPasswordInputText,
+                                            coercionPasswordInputText
+                                        )
+                                        gateEnabled = true
+                                        passwordConfigDialog = false
+                                    }
+                                }
+                                passwordWorking = false
+                            }
+                        },
+                        enabled = isPasswordConfigValid && !passwordWorking
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { passwordConfigDialog = false },
+                        enabled = !passwordWorking
+                    ) {
                         Text(stringResource(R.string.Cancel))
                     }
                 }
