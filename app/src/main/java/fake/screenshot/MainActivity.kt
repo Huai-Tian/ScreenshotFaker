@@ -61,11 +61,15 @@ import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.wrappers.EncryptManager
 import fake.screenshot.wrappers.GateManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlin.time.Duration.Companion.milliseconds
 
 class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateListener {
     private var mService: XposedService? = null
+    private var heartbeatJob: Job? = null
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
         if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
             isShellActivated = true
@@ -88,15 +92,21 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         DaemonManager.init(applicationContext)
         EncryptManager.init(applicationContext)
         GateManager.init(applicationContext)
-        // 门禁启用时验证前不触碰任何加密配置（DataStore 实例化会缓存进程内密钥，
-        // 胁迫销毁需要干净的进程状态），密码输入界面本身始终防截屏
+        // 超时销毁冷启动判定（雷管/超期检测 + 可能的销毁），一切配置加载之前；
+        // 销毁同步等待完成，防止主界面读到半销毁状态
+        runBlocking { GateManager.checkIdleExpired() }
+        // 无门禁：判定通过即有效使用，touch 锚点；
+        // 有门禁：验证前不 touch（打开对计时器透明，防反复打开续命）
         val gateRequired = GateManager.isGateEnabled() && !GateManager.sessionUnlocked
         if (gateRequired) {
             window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         } else {
+            runBlocking { GateManager.touchIdle() }
             runBlocking { applyWindowSecurityConfig() }
             randomizeChannelNames()
         }
+        // 10s 心跳：仅无门禁直接进入时启动；有门禁在验证通过后启动
+        if (!gateRequired) startHeartbeat()
         WindowCompat.getInsetsController(window, window.decorView).let {
             it.hide(WindowInsetsCompat.Type.statusBars())
             it.systemBarsBehavior =
@@ -109,13 +119,29 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
                     onUnlocked = {
                         GateManager.markUnlocked()
                         unlocked = true
-                        // 解锁后再加载配置（安全密码读真实配置；胁迫路径此时已恢复默认值）
-                        lifecycleScope.launch { applyWindowSecurityConfig() }
+                        startHeartbeat()
+                        // 解锁后：touch 超时锚点（验证通过 = 有效使用），
+                        // 再加载配置（安全密码读真实配置；胁迫路径此时已恢复默认值）
+                        lifecycleScope.launch {
+                            GateManager.touchIdle()
+                            applyWindowSecurityConfig()
+                        }
                         randomizeChannelNames()
                     }
                 )
             } else {
                 MainContent()
+            }
+        }
+    }
+
+    /** 10s 心跳：已解锁会话内持续续期，防"停留超档位"误毁 */
+    private fun startHeartbeat() {
+        if (heartbeatJob?.isActive == true) return
+        heartbeatJob = lifecycleScope.launch {
+            while (true) {
+                delay(10_000.milliseconds)
+                GateManager.touchIdle()
             }
         }
     }
@@ -194,6 +220,8 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
     override fun onStart() {
         super.onStart()
         LSPosedServiceManager.addServiceStateListener(this, true)
+        // 回前台 = 恢复使用：touch 锚点（已解锁会话内；未解锁的门禁页不 touch）
+        lifecycleScope.launch { GateManager.touchIdle() }
     }
 
     override fun onStop() {

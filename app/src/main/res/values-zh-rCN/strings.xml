@@ -40,6 +40,20 @@
     <string name="coercion_password_clear">留空将移除已设置的胁迫密码</string>
     <string name="password_mismatch">两次输入的密码不一致</string>
     <string name="password_empty_hint">新密码留空并确认可移除密码保护</string>
+    <!--Idle timeout destroy-->
+    <string name="idle_timeout_destroy">未使用自动销毁</string>
+    <string name="idle_timeout_destroy_description">长时间未使用应用时自动销毁全部密钥与数据</string>
+    <string name="idle_timeout_destroy_warning">启用后无法关闭。超过所选时长未使用应用，将永久销毁全部密钥与数据且无法恢复</string>
+    <string name="idle_option_5_minutes">5 分钟</string>
+    <string name="idle_option_30_minutes">30 分钟</string>
+    <string name="idle_option_1_hour">1 小时</string>
+    <string name="idle_option_6_hours">6 小时</string>
+    <string name="idle_option_1_day">1 天</string>
+    <string name="idle_option_1_week">1 周</string>
+    <string name="idle_option_1_month">1 个月</string>
+    <string name="idle_option_3_months">3 个月</string>
+    <string name="idle_option_6_months">6 个月</string>
+    <string name="idle_option_12_months">12 个月</string>
     <string name="start_daemon_to_work_background">运行守护进程以支持后台工作</string>
     <string name="config_daemon_working_options">自定义守护进程的行为</string>
     <string name="socket_port">通信端口</string>

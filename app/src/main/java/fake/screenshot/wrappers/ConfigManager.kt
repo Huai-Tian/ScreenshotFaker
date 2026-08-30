@@ -18,32 +18,40 @@ import kotlinx.coroutines.flow.map
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import androidx.core.content.edit
+import fake.screenshot.Auxiliary
 
 private const val DATA_STORE_FILE_NAME = "encrypted_settings.preferences_pb"
 private const val KEYSTORE_PREF_NAME = "tink_keyset"
 private const val MASTER_KEY_URI = "android-keystore://tink_master_key"
+// 明文引用：DataStore 文件随机名（销毁后轮换）。key 不存在 = 默认名。
+// 随机名与"从未销毁"不可区分，不暴露重置历史（与通知渠道随机化风格一致）
 private const val INDEX_PREFS_NAME = "sync_preferences"
-private const val KEY_DATA_INDEX = "data_index"
+private const val KEY_DATA_REF = "data_ref"
 
 object ConfigManager {
     private val dataStoreCache = ConcurrentHashMap<Context, DataStore<Preferences>>()
 
+    // null = 未加载；持久化于明文 prefs（进程重启后仍指向销毁后的新文件）
     @Volatile
-    private var dataStoreGeneration: Int = -1
+    private var dataStoreRef: String? = null
 
-    private fun currentGeneration(context: Context): Int {
-        var gen = dataStoreGeneration
-        if (gen < 0) {
-            gen = context.applicationContext
+    // 常量引用"默认名"，非空 = 随机名
+    private const val DATA_REF_DEFAULT = ""
+
+    private fun currentDataRef(context: Context): String {
+        var ref = dataStoreRef
+        if (ref == null) {
+            ref = context.applicationContext
                 .getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
-                .getInt(KEY_DATA_INDEX, 0)
-            dataStoreGeneration = gen
+                .getString(KEY_DATA_REF, DATA_REF_DEFAULT)!!
+            dataStoreRef = ref
         }
-        return gen
+        return ref
     }
 
-    private fun dataStoreFile(context: Context, gen: Int): File {
-        val name = if (gen == 0) DATA_STORE_FILE_NAME else "$DATA_STORE_FILE_NAME$gen"
+    private fun dataStoreFile(context: Context, ref: String): File {
+        val name = if (ref == DATA_REF_DEFAULT) DATA_STORE_FILE_NAME
+        else "$DATA_STORE_FILE_NAME$ref"
         return context.applicationContext.filesDir.resolve("datastore/$name")
     }
 
@@ -69,19 +77,25 @@ object ConfigManager {
 
             DataStoreFactory.create(
                 serializer = serializer,
-                produceFile = { dataStoreFile(appContext, currentGeneration(appContext)) }
+                produceFile = { dataStoreFile(appContext, currentDataRef(appContext)) }
             )
         }
     }
 
+    /**
+     * 胁迫销毁：删除当前密文配置并轮换文件名。旧 DataStore 实例的 scope
+     * 无法取消，同路径重建会触发 "multiple DataStores active for the same
+     * file"，因此清缓存后让新实例走随机新路径（旧实例随进程结束释放）。
+     * 随机名不可反推销毁次数，无侧信道。
+     */
     fun resetForCoercion(context: Context) {
         val appContext = context.applicationContext
         synchronized(this) {
-            val oldFile = dataStoreFile(appContext, currentGeneration(appContext))
-            val newGen = currentGeneration(appContext) + 1
+            val oldFile = dataStoreFile(appContext, currentDataRef(appContext))
+            val newRef = Auxiliary.getSecureRandomString(32)
             appContext.getSharedPreferences(INDEX_PREFS_NAME, Context.MODE_PRIVATE)
-                .edit(commit = true) { putInt(KEY_DATA_INDEX, newGen) }
-            dataStoreGeneration = newGen
+                .edit(commit = true) { putString(KEY_DATA_REF, newRef) }
+            dataStoreRef = newRef
             dataStoreCache.remove(appContext)
             oldFile.delete()
             File(oldFile.path + ".tmp").delete()

@@ -10,17 +10,21 @@ import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.RadioButton
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -124,6 +128,14 @@ fun SettingsCompose(navController: NavController) {
     var coercionPasswordInputText by remember { mutableStateOf("") }
     var currentPasswordWrong by remember { mutableStateOf(false) }
     var passwordWorking by remember { mutableStateOf(false) }
+    //Idle timeout destroy
+    var idleTimeoutDialog by remember { mutableStateOf(false) }
+    var idleCurrentLimit by remember { mutableStateOf<Long?>(null) }
+    var idleSelectedLimit by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(Unit) {
+        idleCurrentLimit = GateManager.getCurrentIdleTimeout()
+        idleSelectedLimit = idleCurrentLimit
+    }
     val isPasswordConfigValid by remember {
         derivedStateOf {
             val currentOk = !gateEnabled || currentPasswordInputText.isNotEmpty()
@@ -270,6 +282,27 @@ fun SettingsCompose(navController: NavController) {
                             coercionPasswordInputText = ""
                             currentPasswordWrong = false
                             passwordConfigDialog = true
+                        }
+                    )
+                }
+            }
+            item {
+                CommonCard {
+                    PreferenceItemEx(
+                        icon = Icons.Default.Timer,
+                        title = stringResource(R.string.idle_timeout_destroy),
+                        subtitle = idleCurrentLimit?.let {
+                            formatIdleTimeoutLabel(it)
+                        } ?: stringResource(R.string.idle_timeout_destroy_description),
+                        trailingContent = {
+                            Icon(
+                                Icons.Default.ChevronRight,
+                                contentDescription = null
+                            )
+                        },
+                        onClick = {
+                            idleSelectedLimit = idleCurrentLimit
+                            idleTimeoutDialog = true
                         }
                     )
                 }
@@ -892,6 +925,58 @@ fun SettingsCompose(navController: NavController) {
                 }
             )
         }
+        if (idleTimeoutDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { idleTimeoutDialog = false },
+                title = { Text(stringResource(R.string.idle_timeout_destroy)) },
+                text = {
+                    Column {
+                        Text(
+                            text = stringResource(R.string.idle_timeout_destroy_warning),
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // 无禁用项：只有时长档位，一旦启用不可关闭
+                        GateManager.idleTimeoutOptions.forEach { option ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { idleSelectedLimit = option },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = idleSelectedLimit == option,
+                                    onClick = { idleSelectedLimit = option }
+                                )
+                                Text(text = formatIdleTimeoutLabel(option))
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            idleSelectedLimit?.let { selected ->
+                                scope.launch {
+                                    GateManager.setIdleTimeout(selected)
+                                    idleCurrentLimit = selected
+                                }
+                            }
+                            idleTimeoutDialog = false
+                        },
+                        enabled = idleSelectedLimit != null
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { idleTimeoutDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
         if (hideIconWarnings) {
             CenteredAlertDialog(
                 onDismissRequest = { },
@@ -1197,4 +1282,20 @@ fun SettingsCompose(navController: NavController) {
             )
         }
     }
+}
+
+/** 档位分钟数 → 本地化标签（与 GateManager.idleTimeoutOptions 一一对应） */
+@Composable
+fun formatIdleTimeoutLabel(minutes: Long): String = when (minutes) {
+    5L -> stringResource(R.string.idle_option_5_minutes)
+    30L -> stringResource(R.string.idle_option_30_minutes)
+    60L -> stringResource(R.string.idle_option_1_hour)
+    360L -> stringResource(R.string.idle_option_6_hours)
+    1440L -> stringResource(R.string.idle_option_1_day)
+    10080L -> stringResource(R.string.idle_option_1_week)
+    43200L -> stringResource(R.string.idle_option_1_month)
+    129600L -> stringResource(R.string.idle_option_3_months)
+    259200L -> stringResource(R.string.idle_option_6_months)
+    525600L -> stringResource(R.string.idle_option_12_months)
+    else -> stringResource(R.string.unknown)
 }

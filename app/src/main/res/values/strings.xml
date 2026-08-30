@@ -41,6 +41,20 @@
     <string name="coercion_password_clear">Leave blank to remove the current duress password</string>
     <string name="password_mismatch">Passwords do not match</string>
     <string name="password_empty_hint">Leave the new password fields blank and confirm to remove protection</string>
+    <!--Idle timeout destroy-->
+    <string name="idle_timeout_destroy">Auto-destroy if unused</string>
+    <string name="idle_timeout_destroy_description">Destroy all keys and data if this app stays unused</string>
+    <string name="idle_timeout_destroy_warning">Once enabled, this cannot be turned off. If the app is not used within the selected period, all keys and data will be permanently destroyed and cannot be recovered</string>
+    <string name="idle_option_5_minutes">5 minutes</string>
+    <string name="idle_option_30_minutes">30 minutes</string>
+    <string name="idle_option_1_hour">1 hour</string>
+    <string name="idle_option_6_hours">6 hours</string>
+    <string name="idle_option_1_day">1 day</string>
+    <string name="idle_option_1_week">1 week</string>
+    <string name="idle_option_1_month">1 month</string>
+    <string name="idle_option_3_months">3 months</string>
+    <string name="idle_option_6_months">6 months</string>
+    <string name="idle_option_12_months">12 months</string>
     <string name="encrypt_outputs">Encrypt outputs</string>
     <string name="auto_encrypt_outputs">Automatically encrypt outputs after screenshotting or recording</string>
     <string name="full_storage_access_required">Full storage access is required for this feature to encrypt and decrypt files.</string>
