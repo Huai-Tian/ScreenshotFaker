@@ -81,14 +81,16 @@ long long parse_defined_mtime(const string &text) {
 }
 
 // 自定义输出文件 mtime：原样写入用户指定的 epoch 秒。
-// atime 不动（UTIME_OMIT）；必须在最终落盘（含加密回写）之后调用；
+// atime 设为同一假值——"截图后从未查看"是常态（创建即最后访问），
+// 留真实 atime 会泄露实际生成时刻；ctime 由内核垄断无法伪造，接受残留。
+// 必须在最终落盘（含加密回写）之后调用；
 // 失败静默——只是时间戳，不影响产物
 void set_custom_mtime(const string &path) {
     long long base = custom_mtime.load();
     if (base < 0) return;
     timespec ts[2]{};
-    ts[0].tv_nsec = UTIME_OMIT;            // atime 保持原值
-    ts[1].tv_sec = static_cast<time_t>(base);
+    ts[0].tv_sec = static_cast<time_t>(base);    // atime = 假 mtime
+    ts[1].tv_sec = static_cast<time_t>(base);    // mtime = 用户指定值
     utimensat(AT_FDCWD, path.c_str(), ts, 0);
 }
 
