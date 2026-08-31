@@ -1185,7 +1185,7 @@ static void watchdog_main() {
                 // - 一次性校正被自然吸收（死线至多顺延 ≤ 容差时长，与
                 //   app 侧"容差内回拨最多推迟同等时长"语义一致）
                 // - 持续冻结/继续回拨：漂移 = up_elapsed + 倒退量，每轮
-                //   +30s，2~3 轮内必然引爆——防冻结语义不削弱
+                //   +30s，约 20 轮（10min）内必然引爆——防冻结语义不削弱
                 long long dl = st.deadline > idle_deadline_sec.load()
                                ? st.deadline : idle_deadline_sec.load();
                 anchor_save(dl, st.lastwall, up);
