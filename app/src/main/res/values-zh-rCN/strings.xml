@@ -41,7 +41,6 @@
     <string name="password_strength_weak">弱</string>
     <string name="password_strength_medium">中等</string>
     <string name="password_strength_strong">强</string>
-    <string name="no_gate_warning">未设置启动密码时，硬件加密数据可被 root 静态提取；超时自毁仍然有效</string>
     <string name="coercion_password_clear">留空将移除已设置的胁迫密码</string>
     <string name="password_mismatch">两次输入的密码不一致</string>
     <string name="password_empty_hint">新密码留空并确认可移除密码保护</string>

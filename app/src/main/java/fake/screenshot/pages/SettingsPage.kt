@@ -299,14 +299,6 @@ fun SettingsCompose(navController: NavController) {
                             passwordConfigDialog = true
                         }
                     )
-                    if (!gateEnabled) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = stringResource(R.string.no_gate_warning),
-                            fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
             }
             item {

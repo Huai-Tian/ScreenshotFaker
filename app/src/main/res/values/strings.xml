@@ -42,7 +42,6 @@
     <string name="password_strength_weak">Weak</string>
     <string name="password_strength_medium">Medium</string>
     <string name="password_strength_strong">Strong</string>
-    <string name="no_gate_warning">Without a startup password, hardware-encrypted data can be statically extracted by root. The timeout self-destruct still works.</string>
     <string name="coercion_password_clear">Leave blank to remove the current duress password</string>
     <string name="password_mismatch">Passwords do not match</string>
     <string name="password_empty_hint">Leave the new password fields blank and confirm to remove protection</string>
