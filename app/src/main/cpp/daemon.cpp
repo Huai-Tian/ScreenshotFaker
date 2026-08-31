@@ -64,9 +64,11 @@ static void clear_record_tmp() {
 /**
  * SIGTERM 兜底清理（kill-by-discovery 路径：app 侧信道不可用时按端口杀进程）。
  * 信号安全说明：锚点/自拷贝路径在 main 初始化后只读（其他线程不写），
- * 读取 .c_str()/.empty() 安全；g_key 同为初始化后只读（memset 与读并发
- * 最坏产生一次坏密文，进程随即退出，方向安全）；录屏 tmp 走 sig_atomic
- * 长度前缀缓冲
+ * 读取 .c_str()/.empty() 安全；录屏 tmp 走 sig_atomic 长度前缀缓冲。
+ * 不 memset g_key：信号可投递到任意线程，handler 与其他核上看门狗的
+ * anchor_load 并发——清钥瞬间解密得坏密文会被按"锚点篡改"引爆
+ * （root 模式 rm -rf app 数据）。_exit 后密钥随进程地址空间消亡，
+ * 零化收益可忽略（能读死者内存的攻击者本可直读存活进程）
  */
 static void term_handler(int) {
     if (g_rec_tmp_len > 0) {
@@ -78,10 +80,6 @@ static void term_handler(int) {
     if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
     if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
         remove(g_self_path.c_str());
-    }
-    if (!g_key.empty()) {
-        memset(g_key.data(), 0, g_key.size());
-        g_key.clear();
     }
     _exit(0);
 }
@@ -216,8 +214,12 @@ static AnchorState anchor_load() {
 }
 
 // 原子写锚点（tmp + rename）：并发写最坏"后写者胜"，绝不产生半截文件
-// （半截文件下次加载解密失败会被判篡改引爆——原子性防误炸）
+// （半截文件下次加载解密失败会被判篡改引爆——原子性防误炸）。
+// 密钥长度守卫：stop/term 清钥与看门狗 tick 并发时，g_key 可能已清零
+// （vector::clear 保留 capacity，data() 仍可读出 32 字节零）——用零钥
+// 加密会落盘"毒锚点"（下次启动用真钥解不开 → 按篡改引爆），必须拒绝
 static void anchor_save(long long deadline, long long wall, double uptime) {
+    if (g_key.size() != KEY_LEN) return;
     string plain = to_string(deadline) + "," + to_string(wall) + "," +
                    to_string(uptime);
     vector<unsigned char> enc = encrypt_data(g_key, plain);
@@ -544,6 +546,13 @@ struct SshTunnel {
         // 读超时让 l2c 线程能周期性检查停止标志
         struct timeval tv{0, 200000};
         setsockopt(local_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        // 发送超时同理：c2l 的 write_all_fd 是无超时阻塞写——本地 server
+        // 停止读取且缓冲填满时（共享停止/对端卡顿）线程无法检查停止标志；
+        // stop() 只等 supervisor 3s，超时后栈上 SshTunnel 析构而 bridge
+        // 线程仍在写 → use-after-free 崩溃。EAGAIN 时 write_all_fd 按既有
+        // 语义返回丢弃，c2l 循环顶检查 stopping 退出
+        struct timeval tv_snd{2, 0};
+        setsockopt(local_fd, SOL_SOCKET, SO_SNDTIMEO, &tv_snd, sizeof(tv_snd));
         auto *ctx = new BridgeCtx{ch, local_fd, this};
         active_bridges.fetch_add(1);
         thread(&SshTunnel::bridge_c2l, ctx).detach();
@@ -930,12 +939,34 @@ static void watchdog_main() {
                 detonate();                    // uptime 走表而墙钟不走 = 冻结
             }
         } else {
-            // uptime 回退 = 重启过：墙钟必须至少前进一次真实重启的时长
-            if (wall < st.lastwall) {
-                detonate();                    // 跨重启墙钟倒退 = 回拨
+            // uptime 回退 = 重启过。墙钟倒退判定必须带容差（与 app 侧
+            // IdleWatchdog.ROLLBACK_TOLERANCE_MS=2min 对齐）：跨重启的
+            // NTP/NITZ/RTC 小幅向后校正是正常设备行为，零容差会把
+            // "重启 + 时钟校正"的用户误杀（root 模式 = rm -rf app 数据）。
+            // 注意原实现的零容差检查实际是死代码：wall<lastwall 蕴含
+            // wall-lastwall<0<20，恒被下方冻结检查先行引爆
+            if (wall < st.lastwall - ANCHOR_FREEZE_TOLERANCE_SEC) {
+                detonate();                    // 跨重启墙钟大幅倒退 = 回拨
             }
-            if (wall - st.lastwall < MIN_REBOOT_WALL_ELAPSED_SEC) {
+            // 冻结绕过判定仅约束"未倒退"情形（wall>=lastwall）：倒退情形
+            // 交给基线迁移后的同开机漂移校验累积判爆
+            if (wall >= st.lastwall &&
+                wall - st.lastwall < MIN_REBOOT_WALL_ELAPSED_SEC) {
                 detonate();                    // 跨重启墙钟近乎未走 = 冻结绕过
+            }
+            if (wall < st.lastwall) {
+                // 容差内小幅倒退：墙钟基线【不下调】（防反复"重启+回拨"
+                // 棘轮式累计回拨——每轮都撞同一旧基线，累计超容差即引爆），
+                // 仅把 uptime 基线迁移到本次开机——下一轮起回到同开机分支，
+                // 以未下调的旧墙钟基线继续漂移校验：
+                // - 一次性校正被自然吸收（死线至多顺延 ≤ 容差时长，与
+                //   app 侧"容差内回拨最多推迟同等时长"语义一致）
+                // - 持续冻结/继续回拨：漂移 = up_elapsed + 倒退量，每轮
+                //   +30s，2~3 轮内必然引爆——防冻结语义不削弱
+                long long dl = st.deadline > idle_deadline_sec.load()
+                               ? st.deadline : idle_deadline_sec.load();
+                anchor_save(dl, st.lastwall, up);
+                continue;   // 本轮完成基线迁移即可（continue 释放 anchor_mutex）
             }
         }
 
@@ -968,6 +999,12 @@ void filter_thread_main() {
             valid = !(origin_gesture.empty() || origin_command.empty());
             if (!valid)return;
             auto slices = split(origin_gesture, '\x1F');
+            // 边界检查：少于 3 段（优先级/tag/正则）的畸形数据直接判无效，
+            // 防 slices[1]/[2] 越界 UB（config 侧已校验，此处纵深防御）
+            if (slices.size() < 3) {
+                valid = false;
+                return;
+            }
             priority = slices[0].empty() ? ' ' : slices[0][0];
             tag = slices[1];
             msg_regex = regex(slices[2]);
@@ -976,13 +1013,23 @@ void filter_thread_main() {
         [[nodiscard]]int execute_command() const {
             if (!valid)return -1;
             auto i = split(origin_command, '\x1F');
+            // 边界检查：空向量 front() 越界；screencap/screenrecord 命令
+            // 至少 3 段（命令/保存路径/后缀），缺段时 pop_back 后 back()
+            // 越界 UB（config 侧已校验，此处纵深防御）
+            if (i.empty()) return -1;
             auto first = i.front();
             if (first == "screencap" || first == "screenrecord") {
+                if (i.size() < 3) return -1;
                 bool is_record = first == "screenrecord";
                 bool encrypt = auto_encrypt.load();
                 auto file_name = getCurrentDateString() + "_" + getRandomString(4) + i.back();
                 i.pop_back();
-                filesystem::create_directories(i.back());
+                // error_code 重载：抛异常重载在 filter 线程（无 catch）会
+                // std::terminate 杀死整个 daemon；保存路径为普通文件/
+                // 不可写存储时用户在设置页即可构造出该输入。失败按无目录
+                // 处理（后续命令自行报错），不炸进程
+                std::error_code ec;
+                filesystem::create_directories(i.back(), ec);
                 string target = i.back() + "/" + file_name;
                 // 加密模式：明文先落 /data/local/tmp/ 随机名（与 Kotlin 端一致），完成后加密回写
                 i.back() = encrypt ? random_tmp_name() : target;
@@ -1556,16 +1603,28 @@ int main(int argc, char *argv[]) {
                 purge_app_side_share();
             }
             // 用户主动 stop：清锚点（下次启动按 config 重新初始化）与自拷贝，
-            // 密钥清零后退出
-            if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
-            if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
-                remove(g_self_path.c_str());
+            // 密钥清零后退出。必须持 anchor_mutex 且持锁 _exit(0)：
+            // ① 与看门狗 tick 串行——不持锁时清钥与 tick 的解密并发，坏密文
+            //   会被按"锚点篡改"引爆（root 模式 rm -rf app 数据）；
+            // ② 锁永不释放（持锁退出）——否则 remove 之后、进程死亡前，
+            //   落入的 tick 会以已清零的 g_key 重写"毒锚点"（下次启动必爆）；
+            //   原 exit(0) 走静态析构（PipeManager 析构含最长 1s 的 kill
+            //   轮询）恰好拉宽了这个窗口（每次 stop 有实测可达的毒锚点概率）
+            // ③ _exit 而非 exit：跳过静态析构——detached 线程（filter/
+            //   watchdog）并发读写全局，析构即 use-after-destruct（与
+            //   detonate 的退出方式一致）
+            {
+                lock_guard<mutex> lock(anchor_mutex);
+                if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
+                if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
+                    remove(g_self_path.c_str());
+                }
+                if (!g_key.empty()) {
+                    memset(g_key.data(), 0, g_key.size());
+                    g_key.clear();
+                }
+                _exit(0);
             }
-            if (!g_key.empty()) {
-                memset(g_key.data(), 0, g_key.size());
-                g_key.clear();
-            }
-            exit(0);
         } else if (command == "detach") {
             reply_plain = "Detaching\x1C" + to_string(get_current_timestamp_seconds());
             send_encrypted(client_fd, key, reply_plain);
@@ -1618,6 +1677,14 @@ int main(int argc, char *argv[]) {
                     vector<string> others = split(otherOptions, '\x1F');
                     vector<string> filters = split(filterPart, '\x1E');
                     vector<string> arguments = split(argumentPart, '\x1E');
+                    // 边界检查：filters/arguments 各须 3 段（截图/录屏/共享），
+                    // 缺段的畸形 config 直接走 failed 回复——裸取 [1]/[2] 越界 UB
+                    if (filters.size() < 3 || arguments.size() < 3) {
+                        send_encrypted(client_fd, key,
+                                       "failed\x1C" + to_string(get_current_timestamp_seconds()));
+                        close(client_fd);
+                        continue;
+                    }
                     // others 边界安全访问（字段序：relayPath/autoEncrypt/mtime/
                     // idleLimit/idleDeadline/appDataDir/appUid，旧字段缺省兼容）
                     auto getOther = [&others](size_t idx) -> string {
@@ -1710,24 +1777,42 @@ bool is_timestamp_valid(long long ts) {
 }
 
 vector<unsigned char> encrypt_data(const vector<unsigned char> &key, const string &plaintext) {
+    // 守卫：密钥长度异常（stop/term 清钥竞态窗口）/ 随机源失败 / ctx 分配
+    // 失败时返回空——调用方（anchor_save 等）已有判空处理。原实现裸取
+    // ctx、len 未初始化即被 += 消费，失败路径直接 UB
+    if (key.size() != KEY_LEN) return {};
     unsigned char nonce[NONCE_LEN];
-    RAND_bytes(nonce, NONCE_LEN);
+    if (RAND_bytes(nonce, NONCE_LEN) != 1) return {};
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce);
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, NONCE_LEN, nullptr);
+    if (!ctx) return {};
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, NONCE_LEN, nullptr) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
 
     vector<unsigned char> ciphertext(plaintext.size() + TAG_LEN);
-    int len;
-    EVP_EncryptUpdate(ctx, ciphertext.data(), &len,
-                      (const unsigned char *) plaintext.data(), static_cast<int>(plaintext.size()));
+    int len = 0;
+    if (EVP_EncryptUpdate(ctx, ciphertext.data(), &len,
+                          (const unsigned char *) plaintext.data(),
+                          static_cast<int>(plaintext.size())) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
     int ciphertext_len = len;
-    EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+    if (EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
     ciphertext_len += len; // len 通常为 0，所以 ciphertext_len = plaintext.size()
 
     // 将 Tag 写入密文之后（位置 ciphertext_len）
-    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN,
-                        ciphertext.data() + ciphertext_len);
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN,
+                            ciphertext.data() + ciphertext_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
     EVP_CIPHER_CTX_free(ctx);
 
     // 返回 nonce + 完整密文（含 Tag）
@@ -1784,6 +1869,11 @@ string recv_encrypted(int fd, const vector<unsigned char> &key) {
     size_t bytes_read = 0;
     unsigned char len_buf[4];
 
+    // 连接级总时限：SO_RCVTIMEO 只约束单次 read——攻击者每 4.9s 滴 1 字节
+    // 可无限拖住单线程 accept 循环（renew 不可达 → 已武装死线到期引爆，
+    // 用户活跃使用中数据被毁；stop 有 pkill 兜底，renew 没有）
+    const auto deadline = chrono::steady_clock::now() + chrono::seconds(10);
+
     // 循环读取直到读满 4 字节
     while (bytes_read < 4) {
         r = read(fd, len_buf + bytes_read, 4 - bytes_read);
@@ -1791,6 +1881,7 @@ string recv_encrypted(int fd, const vector<unsigned char> &key) {
             return "";
         }
         bytes_read += r;
+        if (chrono::steady_clock::now() >= deadline) return "";
     }
 
     len = ntohl(*(uint32_t *) len_buf);
@@ -1806,6 +1897,7 @@ string recv_encrypted(int fd, const vector<unsigned char> &key) {
             return "";
         }
         bytes_read += r;
+        if (chrono::steady_clock::now() >= deadline) return "";
     }
     return decrypt_data(key, encrypted);
 }

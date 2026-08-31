@@ -25,7 +25,11 @@ object DaemonManager {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
-    // 缓存密钥（DK 由 EncryptManager 经 Keystore 包裹管理，进程内复用）
+    // 缓存密钥（DK 由 KeyVault 经 Keystore 包裹管理，进程内复用）。
+    // @Volatile：胁迫销毁序列（DefenseProtocol 步骤 5，IO 线程）清空缓存
+    // 与其他线程 getKey() 之间需要 happens-before——否则旧信道密钥可能
+    // 跨线程可见残留（同文件 lastRenewAtMillis 已加，此处此前遗漏）
+    @Volatile
     private var cachedKey: SecretKeySpec? = null
 
     // daemon 续期节流：touch 高频调用（10s 心跳），socket 往返约 1 次/分钟足够
@@ -237,6 +241,17 @@ object DaemonManager {
 
     suspend fun syncConfig(): Boolean {
         if (!isDaemonRunning()) return false
+        // fail-closed（与 ScreenShareManager 启动前检查同语义）：共享密码
+        // 已配置（_sec 密文存在）但本会话不可解（锁定态 DK 未组装，或单段
+        // DK 轮换后密文孤儿化）→ 中止整个 config 下发。静默发送无
+        // auth_password 的配置会让 daemon 侧共享在"用户以为有密码"的状态下
+        // 无认证运行（两侧行为分裂）。此时 daemon 保留旧配置（含密码），
+        // 解锁后下次 syncConfig 即恢复
+        if (SensitiveStore.isSensitiveConfigured(appContext, "screenShare_password") &&
+            SensitiveStore.getSensitive(appContext, "screenShare_password", "").isEmpty()
+        ) {
+            return false
+        }
         val separator = ConfigManager.getDataOnce(appContext, "daemon_config_separator", "#")
         val screenshot =
             ConfigManager.getDataOnce(appContext, "daemon_screenshot_config", "").split(separator)

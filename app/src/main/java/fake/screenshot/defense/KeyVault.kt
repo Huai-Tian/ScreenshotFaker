@@ -419,9 +419,13 @@ object KeyVault {
                 GCMParameterSpec(TAG_LENGTH, blob.copyOfRange(0, NONCE_LENGTH))
             )
             val plain = cipher.doFinal(blob.copyOfRange(NONCE_LENGTH, blob.size))
-            // 兼容两种明文：掺 pepper（新）与常量（pepper 故障窗口产出）
+            // 兼容两种明文：掺 pepper（新）与常量（pepper 故障窗口产出）。
+            // pepper 不可用时必须退 ByteArray(0)（与 makeCheck 对称）而不是
+            // 提前 false——否则常量版 dk_check（恰在 pepper 不可用期间写出）
+            // 永远验不过：下方常量回退比较在其唯一被需要的时刻不可达，
+            // 正确安全密码也无法组装 DK，改密自救会判为胁迫 → DK 孤儿化
             val withPepper = DK_CHECK_PLAINTEXT.toByteArray(Charsets.UTF_8) +
-                    (getOrCreatePepper() ?: return@runCatching false)
+                    (getOrCreatePepper() ?: ByteArray(0))
             GuardManager.constantTimeEquals(plain, withPepper) ||
                     GuardManager.constantTimeEquals(
                         plain, DK_CHECK_PLAINTEXT.toByteArray(Charsets.UTF_8)

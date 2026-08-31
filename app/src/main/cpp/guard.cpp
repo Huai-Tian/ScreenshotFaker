@@ -56,7 +56,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
-#include <signal.h>
+#include <csignal>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>

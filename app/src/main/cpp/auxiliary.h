@@ -27,6 +27,8 @@
 #include <filesystem>
 #include <atomic>
 #include <mutex>
+#include <ctime>
+#include <iomanip>
 #include <openssl/evp.h>
 #include <openssl/kdf.h>
 #include <openssl/rand.h>
