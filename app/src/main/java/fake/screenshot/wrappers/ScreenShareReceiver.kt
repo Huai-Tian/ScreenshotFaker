@@ -419,6 +419,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val session = jsch.getSession(config.sshUserName, config.address, config.sshPort)
         session.setPassword(config.sshPassword.toByteArray(Charsets.UTF_8))
         session.setConfig("StrictHostKeyChecking", "no")
+        // SSH 保活：NAT 静默丢弃连接（无 RST/EOF）时读线程一直阻塞、
+        // isConnected 长期为 true——12 次重试全部复用死 session 白白耗尽，
+        // 且 Failed 后页面"重试"不经 stop() 同样无法自愈（sshSession 只在
+        // stop 里清）。保活探测使 isConnected 反映真实链路状态，
+        // runLoop 的"仅重置已断开 session"逻辑才能命中
+        session.setServerAliveInterval(15)
+        session.setServerAliveCountMax(4)
         session.connect(SSH_TIMEOUT_MS)
         sshSession = session
         return session
@@ -934,6 +941,10 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         while (running.get()) {
             input.readFully(header)
             val size = readIntBE(header, 8)
+            // 与其余三个读循环一致：负值/超限 size 不校验会使跳过计数为负
+            //（内层 while 直接跳过），流错位后无限读垃圾直到 EOF——
+            // 排水循环失去"快速失败走重试"的语义
+            checkPacketSize(size)
             var remaining = size
             while (remaining > 0) {
                 val n = input.read(skipBuffer, 0, minOf(remaining, skipBuffer.size))

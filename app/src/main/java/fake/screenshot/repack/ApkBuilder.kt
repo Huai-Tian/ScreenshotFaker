@@ -149,7 +149,8 @@ object ApkBuilder {
     /** v1 签名体系文件（重新用 v2/v3 签名，v1 清单与块必须剔除） */
     private fun isSignatureEntry(name: String): Boolean {
         if (!name.startsWith("META-INF/")) return false
-        if (name == "META-INF/MANIFEST.MF") return true
+        // 大小写不敏感（与下方后缀匹配一致）：非标准工具可能产出小写变体
+        if (name.equals("META-INF/MANIFEST.MF", ignoreCase = true)) return true
         val lower = name.lowercase()
         return lower.endsWith(".sf") || lower.endsWith(".rsa") ||
                 lower.endsWith(".dsa") || lower.endsWith(".ec")

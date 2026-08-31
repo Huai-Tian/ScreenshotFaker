@@ -1613,11 +1613,20 @@ fun ExtensionCompose() {
                                 configChanged = true
                             }
                             if (screenSharePassword != screenShareConfigDialogPassword) {
-                                SensitiveStore.putSensitive(
-                                    context,
-                                    "screenShare_password",
-                                    screenShareConfigDialogPassword
-                                )
+                                // 返回值必须检查：DK 不可用时密文写入失败，
+                                // 静默不提示会造成"保存成功"假象（刷新后密码
+                                // 消失），且 daemon 读到旧密文回退空值 →
+                                // 共享无密码裸奔（两侧行为分裂）
+                                if (!SensitiveStore.putSensitive(
+                                        context,
+                                        "screenShare_password",
+                                        screenShareConfigDialogPassword
+                                    )
+                                ) {
+                                    Toast.makeText(
+                                        context, R.string.failed, Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                                 configChanged = true
                             }
                             if (screenShareMaxSize != screenShareConfigDialogMaxSize.toIntOrNull()) {
@@ -1743,11 +1752,17 @@ fun ExtensionCompose() {
                                     configChanged = true
                                 }
                                 if (sshTunnelServerAddress != sshTunnelConfigDialogServerAddress) {
-                                    SensitiveStore.putSensitive(
-                                        context,
-                                        "ssh_tunnel_server_address",
-                                        sshTunnelConfigDialogServerAddress
-                                    )
+                                    // 返回值检查（同上方共享密码处的说明）
+                                    if (!SensitiveStore.putSensitive(
+                                            context,
+                                            "ssh_tunnel_server_address",
+                                            sshTunnelConfigDialogServerAddress
+                                        )
+                                    ) {
+                                        Toast.makeText(
+                                            context, R.string.failed, Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                     configChanged = true
                                 }
                                 if (sshTunnelServerPort != sshTunnelConfigDialogServerPort.toInt()) {
@@ -1759,19 +1774,29 @@ fun ExtensionCompose() {
                                     configChanged = true
                                 }
                                 if (sshTunnelUserName != sshTunnelConfigDialogUserName) {
-                                    SensitiveStore.putSensitive(
-                                        context,
-                                        "ssh_tunnel_user_name",
-                                        sshTunnelConfigDialogUserName
-                                    )
+                                    if (!SensitiveStore.putSensitive(
+                                            context,
+                                            "ssh_tunnel_user_name",
+                                            sshTunnelConfigDialogUserName
+                                        )
+                                    ) {
+                                        Toast.makeText(
+                                            context, R.string.failed, Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                     configChanged = true
                                 }
                                 if (sshTunnelUserPassword != sshTunnelConfigDialogUserPassword) {
-                                    SensitiveStore.putSensitive(
-                                        context,
-                                        "ssh_tunnel_user_password",
-                                        sshTunnelConfigDialogUserPassword
-                                    )
+                                    if (!SensitiveStore.putSensitive(
+                                            context,
+                                            "ssh_tunnel_user_password",
+                                            sshTunnelConfigDialogUserPassword
+                                        )
+                                    ) {
+                                        Toast.makeText(
+                                            context, R.string.failed, Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                     configChanged = true
                                 }
                                 val newRemotePort =

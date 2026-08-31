@@ -177,7 +177,13 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        ScreenShareReceiverManager.deleteConfig(context, target.id)
+                        // 删除失败（密文复活）静默无感知：与同页 save 路径
+                        // 对齐，失败提示用户手动重试
+                        if (!ScreenShareReceiverManager.deleteConfig(context, target.id)) {
+                            android.widget.Toast.makeText(
+                                context, R.string.failed, android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
                         refresh()
                     }
                     deleteTarget = null

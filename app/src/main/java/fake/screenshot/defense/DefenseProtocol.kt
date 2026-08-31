@@ -139,7 +139,7 @@ object DefenseProtocol {
 
         // 6. 清信道密钥缓存与 DK 拆分状态（后续走重新生成的 DK；
         //    拆分三键随销毁清除——验证器保留但密钥状态归零，与全新安装一致）
-        DaemonManager.clearCachedKey()
+        runCatching { DaemonManager.clearCachedKey() }
         runCatching { KeyVault.resetSplitState() }
 
         // 7. 复位默认档（首次写入触发新 keyset 生成，与 Keystore 新主密钥配对）
