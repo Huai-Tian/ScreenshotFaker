@@ -142,8 +142,13 @@ static const int WATCHDOG_INTERVAL_SEC = 30;
 // 墙钟合理性下限（2020-01-01 epoch 秒，与 app 侧 IdleWatchdog.WC0_MIN 对齐）：
 // 低于此值视为 RTC 耗尽/未同步的错钟，跳过本轮判定（防误毁）
 static const long long WC0_MIN_SEC = 1577836800LL;
-// wall 与 uptime 漂移容差（秒）：正常 NTP 校正远小于此值
-static const long long ANCHOR_FREEZE_TOLERANCE_SEC = 120;
+// wall 与 uptime 漂移容差（秒），与 app 侧 IdleWatchdog.ANCHOR_DRIFT_TOLERANCE_MS/
+// ROLLBACK_TOLERANCE_MS（10min）对齐：RTC 纽扣电池老化（重启后时钟回到
+// 过去超容差）是稳定用户可无过错触发的硬件老化事件，误爆 = root 模式
+// rm -rf；120s 旧值连激进 NTP 步进校正都可能误触。代价仅是冻结检测
+// 从 2min 延迟到 10min——冻结攻击须持续维持冻结状态获益，10min 不构成
+// 实质逃逸窗口（冻结方向攻击每 30s tick 的漂移校验持续累积判定）
+static const long long ANCHOR_FREEZE_TOLERANCE_SEC = 600;
 // 真实重启至少耗费的墙钟时间（秒）：跨重启墙钟增量低于此值 = 冻结
 static const long long MIN_REBOOT_WALL_ELAPSED_SEC = 20;
 
@@ -1156,9 +1161,11 @@ static void watchdog_main() {
             }
         } else {
             // uptime 回退 = 重启过。墙钟倒退判定必须带容差（与 app 侧
-            // IdleWatchdog.ROLLBACK_TOLERANCE_MS=2min 对齐）：跨重启的
-            // NTP/NITZ/RTC 小幅向后校正是正常设备行为，零容差会把
-            // "重启 + 时钟校正"的用户误杀（root 模式 = rm -rf app 数据）。
+            // IdleWatchdog.ROLLBACK_TOLERANCE_MS/ANCHOR_DRIFT_TOLERANCE_MS
+            // 10min 对齐）：跨重启的 NTP/NITZ/RTC 向后校正是正常设备行为，
+            // RTC 纽扣电池老化（重启后时钟大幅回到过去）是稳定用户无过错
+            // 可触发的硬件事件，零/小容差会把"重启 + 时钟校正/RTC 重建"
+            // 的用户误杀（root 模式 = rm -rf app 数据）。
             // 注意原实现的零容差检查实际是死代码：wall<lastwall 蕴含
             // wall-lastwall<0<20，恒被下方冻结检查先行引爆
             if (wall < st.lastwall - ANCHOR_FREEZE_TOLERANCE_SEC) {
@@ -1203,7 +1210,7 @@ static void watchdog_main() {
 
         // 通过检查：仅当墙钟严格前进时推进基线——冻结/回拨期间基线不动，
         // 漂移跨轮累积直至容差引爆。旧实现每轮回写基线：单轮漂移至多
-        // ~WATCHDOG_INTERVAL_SEC(30s)，永远达不到 120s 容差，冻结检测
+        // ~WATCHDOG_INTERVAL_SEC(30s)，永远达不到 600s 容差，冻结检测
         // 形同虚设（扣押设备+冻结墙钟 = 看门狗完全失效）
         if (wall > st.lastwall) {
             anchor_save(effective_deadline, wall, up);

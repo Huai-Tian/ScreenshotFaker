@@ -50,12 +50,15 @@ object IdleWatchdog {
     // 双锚点自洽容差：同一开机内 (er-er0) 与 (wc-wc0) 偏差超过此值 = 非法
     private const val ANCHOR_DRIFT_TOLERANCE_MS = 10 * 60 * 1000L
 
-    // 跨重启墙钟回拨容差（与 daemon.cpp ANCHOR_FREEZE_TOLERANCE_SEC=120s 对齐）：
+    // 跨重启墙钟回拨容差（与 daemon.cpp ANCHOR_FREEZE_TOLERANCE_SEC=600s 对齐）：
     // NTP 小幅向后校正（秒级）是正常设备行为，硬性 wc<wc0 即引爆会把
     // "重启 + 时钟校正"的普通用户误杀（销毁不可逆，误报代价极高）。
     // 容差内的回拨最多把死线推迟同等时长（一次性，锚点不随回拨刷新），
-    // 大幅回拨（>2min）仍按篡改引爆
-    private const val ROLLBACK_TOLERANCE_MS = 2 * 60 * 1000L
+    // 大幅回拨（>10min）仍按篡改引爆。与漂移容差共用 10min：RTC 纽扣
+    // 电池老化（重启后时钟大幅回到过去）是稳定用户无过错可触发的硬件
+    // 事件（误爆 = 双侧销毁），10min 容差下冻结/回拨攻击须持续维持
+    // 异常状态才能获益，检测延迟不构成实质逃逸窗口
+    private const val ROLLBACK_TOLERANCE_MS = 10 * 60 * 1000L
 
     // wc0 合理性区间下限（2020-01-01），防垃圾值
     private const val WC0_MIN = 1_577_836_800_000L
