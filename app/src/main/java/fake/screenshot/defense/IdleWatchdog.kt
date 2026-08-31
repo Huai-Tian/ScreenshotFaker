@@ -63,6 +63,12 @@ object IdleWatchdog {
     // wc0 合理性区间下限（2020-01-01），防垃圾值
     private const val WC0_MIN = 1_577_836_800_000L
 
+    // 错钟推迟路径的复查闹钟间隔（24h）：RTC 掉电用户的时钟恢复是
+    // 分钟级；root 攻击者有 force-stop（杀闹钟，已声明边界）这条更
+    // 便宜的路径——本闹钟防"低扰冻结取证"（无进程操作），对其 24h
+    // 检出绰绰有余，取更小值只会打扰 Doze/耗电
+    private const val RECHECK_ALARM_DELAY_MS = 24 * 60 * 60 * 1000L
+
     private lateinit var appContext: Context
 
     fun init(context: Context) {
@@ -356,6 +362,18 @@ object IdleWatchdog {
         // 跨开机：只剩墙钟 → 到期点 = wc0 + limit（大幅时钟回拨由下次复查的
         // wc < wc0-容差 判定捕获，闹钟至多被延迟，不会缺席）
         armDelayMs?.let { armDeadlineAlarm(it) }
+        // 错钟推迟路径的"下一个触发点"：wallOk=false 时若用户不再打开
+        // app 且不再重启，判定被无限期悬空（冻结时钟类攻击的目标态）。
+        // 布防 ELAPSED_REALTIME 复查闹钟（单调时钟，冻结墙钟无效）：
+        // 到点时钟已恢复 → 正常判定；仍错 → 持续错钟 → 按冻结引爆。
+        // 24h 足够：RTC 掉电用户的 NTP/手动恢复是分钟级；root 攻击者
+        // 本可 force-stop 杀闹钟（已声明边界），本闹钟防的是"低扰冻结
+        // 取证"（无进程操作），对其 24h 检出绰绰有余。独立 requestCode
+        // 不与死线闹钟互相覆盖；到点仍未到期会按剩余时间重新布防
+        //（本方法的 armDeadlineAlarm 路径），链条自续
+        if (!wallOk && limitMs > 0) {
+            armRecheckAlarm()
+        }
         return false
     }
 
@@ -416,6 +434,35 @@ object IdleWatchdog {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val triggerElapsed = SystemClock.elapsedRealtime() + delayMs
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerElapsed, pending
+                )
+            } else {
+                am.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerElapsed, pending
+                )
+            }
+        }
+    }
+
+    /**
+     * 错钟推迟路径的复查闹钟（24h，requestCode=1 与死线闹钟互不覆盖）。
+     * 机制与精确性声明同 [armDeadlineAlarm]（ELAPSED_REALTIME_WAKEUP
+     * 单调时钟 + manifest 权限组合 + Doze 降级容差）。到点进入
+     * AlarmReceiver → checkIdleExpired：时钟恢复 → 正常判定并按剩余
+     * 时间布防；仍错 → 重新进入 wallOk=false 路径并再次布防本闹钟
+     * （24h 链条自续，直到时钟恢复或 daemon 侧 uptime 死线完成销毁）
+     */
+    private fun armRecheckAlarm() {
+        runCatching {
+            val am = appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val pending = PendingIntent.getBroadcast(
+                appContext, 1,
+                Intent(appContext, AlarmReceiver::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val triggerElapsed = SystemClock.elapsedRealtime() + RECHECK_ALARM_DELAY_MS
             if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
                 am.setAndAllowWhileIdle(
                     AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerElapsed, pending

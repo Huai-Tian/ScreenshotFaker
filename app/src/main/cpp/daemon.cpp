@@ -32,6 +32,11 @@ mutex config_mutex;
 // - 重启（uptime 回退）后墙钟必须至少前进 MIN_REBOOT_WALL_ELAPSED_SEC，
 //   否则 = 冻结+重启绕过计时 → 引爆
 atomic<long long> idle_deadline_sec{0};
+// 档位时长（分钟，config 下发；0 = 未知）。错钟期间 renew 到达时，
+// 墙钟死线在 uptime 数轴的换算需要"剩余量"——墙钟不可信时唯一的
+// 表达就是 limit×60（renew = app 侧 touchIdle 续期，语义即"从现在
+// 起再计 limit 分钟"）。墙钟健康时本字段不被消费
+atomic<long long> idle_limit_min{0};
 // 本实例是否已从 app 侧收到过有效 config/renew（含合法死线）。
 // 看门狗死线引爆的前提：锚点里的死线是"本实例知情"的死线——否则它是
 // 上一实例（SIGKILL 残留）的陈旧锚点，app 侧锚点可能已续期而 config
@@ -279,7 +284,16 @@ static string record_mark_path_for_key(const vector<unsigned char> &key) {
     return string("/data/local/tmp/.") + hex;
 }
 
-// 锚点文件内容（加密前）："deadline,lastwall,lastuptime"
+// 锚点文件内容（加密前）："deadline,lastwall,lastuptime[,deadline_uptime]"
+// 第四段 deadline_uptime（0/缺段 = 未启用）：错钟（wall < WC0_MIN）期间的
+// uptime 基准死线。/proc/uptime 由内核维护（root 冻不动 jiffies）且单调、
+// 含 suspend——daemon 单次生命周期内无重启（重启即死，复活 = 用户启动
+// = 正确重置），错钟期间它是唯一可信时钟。错钟守卫曾令看门狗整体失明
+//（continue 短路漂移/死线/篡改全部判定）：冻结时钟到 <2020 即无限期
+// 推迟销毁。启用后错钟期间以 up >= deadline_uptime 判定，剩余预算从
+// 最后一个好时钟时刻无损换算（见 watchdog_main 错钟分支），时钟恢复
+// 即回到墙钟路径。密文锚点 daemon 独占消费，格式可自由扩展；旧 3 段
+// 格式解出 0 = 未启用，走既有逻辑
 // exists=false：文件不存在（首启/被清理）；valid=false：存在但解密/解析失败 = 篡改
 struct AnchorState {
     bool exists = false;
@@ -287,6 +301,7 @@ struct AnchorState {
     long long deadline = 0;
     long long lastwall = 0;
     double lastuptime = -1.0;
+    long long deadline_uptime = 0;
 };
 
 static AnchorState anchor_load() {
@@ -304,10 +319,12 @@ static AnchorState anchor_load() {
     string plain = decrypt_data(g_key, data);
     if (plain.empty()) return st;            // 存在但解不开 = 篡改
     auto parts = split(plain, ',');
-    if (parts.size() != 3) return st;
+    if (parts.size() != 3 && parts.size() != 4) return st;
     st.deadline = strtoll(parts[0].c_str(), nullptr, 10);
     st.lastwall = strtoll(parts[1].c_str(), nullptr, 10);
     st.lastuptime = strtod(parts[2].c_str(), nullptr);
+    if (parts.size() == 4) st.deadline_uptime = strtoll(parts[3].c_str(), nullptr, 10);
+    if (st.deadline_uptime < 0) st.deadline_uptime = 0;   // 负值按未启用（防毒锚点）
     if (st.lastwall <= 0 || st.lastuptime < 0) return st;
     st.valid = true;
     return st;
@@ -323,10 +340,13 @@ static AnchorState anchor_load() {
 // 密钥长度守卫：stop/term 清钥与看门狗 tick 并发时，g_key 可能已清零
 // （vector::clear 保留 capacity，data() 仍可读出 32 字节零）——用零钥
 // 加密会落盘"毒锚点"（下次启动用真钥解不开 → 按篡改引爆），必须拒绝
-static void anchor_save(long long deadline, long long wall, double uptime) {
+// deadline_uptime（默认 0 = 未启用）：仅错钟换算/错钟 renew 路径写入非零，
+// 其余调用点沿用默认——墙钟健康时第四字段恒 0，正常路径行为零变化
+static void anchor_save(long long deadline, long long wall, double uptime,
+                        long long deadline_uptime = 0) {
     if (g_key.size() != KEY_LEN) return;
     string plain = to_string(deadline) + "," + to_string(wall) + "," +
-                   to_string(uptime);
+                   to_string(uptime) + "," + to_string(deadline_uptime);
     vector<unsigned char> enc = encrypt_data(g_key, plain);
     if (enc.empty()) return;
     string tmp = g_anchor_path + ".t";
@@ -1130,22 +1150,71 @@ static void watchdog_main() {
         if (up < 0) continue;                 // /proc 读取失败：跳过本轮（无法判定）
         long long wall = static_cast<long long>(time(nullptr));
         if (wall <= 0) continue;
-        // 墙钟明显不可信（RTC 耗尽回到出厂值/1970，NTP 未及恢复）：一切
-        // 墙钟判定（倒退/冻结/死线到期）此刻无意义，继续走必然误毁真实
-        // 用户——推迟到时钟恢复（与 app 侧 IdleWatchdog 的 WC0_MIN 守卫
-        // 语义对齐；冻结/回拨篡改检测在时钟可信后照常生效）
-        if (wall < WC0_MIN_SEC) continue;
 
         lock_guard<mutex> lock(anchor_mutex);
         AnchorState st = anchor_load();
         if (!st.exists) {
+            if (wall < WC0_MIN_SEC) {
+                // 锚点不存在且墙钟不可信：无从换算 uptime 死线（锚点没有
+                // 好时钟基线可依），保持无锚点态等待时钟恢复——首启本就
+                // 无死线可守（deadline=0），语义无损
+                continue;
+            }
             // 首启/锚点被清理：以当前 config 的 deadline 初始化基线
             anchor_save(idle_deadline_sec.load(), wall, up);
             continue;
         }
         if (!st.valid) {
-            // 锚点存在但解不开 = 无密钥者改写过 = 篡改 → 引爆
+            // 锚点存在但解不开 = 无密钥者改写过 = 篡改 → 引爆。
+            // 先于错钟守卫执行（与 app 侧 wallOk 结构对称）：锚点有效性
+            // 与当前墙钟无关——错钟期间篡改检测照常生效
             detonate();
+        }
+
+        // 错钟守卫（uptime 死线模式）：墙钟明显不可信（RTC 耗尽回到
+        // 出厂值/1970，或攻击者冻结时钟至 <2020）期间，墙钟类判定
+        // （倒退/冻结/死线到期/基线推进）无意义——但绝不再整体 continue
+        // （原实现连锚点篡改检测一并短路，冻结至 <2020 = 看门狗无限期
+        // 失明，销毁被无限推迟）：切换到 uptime 基准判定。
+        // /proc/uptime 内核维护（root 冻不动 jiffies）、单调、含 suspend；
+        // daemon 单次生命周期内无重启（up < lastuptime 不会在此出现）。
+        // RTC 掉电用户：时钟在分钟级被 NTP/网络恢复 → 回到墙钟路径，
+        // uptime 死线期间正常续期（renew 换算），零误伤
+        if (wall < WC0_MIN_SEC) {
+            long long dl_up = st.deadline_uptime;
+            if (dl_up == 0 && st.deadline > 0 && st.lastwall >= WC0_MIN_SEC) {
+                // 首个错钟 tick：从最后一个好时钟时刻无损换算剩余预算。
+                // lastwall 在旧锚点里是可信基线（WC0_MIN 以上写锚点由
+                // 本守卫保证）；换算 = 把 "deadline - lastwall" 的墙钟
+                // 剩余量平移到 uptime 数轴（两时钟同速含 suspend）。
+                // 只用锚点自身字段（deadline/lastwall/lastuptime 同一
+                // 份 GCM 完整密文，自洽）：不掺 idle_deadline_sec 内存值
+                // ——renew 刚更新内存尚未写盘的窗口下，掺入会把换算
+                // 基线抬到"锚点 lastwall + 新死线"，dl_up 偏小 → 提前
+                // 引爆（新误炸面）。内存新死线由 renew 的错钟分支随后
+                // 以精确换算覆盖写盘，本分支的保守旧值至多存活 30s
+                dl_up = static_cast<long long>(st.lastuptime) + (st.deadline - st.lastwall);
+                if (dl_up <= 0) dl_up = 1;    // 已过期死线的防御性下限
+            }
+            // deadline_uptime > 0（含换算结果）：以单调 uptime 判定到期。
+            // config_synced 前置同墙钟死线：未同步实例的锚点是陈旧残留，
+            // 无限期的错钟 + 陈旧锚点组合不该引爆（app 侧锚点可能已续期）
+            if (config_synced.load() && dl_up > 0 &&
+                up >= static_cast<double>(dl_up)) {
+                detonate();
+            }
+            // 保持锚点原样（lastwall 冻结在旧值，deadline_uptime 落盘）：
+            // 时钟恢复后回到墙钟路径，基线无漂移。仅在首次换算时写盘
+            //（dl_up != st.deadline_uptime），避免每 30s 重写
+            if (dl_up != st.deadline_uptime && dl_up > 0) {
+                anchor_save(st.deadline, st.lastwall, st.lastuptime, dl_up);
+            }
+            continue;   // 错钟期间不进入墙钟判定（基线推进/漂移/回拨）
+        }
+        // 墙钟恢复：清零 deadline_uptime（回到纯墙钟语义），一次写盘
+        if (st.deadline_uptime != 0) {
+            anchor_save(st.deadline, st.lastwall, up, 0);
+            continue;   // 本轮仅完成模式归位
         }
 
         if (up >= st.lastuptime) {
@@ -1864,7 +1933,25 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             double up = read_proc_uptime();
             long long wall = static_cast<long long>(time(nullptr));
             if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
-                anchor_save(dl, wall, up);
+                // 错钟期间（wall < WC0_MIN_SEC）：续期死线是 app 侧用
+                // 真实墙钟算出的绝对时刻，与冻结墙钟的差值（dl - wall）
+                // 无意义（可高达数十年）——换算必须用档位时长：
+                // deadline_uptime = up + limit×60。renew 的语义本就是
+                // "自此刻起再计 limit 分钟"，与墙钟无关，uptime 数轴
+                // 是它在本实例生命周期的精确表达。limit 未知（0，
+                // renew 早于 config 的畸形时序）时不动 deadline_uptime
+                //（保持看门狗首个错钟 tick 的保守换算）。lastwall 冻结
+                // 在旧值：时钟恢复后该锚点被 wall > lastwall 的基线推进
+                // 自然覆盖，换算字段随常规锚点写入归零
+                if (wall < WC0_MIN_SEC) {
+                    long long limit = idle_limit_min.load();
+                    if (limit > 0) {
+                        anchor_save(dl, st.exists ? st.lastwall : wall, up,
+                                    static_cast<long long>(up) + limit * 60);
+                    }
+                } else {
+                    anchor_save(dl, wall, up);
+                }
             }
         }
         reply_plain = "fine\x1C" + to_string(get_current_timestamp_seconds());
@@ -1949,7 +2036,9 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                 app_data_dir = std::move(cfg_app_data_dir);
                 app_uid.store(cfg_app_uid);
                 idle_deadline_sec.store(cfg_idle_deadline > 0 ? cfg_idle_deadline : 0);
-                (void) cfg_idle_limit;
+                // 档位时长留存（错钟期间 renew 的 uptime 换算用，见
+                // idle_limit_min 注释）
+                idle_limit_min.store(cfg_idle_limit > 0 ? cfg_idle_limit : 0);
                 filter_update.store(true);
                 success = true;
             }
