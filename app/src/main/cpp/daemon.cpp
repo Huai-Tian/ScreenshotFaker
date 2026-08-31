@@ -124,6 +124,9 @@ static const long long MIN_REBOOT_WALL_ELAPSED_SEC = 20;
 mutex record_mutex;
 atomic_bool record_running = false;
 pid_t record_pid = -1;
+// record 子进程 spawn 时刻的 starttime（record_mutex 保护）——延迟补杀
+// （stop/detach/引爆/日志开关停止）前的 PID 身份复核依据，防 PID 复用误杀
+long long record_pid_start = -1;
 
 // ===================== 屏幕共享运行状态 =====================
 // 匹配触发一次开启，再次触发关闭，循环往复
@@ -131,6 +134,9 @@ static const char *RELAY_MARKER = "vendor.entry.Main";
 atomic_bool share_running = false;
 atomic_bool share_stop_requested = false;
 atomic<pid_t> share_server_pid{-1};
+// share server 子进程 spawn 时刻的 starttime（与 share_server_pid 同步更新）
+// ——延迟补杀（stop/detach/引爆/toggle）前的 PID 身份复核依据
+static atomic<long long> share_server_pid_start{-1};
 static thread share_supervisor;
 
 void daemonize() {
@@ -419,6 +425,50 @@ static bool process_alive(pid_t pid) {
     if (pid <= 0) return false;
     if (kill(pid, 0) == 0) return true;
     return errno == EPERM;   // 存在但非我们的进程（被复用）也视为存活
+}
+
+// 读取 /proc/<pid>/stat 的 starttime（第 22 字段，boot 后 tick 数）：进程
+// 生命周期内恒定，PID 复用后必变。跨线程延迟 kill（stop/detach/toggle/
+// detonate 对 record_pid / share_server_pid 的补杀——距 spawn 可达数十秒）
+// 前用它复核身份，杜绝 PID 复用窗口内误杀无关进程（root 模式下 SIGKILL
+// 误杀系统进程不可逆）。读取失败（已退出/权限）返回 -1，调用方按身份
+// 不符处理——"不杀"是安全方向（子进程已死则无杀必要；无法核实宁可放其
+// 自然退出，也不冒误杀险）
+static long long proc_start_ticks(pid_t pid) {
+    if (pid <= 0) return -1;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char buf[2048];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return -1;
+    buf[n] = '\0';
+    // comm 字段（第 2 字段）可含空格与括号——定位最后一个 ')' 再按空白
+    // 分词：')' 后首 token 为第 3 字段（state），starttime 为第 22 字段
+    char *close_paren = strrchr(buf, ')');
+    if (!close_paren) return -1;
+    long long start = -1;
+    char *p = close_paren + 1;
+    int field = 2;
+    while (*p) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        ++field;
+        if (field == 22) {
+            start = strtoll(p, nullptr, 10);
+            break;
+        }
+        while (*p && *p != ' ') ++p;
+    }
+    return start;
+}
+
+// pid 与 spawn 时捕获的 starttime 仍同一进程？
+static bool pid_is_same(pid_t pid, long long start_ticks) {
+    if (pid <= 0 || start_ticks < 0) return false;
+    return proc_start_ticks(pid) == start_ticks;
 }
 
 // 等待进程退出（轮询版：SIGCHLD=SIG_IGN 下 waitpid 不可用）
@@ -869,12 +919,18 @@ void share_supervisor_main() {
             this_thread::sleep_for(chrono::seconds(1));
             continue;
         }
+        // spawn 即刻捕获身份（starttime 恒定），后续补杀前复核——
+        // PID 复用后 kill(0) 仍命中但 starttime 已变
+        long long pid_start = proc_start_ticks(pid);
         share_server_pid.store(pid);
+        share_server_pid_start.store(pid_start);
         auto start_time = chrono::steady_clock::now();
         bool sigint_sent = false;
         auto sigint_time = chrono::steady_clock::now();
-        // SIGCHLD=SIG_IGN 下 waitpid 不可用：存在性轮询探测退出
+        // SIGCHLD=SIG_IGN 下 waitpid 不可用：存在性 + 身份复合轮询探测退出
+        //（复用后的 PID 按"已退出"处理——既防补杀误杀，也防永等复用者）
         while (process_alive(pid)) {
+            if (!pid_is_same(pid, pid_start)) break;
             if (share_stop_requested.load()) {
                 if (!sigint_sent) {
                     kill(pid, SIGINT);
@@ -887,6 +943,7 @@ void share_supervisor_main() {
             usleep(200000);
         }
         share_server_pid.store(-1);
+        share_server_pid_start.store(-1);
         if (share_stop_requested.load()) break;
         auto elapsed = chrono::duration_cast<chrono::seconds>(
                 chrono::steady_clock::now() - start_time).count();
@@ -909,7 +966,8 @@ void toggle_share() {
     if (share_running.load()) {
         share_stop_requested.store(true);
         pid_t pid = share_server_pid.load();
-        if (pid > 0) kill(pid, SIGINT);
+        // 身份复核后再补杀（见 share_server_pid_start 注释）
+        if (pid_is_same(pid, share_server_pid_start.load())) kill(pid, SIGINT);
         share_running.store(false);
         return;
     }
@@ -934,10 +992,10 @@ void toggle_share() {
  * 末尾 memset 清密钥后 _exit（跳过析构，规避与命令线程的锁交互）。
  */
 [[noreturn]] static void detonate() {
-    // 1. 停自身管理的共享：置停止标志 + 杀 server 进程
+    // 1. 停自身管理的共享：置停止标志 + 杀 server 进程（身份复核防 PID 复用误杀）
     share_stop_requested.store(true);
     pid_t spid = share_server_pid.load();
-    if (spid > 0) kill(spid, SIGKILL);
+    if (pid_is_same(spid, share_server_pid_start.load())) kill(spid, SIGKILL);
     // 清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）：
     // 用户停止使用后 app 侧共享仍可能独立运行（sh 循环不依赖 app 进程），
     // 引爆时必须一并停止推流——且必须先杀 sh 再杀 server（防自动重启）
@@ -946,7 +1004,9 @@ void toggle_share() {
     // 2. 停录屏并清明文 tmp（SIGINT 让 screenrecord 收尾，但明文必须删而非加密）
     {
         lock_guard<mutex> lock(record_mutex);
-        if (record_running.load() && record_pid > 0) kill(record_pid, SIGKILL);
+        if (record_running.load() && pid_is_same(record_pid, record_pid_start)) {
+            kill(record_pid, SIGKILL);
+        }
         if (!g_record_tmp.empty()) {
             remove(g_record_tmp.c_str());
             g_record_tmp.clear();
@@ -1184,6 +1244,7 @@ void filter_thread_main() {
                 if (is_record) {
                     lock_guard<mutex> lock(record_mutex);
                     record_pid = pid;
+                    record_pid_start = proc_start_ticks(pid);
                     record_running.store(true);
                 }
                 // 收尾线程：等命令结束（screencap 秒级，screenrecord 跑满 time-limit）
@@ -1206,6 +1267,7 @@ void filter_thread_main() {
                         if (is_record) {
                             lock_guard<mutex> lock(record_mutex);
                             record_pid = -1;
+                            record_pid_start = -1;
                             record_running.store(false);
                             clear_record_tmp();
                         }
@@ -1252,6 +1314,8 @@ void filter_thread_main() {
             }
             close(pipe_fd[1]);
             pipe_fd[1] = -1;
+            // spawn 即刻捕获身份（stop 的 SIGKILL 兜底距 fork 有 1s 窗口）
+            pid_start = proc_start_ticks(pid);
             // 将读端转换为 FILE*
             f = fdopen(pipe_fd[0], "r");
             return f != nullptr;
@@ -1259,14 +1323,15 @@ void filter_thread_main() {
 
         void stop() {
             if (pid > 0) {
-                kill(pid, SIGTERM);
-                // 等待最多 1 秒，简单轮询
+                // 身份复核贯穿 SIGTERM→轮询→SIGKILL 全程（见 pid_start 注释）
+                if (pid_is_same(pid, pid_start)) kill(pid, SIGTERM);
                 for (int i = 0; i < 10; ++i) {
-                    if (kill(pid, 0) != 0) break;  // 进程已不存在
+                    if (!pid_is_same(pid, pid_start)) break;  // 已退出或 PID 已复用
                     usleep(100000);
                 }
-                if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+                if (pid_is_same(pid, pid_start)) kill(pid, SIGKILL);
                 pid = -1;
+                pid_start = -1;
             }
             if (f) {
                 fclose(f);
@@ -1288,6 +1353,9 @@ void filter_thread_main() {
 
     private:
         pid_t pid = -1;
+        // fork 时刻的子进程 starttime：stop() 的 TERM→KILL 序列与 fork
+        // 间隔可达 1s+，PID 复用防护同 record/share 目标
+        long long pid_start = -1;
         int pipe_fd[2] = {-1, -1};
         FILE *f = nullptr;
     };
@@ -1449,7 +1517,11 @@ void filter_thread_main() {
                     {
                         lock_guard<mutex> lock(record_mutex);
                         if (record_running.load()) {
-                            if (record_pid > 0) kill(record_pid, SIGINT);
+                            // 身份复核：子进程可能已退出（收尾加密中）而 PID
+                            // 被复用——直发 SIGINT 会打到无关进程
+                            if (pid_is_same(record_pid, record_pid_start)) {
+                                kill(record_pid, SIGINT);
+                            }
                             stopping_record = true;
                         }
                     }
@@ -1617,19 +1689,23 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
         // 等待进行中的录屏完成收尾（SIGINT + 等加密回写，避免明文残留在 tmp），上限 10s
         {
             pid_t pid;
+            long long pid_start;
             {
                 lock_guard<mutex> lock(record_mutex);
                 pid = record_running.load() ? record_pid : -1;
+                pid_start = record_running.load() ? record_pid_start : -1;
             }
             if (pid > 0) {
-                kill(pid, SIGINT);
+                // 身份复核（SIGINT 距 spawn 可达数分钟，PID 复用窗口真实存在）
+                if (pid_is_same(pid, pid_start)) kill(pid, SIGINT);
                 for (int i = 0; i < 100 && record_running.load(); ++i) usleep(100000);
                 // 10s 仍未收尾（screenrecord 卡死/超大文件加密回写慢）：
                 // 收尾线程随本进程 _exit 消亡，不在此强杀+删明文则
                 // 明文 tmp 永久残留（与 SIGKILL 兜底路径同类的缺口）
                 {
                     lock_guard<mutex> lock(record_mutex);
-                    if (record_running.load() && record_pid > 0) {
+                    if (record_running.load() &&
+                        pid_is_same(record_pid, record_pid_start)) {
                         kill(record_pid, SIGKILL);
                     }
                     if (!g_record_tmp.empty()) {
@@ -1645,7 +1721,8 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
         if (share_running.load()) {
             share_stop_requested.store(true);
             pid_t pid = share_server_pid.load();
-            if (pid > 0) kill(pid, SIGKILL);
+            // 身份复核后再补杀（防 PID 复用误杀；见 share_server_pid_start）
+            if (pid_is_same(pid, share_server_pid_start.load())) kill(pid, SIGKILL);
         }
         if (share_supervisor.joinable()) share_supervisor.join();
         // purge：清扫 app 侧共享（在自身 supervisor 收尾后进行）

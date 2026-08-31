@@ -504,6 +504,13 @@ object DaemonManager {
         if (now - lastRenewAtMillis < 55_000L) return
         lastRenewAtMillis = now
         val deadlineSec = (now + limitMinutes * 60_000L) / 1000L
-        runCatching { sendCommand("renew:$deadlineSec") }
+        val renewed = runCatching { sendCommand("renew:$deadlineSec") }.getOrNull()
+        if (renewed == null) {
+            // 失败立即解除节流：不解除则 55s 内的后续 touch 全部跳过，
+            // daemon 侧死线持续陈旧——若 daemon 存活而信道瞬断（单条
+            // 命令超时/瞬时洪泛），下一次 touch 立即重试即恢复；
+            // daemon 已死则连接秒拒，重试代价可忽略
+            lastRenewAtMillis = 0L
+        }
     }
 }

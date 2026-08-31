@@ -123,11 +123,14 @@ public final class CleanUp {
     }
 
     private void run(int displayId, int restoreStayOn, boolean disableShowTouches, boolean powerOffScreen, int restoreScreenOffTimeout,
-            int restoreDisplayImePolicy) throws IOException {
+                     int restoreDisplayImePolicy) throws IOException {
+        // 入口类用中性名 vendor.entry.Clean：子进程 cmdline（ps 可见）不得
+        // 含真实包名 fake.screenshot.scrcpy（与 relay 入口 vendor.entry.Main
+        // 同一约定）
         String[] cmd = {
                 "app_process",
                 "/",
-                CleanUp.class.getName(),
+                vendor.entry.Clean.class.getName(),
                 String.valueOf(displayId),
                 String.valueOf(restoreStayOn),
                 String.valueOf(disableShowTouches),

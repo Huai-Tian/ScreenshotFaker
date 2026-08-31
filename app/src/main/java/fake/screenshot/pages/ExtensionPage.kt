@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import java.math.BigDecimal
+import javax.crypto.spec.SecretKeySpec
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
@@ -486,7 +487,24 @@ fun ExtensionCompose() {
             val resolver = context.contentResolver
             var successCount = 0
             var failCount = 0
-            val key = EncryptManager.deriveKey(password)
+
+            // v2 加密：整批共享一枚随机盐（防预计算字典的盐唯一性来自
+            // 全局随机而非逐文件差异；批内共享避免逐文件 200k 轮 PBKDF2）
+            val batchSalt = if (encrypt) EncryptManager.generateSalt() else null
+            val encryptKey = batchSalt?.let { EncryptManager.deriveKey(password, it) }
+
+            // 派生缓存（密码本批固定）：解密侧批内文件通常同盐（v2 同批
+            // 产物 / v1 全局盐），同盐重复派生纯浪费
+            var v2KeyCache: Pair<ByteArray, SecretKeySpec>? = null
+            var v1Key: SecretKeySpec? = null
+            fun v2KeyFor(salt: ByteArray): SecretKeySpec {
+                v2KeyCache?.let { (s, k) -> if (s.contentEquals(salt)) return k }
+                val k = EncryptManager.deriveKey(password, salt)
+                v2KeyCache = salt to k
+                return k
+            }
+            fun v1KeyFor(): SecretKeySpec =
+                v1Key ?: EncryptManager.deriveKey(password).also { v1Key = it }
 
             uris.forEach { uri ->
                 try {
@@ -496,18 +514,41 @@ fun ExtensionCompose() {
                     }
                     val processedBytes = if (encrypt) {
                         val (nonce, ciphertext) = EncryptManager.encryptBytesByPassword(
-                            key,
+                            encryptKey!!,
                             originalBytes
                         )
-                        nonce + ciphertext
+                        byteArrayOf(EncryptManager.V2_MAGIC.toByte()) + batchSalt!! + nonce + ciphertext
                     } else {
-                        if (originalBytes.size < 12) {
-                            failCount++
-                            return@forEach
+                        // v2 解密：版本字节命中即按新格式解析；GCM 认证失败
+                        // （版本字节与旧 nonce 首 Byte 碰撞，1/256）回退 v1
+                        // 旧格式：[12 nonce][密文+tag]
+                        val isV2 = originalBytes.size >= 1 + 16 + 12 &&
+                                (originalBytes[0].toInt() and 0xFF) == EncryptManager.V2_MAGIC
+                        var decrypted: ByteArray? = null
+                        if (isV2) {
+                            try {
+                                val salt = originalBytes.copyOfRange(1, 1 + 16)
+                                val nonce = originalBytes.copyOfRange(17, 17 + 12)
+                                val ct = originalBytes.copyOfRange(29, originalBytes.size)
+                                decrypted = EncryptManager.decryptBytesByPassword(
+                                    v2KeyFor(salt), nonce, ct
+                                )
+                            } catch (_: Exception) {
+                                decrypted = null
+                            }
                         }
-                        val nonce = originalBytes.copyOfRange(0, 12)
-                        val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
-                        EncryptManager.decryptBytesByPassword(key, nonce, ciphertext)
+                        if (decrypted == null) {
+                            if (originalBytes.size < 12) {
+                                failCount++
+                                return@forEach
+                            }
+                            val nonce = originalBytes.copyOfRange(0, 12)
+                            val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
+                            decrypted = EncryptManager.decryptBytesByPassword(
+                                v1KeyFor(), nonce, ciphertext
+                            )
+                        }
+                        decrypted
                     }
                     resolver.openOutputStream(uri, "rwt")?.use { outputStream ->
                         outputStream.write(processedBytes)

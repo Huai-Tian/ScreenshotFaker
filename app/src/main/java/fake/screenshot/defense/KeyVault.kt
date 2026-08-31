@@ -9,6 +9,7 @@ import fake.screenshot.wrappers.EncryptManager
 import java.io.File
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.util.concurrent.locks.ReentrantLock
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -77,6 +78,14 @@ object KeyVault {
     // 会话内已组装 DK（解锁后缓存；进程死亡即失，下次解锁重组）
     @Volatile
     private var assembledDk: ByteArray? = null
+
+    // 迁移事务串行化：activate/resplit/deactivate（Default 协程线程）与
+    // init/assembleDaemonKey 的恢复调用（主线程或其他 IO 线程）并发时，
+    // 不加锁的 recoverPendingMigration 会把在途事务撕成"新 prefs 值 +
+    // 旧 hw_key.bin"的坏钥组合（拆分标记已换新而 A 段还是旧的——新密码
+    // 组不出 DK，全部 _sec 密文与加密产物孤儿化）。可重入：事务入口持锁
+    // 后内部的 recover 调用直接重入
+    private val migrationLock = ReentrantLock()
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -185,35 +194,42 @@ object KeyVault {
         newPassword: String,
         extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
     ): Boolean = withContext(Dispatchers.Default) {
-        recoverPendingMigration()
-        val existing = readStoredPart()
-        val fileExists = File(appContext.filesDir, DK_FILE_NAME).exists()
-        // 会话已组装（最权威）→ 单段文件可解 → 文件缺失（首建，正确重生）
-        // → 文件存在但解不开（中止，防孤儿化，见方法注释）
-        val dk: ByteArray
-        if (assembledDk != null) {
-            dk = assembledDk!!
-        } else if (existing != null) {
-            dk = existing
-        } else if (fileExists) {
-            return@withContext false
-        } else {
-            dk = ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+        // 事务全程持锁（含前置恢复——见 migrationLock 注释）：并发恢复/
+        // 销毁在锁上排队，任何交错都不会撕裂事务
+        migrationLock.lock()
+        try {
+            recoverPendingMigration()
+            val existing = readStoredPart()
+            val fileExists = File(appContext.filesDir, DK_FILE_NAME).exists()
+            // 会话已组装（最权威）→ 单段文件可解 → 文件缺失（首建，正确重生）
+            // → 文件存在但解不开（中止，防孤儿化，见方法注释）
+            val dk: ByteArray
+            if (assembledDk != null) {
+                dk = assembledDk!!
+            } else if (existing != null) {
+                dk = existing
+            } else if (fileExists) {
+                return@withContext false
+            } else {
+                dk = ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+            }
+            val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
+            val check = makeCheck(dk)
+            if (!beginDkMigration()) return@withContext false
+            writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
+            commitDkMigration {
+                putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
+                putString(KEY_DK_CHECK, check)
+                putBoolean(KEY_DK_SPLIT, true)
+                extraCommit()
+            }
+            finishDkMigration()
+            assembledDk?.fill(0)
+            assembledDk = dk
+            true
+        } finally {
+            migrationLock.unlock()
         }
-        val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
-        val check = makeCheck(dk)
-        if (!beginDkMigration()) return@withContext false
-        writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
-        commitDkMigration {
-            putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
-            putString(KEY_DK_CHECK, check)
-            putBoolean(KEY_DK_SPLIT, true)
-            extraCommit()
-        }
-        finishDkMigration()
-        assembledDk?.fill(0)
-        assembledDk = dk
-        true
     }
 
     /**
@@ -232,25 +248,31 @@ object KeyVault {
         newPassword: String,
         extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
     ): Boolean = withContext(Dispatchers.Default) {
-        recoverPendingMigration()
-        val preserved = reassembleVerified(currentPassword)
-        val dk = preserved
-            ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
-        val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
-        val check = makeCheck(dk)
-        if (!beginDkMigration()) return@withContext false
-        writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
-        commitDkMigration {
-            putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
-            putString(KEY_DK_CHECK, check)
-            putBoolean(KEY_DK_SPLIT, true)
-            extraCommit()
+        // 事务全程持锁（见 activateSplit / migrationLock 注释）
+        migrationLock.lock()
+        try {
+            recoverPendingMigration()
+            val preserved = reassembleVerified(currentPassword)
+            val dk = preserved
+                ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+            val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
+            val check = makeCheck(dk)
+            if (!beginDkMigration()) return@withContext false
+            writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
+            commitDkMigration {
+                putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
+                putString(KEY_DK_CHECK, check)
+                putBoolean(KEY_DK_SPLIT, true)
+                extraCommit()
+            }
+            finishDkMigration()
+            assembledDk?.fill(0)
+            assembledDk = dk
+            // 到达此处 = 事务已完成（含孤儿化路径：extraCommit 已随 commit 落地）
+            true
+        } finally {
+            migrationLock.unlock()
         }
-        finishDkMigration()
-        assembledDk?.fill(0)
-        assembledDk = dk
-        // 到达此处 = 事务已完成（含孤儿化路径：extraCommit 已随 commit 落地）
-        true
     }
 
     /**
@@ -267,38 +289,56 @@ object KeyVault {
         currentPassword: String,
         extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
     ): Boolean = withContext(Dispatchers.Default) {
-        recoverPendingMigration()
-        val preserved = reassembleVerified(currentPassword)
-        val dk = preserved
-            ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
-        if (!beginDkMigration()) return@withContext false
-        writeWrapped(dk)
-        commitDkMigration {
-            remove(KEY_DK_SPLIT).remove(KEY_DK_SEED).remove(KEY_DK_CHECK)
-            extraCommit()
+        // 事务全程持锁（见 activateSplit / migrationLock 注释）
+        migrationLock.lock()
+        try {
+            recoverPendingMigration()
+            val preserved = reassembleVerified(currentPassword)
+            val dk = preserved
+                ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+            if (!beginDkMigration()) return@withContext false
+            writeWrapped(dk)
+            commitDkMigration {
+                remove(KEY_DK_SPLIT).remove(KEY_DK_SEED).remove(KEY_DK_CHECK)
+                extraCommit()
+            }
+            finishDkMigration()
+            assembledDk?.fill(0)
+            assembledDk = dk
+            true
+        } finally {
+            migrationLock.unlock()
         }
-        finishDkMigration()
-        assembledDk?.fill(0)
-        assembledDk = dk
-        true
     }
 
-    /** 销毁序列配套：删除 hw_key.bin 主体文件（.bak/.tmp 由 [resetSplitState] 清） */
+    /** 销毁序列配套：删除 hw_key.bin 主体文件（.bak/.tmp 由 [resetSplitState] 清）。
+     *  持迁移锁：与在途迁移事务互斥——否则事务提交的新 prefs 值会落在
+     *  已删除的密钥文件上，产生"标记在而密钥无"的悬空态 */
     fun deleteKeyFile() {
-        runCatching { File(appContext.filesDir, DK_FILE_NAME).delete() }
+        migrationLock.lock()
+        try {
+            runCatching { File(appContext.filesDir, DK_FILE_NAME).delete() }
+        } finally {
+            migrationLock.unlock()
+        }
     }
 
     /** 销毁序列配套：清拆分状态（prefs 三键+迁移标记）与缓存；.bak/.tmp 一并删除
-     *  （hw_key.bin 主体由 [deleteKeyFile] 另行删除） */
+     *  （hw_key.bin 主体由 [deleteKeyFile] 另行删除）。持锁理由同 [deleteKeyFile] */
     fun resetSplitState() {
-        clearAssembledKey()
-        splitPrefs().edit(commit = true) {
-            remove(KEY_DK_SPLIT).remove(KEY_DK_SEED).remove(KEY_DK_CHECK)
-                .remove(KEY_DK_MIGRATION)
-        }
-        runCatching {
-            File(appContext.filesDir, "$DK_FILE_NAME.bak").delete()
-            File(appContext.filesDir, "$DK_FILE_NAME.tmp").delete()
+        migrationLock.lock()
+        try {
+            clearAssembledKey()
+            splitPrefs().edit(commit = true) {
+                remove(KEY_DK_SPLIT).remove(KEY_DK_SEED).remove(KEY_DK_CHECK)
+                    .remove(KEY_DK_MIGRATION)
+            }
+            runCatching {
+                File(appContext.filesDir, "$DK_FILE_NAME.bak").delete()
+                File(appContext.filesDir, "$DK_FILE_NAME.tmp").delete()
+            }
+        } finally {
+            migrationLock.unlock()
         }
     }
 
@@ -341,28 +381,38 @@ object KeyVault {
      *   旧值（提交原子性保证），弃新文件、备份归位 = 迁移前完整旧态
      * - pending + 无 .bak：中断于备份前，文件 prefs 均旧值，仅清标记
      * - none + .bak 存在：中断于提交后收尾前——新态已完整，前滚删备份
+     *
+     * 并发语义：tryLock 失败（迁移事务在途）时直接跳过——此刻回滚会把
+     * 在途事务撕成"新 prefs 值 + 旧文件"的坏钥组合（见 migrationLock
+     * 注释）；事务入口持锁后已先行恢复，跳过不损失任何语义。可重入：
+     * 事务内部调用时已持锁，tryLock 必成功
      */
     fun recoverPendingMigration() {
-        val prefs = splitPrefs()
-        val phase = prefs.getString(KEY_DK_MIGRATION, MIGRATION_NONE)
-        val main = File(appContext.filesDir, DK_FILE_NAME)
-        val bak = File(appContext.filesDir, "$DK_FILE_NAME.bak")
-        when {
-            phase == MIGRATION_PENDING && bak.exists() -> {
-                main.delete()
-                if (!bak.renameTo(main)) {
-                    // 归位失败（文件系统异常）：保留 .bak 等待下次恢复重试，
-                    // 不清标记（标记是恢复的依据）
-                    return
+        if (!migrationLock.tryLock()) return
+        try {
+            val prefs = splitPrefs()
+            val phase = prefs.getString(KEY_DK_MIGRATION, MIGRATION_NONE)
+            val main = File(appContext.filesDir, DK_FILE_NAME)
+            val bak = File(appContext.filesDir, "$DK_FILE_NAME.bak")
+            when {
+                phase == MIGRATION_PENDING && bak.exists() -> {
+                    main.delete()
+                    if (!bak.renameTo(main)) {
+                        // 归位失败（文件系统异常）：保留 .bak 等待下次恢复重试，
+                        // 不清标记（标记是恢复的依据）
+                        return
+                    }
+                    prefs.edit(commit = true) { putString(KEY_DK_MIGRATION, MIGRATION_NONE) }
                 }
-                prefs.edit(commit = true) { putString(KEY_DK_MIGRATION, MIGRATION_NONE) }
+                phase == MIGRATION_PENDING -> {
+                    prefs.edit(commit = true) { putString(KEY_DK_MIGRATION, MIGRATION_NONE) }
+                }
+                bak.exists() -> {
+                    bak.delete()
+                }
             }
-            phase == MIGRATION_PENDING -> {
-                prefs.edit(commit = true) { putString(KEY_DK_MIGRATION, MIGRATION_NONE) }
-            }
-            bak.exists() -> {
-                bak.delete()
-            }
+        } finally {
+            migrationLock.unlock()
         }
     }
 
