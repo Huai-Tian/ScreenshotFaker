@@ -990,9 +990,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 1 -> skipFully(8)                     // ack clipboard
                 2 -> { skipFully(2); skipFully(input.readUnsignedShort()) } // uhid output
                 3 -> {
-                    // 注入失败上报：发送端无法注入输入事件（权限被拒等）
+                    // 注入失败上报：发送端无法注入输入事件（权限被拒等）。
+                    // 上限与 type-0 一致（256K）：服务端 DeviceMessageWriter
+                    // 对 type-3 同样按 CLIPBOARD_TEXT_MAX_LENGTH（256K-5）截断，
+                    // 接收端 1024 会把超长错误文案误判为流损坏断连重连
                     val length = input.readInt()
-                    if (length < 0 || length > 1024) {
+                    if (length < 0 || length > 256 * 1024) {
                         throw IOException("implausible error length: $length")
                     }
                     val data = ByteArray(length)

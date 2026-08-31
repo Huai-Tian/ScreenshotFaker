@@ -21,10 +21,10 @@ L0  执行层（本包+native） GuardManager（JNI 桥）→ app/src/main/cpp/g
 
 * `wrappers.ConfigManager / DaemonManager / ScreenShareManager`：
 
-    * KeyVault/SensitiveStore 经 ConfigManager 读写密文 DataStore（存储介质）；
+  * KeyVault/SensitiveStore 经 ConfigManager 读写密文 DataStore（存储介质）；
 
-    * **DefenseProtocol 是 defense 包唯一允许向上引用业务服务的点**
-      （销毁必须停共享与守护进程）——新增向上引用必须先在该类头注释文档化理由。
+  * **DefenseProtocol 是 defense 包唯一允许向上引用业务服务的点**
+    （销毁必须停共享与守护进程）——新增向上引用必须先在该类头注释文档化理由。
 
 包内协作环（运行时方法调用，非初始化依赖，安全）：
 IdleWatchdog 判定命中 → DefenseProtocol 销毁 → 销毁序列回调
@@ -33,7 +33,7 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
 ## 威胁 → 防线 → 代码位置
 
 | #  | 威胁                                                                                                     | 防线                                                                                                                    | 代码位置                                                                              |
-| -- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+|----|--------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
 | 1  | root 拷走 prefs 离线爆破门禁密码                                                                                 | Keystore pepper 掺盐（脱离设备验证在数学上不可行）                                                                                     | KeyVault.getOrCreatePepper；GateManager v2/v3 验证器                                  |
 | 2  | 硬件断点内核外挂 hook 比较函数恒真，一行绕过门禁                                                                            | v3 解密式验证（无比较点可 hook，GCM tag 在密码学层）                                                                                    | GateManager.verifyV3Blob                                                          |
 | 3  | 同上——hook 常量时间比较                                                                                        | 双实现交叉验证（断点资源耗尽）+ native canary 哨兵语义自检                                                                                 | GuardManager.constantTimeEquals；guard.cpp ct\_eq\_byte/ct\_eq\_word/canary\_check |

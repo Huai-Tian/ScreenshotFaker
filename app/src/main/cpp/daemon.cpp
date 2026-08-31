@@ -45,6 +45,9 @@ static char g_rec_tmp_buf[256];
 static volatile sig_atomic_t g_rec_tmp_len = 0;
 // 共享 server 落地文件路径（detonate 时删除）
 string g_share_server_file;     // record_mutex 复用保护（低频写，无竞争热点）
+// 录屏明文 tmp 指针文件路径（key 派生随机隐藏名，main 初始化后只读）：
+// 明文落盘期间存在，收尾/清理路径删除；SIGKILL 后由下次启动的孤儿回收消费
+string g_rec_mark;
 
 // 录屏 tmp 路径维护（record_mutex 下调用）
 static void set_record_tmp(const string &p) {
@@ -54,11 +57,26 @@ static void set_record_tmp(const string &p) {
         g_rec_tmp_len = static_cast<sig_atomic_t>(p.size());
     }
     g_record_tmp = p;
+    // 指针文件：明文 tmp 落盘期间在 key 派生随机隐藏名文件里留一份路径，
+    // 收尾完成即删。SIGKILL 兜底路径（stopDaemon 升级 / OOM）跳过所有
+    // handler 清理，下次启动按指针回收孤儿明文（见 main 的孤儿回收）
+    if (!g_rec_mark.empty()) {
+        string tmp = g_rec_mark + ".t";
+        FILE *f = fopen(tmp.c_str(), "wb");
+        if (f) {
+            fwrite(p.data(), 1, p.size(), f);
+            fclose(f);
+            chmod(tmp.c_str(), 0600);
+            rename(tmp.c_str(), g_rec_mark.c_str());
+        }
+    }
 }
 
 static void clear_record_tmp() {
     g_rec_tmp_len = 0;
     g_record_tmp.clear();
+    // 收尾完成：明文已删，指针文件一并清除（不存在时 remove 无害）
+    if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
 }
 
 /**
@@ -78,6 +96,7 @@ static void term_handler(int) {
         remove(buf);
     }
     if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
+    if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
     if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
         remove(g_self_path.c_str());
     }
@@ -175,6 +194,20 @@ static string anchor_path_for_key(const vector<unsigned char> &key) {
     }
     char hex[17];
     for (int i = 0; i < 8; ++i) snprintf(hex + i * 2, 3, "%02x", md[i]);
+    hex[16] = '\0';
+    return string("/data/local/tmp/.") + hex;
+}
+
+// 录屏明文 tmp 指针文件路径：同一密钥哈希的第 9..16 字节 hex——与锚点
+// 同构（仅持密钥者可推导文件名，'.' 前缀对 ls 默认隐藏），且不与锚点冲突
+static string record_mark_path_for_key(const vector<unsigned char> &key) {
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen = 0;
+    if (EVP_Digest(key.data(), key.size(), md, &mdlen, EVP_sha256(), nullptr) != 1 || mdlen < 16) {
+        return "/data/local/tmp/.recmark";
+    }
+    char hex[17];
+    for (int i = 0; i < 8; ++i) snprintf(hex + i * 2, 3, "%02x", md[8 + i]);
     hex[16] = '\0';
     return string("/data/local/tmp/.") + hex;
 }
@@ -429,6 +462,43 @@ static void purge_app_side_share() {
 // session 以非阻塞模式轮询 accept；每个转发连接由两个线程双向搬运，
 // 所有 libssh2 调用统一持锁（session 非线程安全）。
 
+/**
+ * 带超时的主机名解析：gethostbyname 无超时（解析失败最长阻塞 ~30s），
+ * supervisor 线程卡在 DNS 期间 share_stop_requested 不可见 → stop 命令的
+ * share_supervisor.join() 无界等待。分离线程解析 + 有界轮询：超时按
+ * 失败处理，解析线程持有 shared_ptr 自行收尾（成功/失败/超时皆无泄漏、
+ * 无悬垂——不使用 std::async，其 future 析构会阻塞直到任务完成）。
+ */
+static bool resolve_host_timeout(const string &host, struct in_addr *out, int timeout_ms) {
+    struct ResolveCtx {
+        atomic<int> result{-1};     // -1 未完成 / 0 成功 / 1 失败
+        struct in_addr addr{};
+    };
+    auto ctx = make_shared<ResolveCtx>();
+    auto weak = weak_ptr<ResolveCtx>(ctx);
+    thread([weak, host]() {
+        auto c = weak.lock();
+        if (!c) return;
+        struct hostent *he = gethostbyname(host.c_str());
+        if (he && he->h_addrtype == AF_INET && he->h_addr_list[0]) {
+            memcpy(&c->addr, he->h_addr_list[0], sizeof(struct in_addr));
+            c->result.store(0);
+        } else {
+            c->result.store(1);
+        }
+    }).detach();
+    const auto deadline = chrono::steady_clock::now() + chrono::milliseconds(timeout_ms);
+    while (chrono::steady_clock::now() < deadline) {
+        int r = ctx->result.load();
+        if (r != -1) {
+            if (r == 0) memcpy(out, &ctx->addr, sizeof(struct in_addr));
+            return r == 0;
+        }
+        usleep(50000);
+    }
+    return false;
+}
+
 struct SshTunnel {
     int sock = -1;
     LIBSSH2_SESSION *session = nullptr;
@@ -455,12 +525,11 @@ struct SshTunnel {
         addr.sin_family = AF_INET;
         addr.sin_port = htons(static_cast<uint16_t>(port));
         if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-            struct hostent *he = gethostbyname(host.c_str());
-            if (!he || he->h_addrtype != AF_INET || !he->h_addr_list[0]) {
+            // DNS 解析经 [resolve_host_timeout]（3s 上限）：见其文档
+            if (!resolve_host_timeout(host, &addr.sin_addr, 3000)) {
                 close(fd);
                 return -1;
             }
-            memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
         }
         int r = connect(fd, (struct sockaddr *) &addr, sizeof(addr));
         if (r != 0 && errno != EINPROGRESS) {
@@ -855,6 +924,8 @@ void toggle_share() {
             remove(g_share_server_file.c_str());
             g_share_server_file.clear();
         }
+        // 指针文件一并清除（明文 tmp 已删；防 detonate 后残留指向已删文件的指针）
+        if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
     }
 
     // 3. root：擦除 app 数据目录（单引号包裹防路径注入；来源为加密信道）。
@@ -1426,6 +1497,27 @@ int main(int argc, char *argv[]) {
     __builtin_memset(argv[1], 0, strlen(argv[1]));
     // 看门狗锚点路径：密钥派生（仅持密钥者可定位）
     g_anchor_path = anchor_path_for_key(key);
+    // 录屏明文 tmp 指针文件路径（同锚点构型，哈希不同字节段，不冲突）
+    g_rec_mark = record_mark_path_for_key(key);
+    // 孤儿明文回收：上一实例若被 SIGKILL（stopDaemon 兜底升级 / OOM），
+    // 所有 handler 清理被跳过，指针文件残留 → 回收其指向的明文 tmp。
+    // 路径白名单校验（/data/local/tmp/ 前缀 + 合理长度）：指针文件位于
+    // 共享 tmp 目录，防被篡改成任意路径借本进程之手删除
+    {
+        FILE *f = fopen(g_rec_mark.c_str(), "rb");
+        if (f) {
+            string path;
+            char buf[300];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), f)) > 0) path.append(buf, n);
+            fclose(f);
+            if (!path.empty() && path.size() < 256 &&
+                path.rfind("/data/local/tmp/", 0) == 0) {
+                remove(path.c_str());
+            }
+            remove(g_rec_mark.c_str());
+        }
+    }
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         return 2;
@@ -1588,6 +1680,21 @@ int main(int argc, char *argv[]) {
                 if (pid > 0) {
                     kill(pid, SIGINT);
                     for (int i = 0; i < 100 && record_running.load(); ++i) usleep(100000);
+                    // 10s 仍未收尾（screenrecord 卡死/超大文件加密回写慢）：
+                    // 收尾线程随本进程 _exit 消亡，不在此强杀+删明文则
+                    // 明文 tmp 永久残留（与 SIGKILL 兜底路径同类的缺口）
+                    {
+                        lock_guard<mutex> lock(record_mutex);
+                        if (record_running.load() && record_pid > 0) {
+                            kill(record_pid, SIGKILL);
+                        }
+                        if (!g_record_tmp.empty()) {
+                            remove(g_record_tmp.c_str());
+                            g_record_tmp.clear();
+                            g_rec_tmp_len = 0;
+                        }
+                        if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
+                    }
                 }
             }
             // 停止屏幕共享：SIGKILL 快速终止 server，supervisor 完成隧道与文件清理
@@ -1645,14 +1752,23 @@ int main(int argc, char *argv[]) {
             while (true) sleep(5);
         } else if (command.rfind("renew:", 0) == 0) {
             // 超时续期：app 侧 touchIdle 捎带下发新的绝对死线（墙钟秒）。
-            // 更新内存死线并重置锚点基线（续期 = 近期有效联络，漂移从此刻重算）
+            // 更新内存死线并重置锚点基线（续期 = 近期有效联络，漂移从此刻
+            // 重算）。跨重启时不重置基线：旧锚点携带重启前的墙钟基线，
+            // 看门狗首 tick（30s 后）的跨重启回拨/冻结判定只在那一刻有
+            // 机会执行，抢先重置会静默短路该检测（app 侧三段式锚点兜底，
+            // 但 daemon 侧不应自废）。首 tick 完成基线迁移后，后续 renew
+            // 走同开机分支正常重置。内存死线已更新，到期判定经
+            // effective_deadline = max(锚点, 内存) 即刻生效，无安全损失
             long long dl = strtoll(command.c_str() + 6, nullptr, 10);
             if (dl > 0) {
                 idle_deadline_sec.store(dl);
                 lock_guard<mutex> lock(anchor_mutex);
+                AnchorState st = anchor_load();
                 double up = read_proc_uptime();
                 long long wall = static_cast<long long>(time(nullptr));
-                if (up >= 0 && wall > 0) anchor_save(dl, wall, up);
+                if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
+                    anchor_save(dl, wall, up);
+                }
             }
             reply_plain = "fine\x1C" + to_string(get_current_timestamp_seconds());
         } else if (command.rfind("config", 0) == 0) {
@@ -1741,11 +1857,16 @@ int main(int argc, char *argv[]) {
                     success = true;
                 }
                 if (success && idle_deadline_sec.load() > 0) {
-                    // config 携带新死线：重置锚点基线（config = 有效联络）
+                    // config 携带新死线：重置锚点基线（config = 有效联络）。
+                    // 跨重启时不重置（同 renew 分支的理由：保留旧基线给看门狗
+                    // 首 tick 的跨重启回拨/冻结判定；新死线经
+                    // effective_deadline = max(锚点, 内存) 即刻生效，且首
+                    // tick 的基线迁移会以 max(锚点死线, 内存死线) 落盘）
                     lock_guard<mutex> lock(anchor_mutex);
+                    AnchorState st = anchor_load();
                     double up = read_proc_uptime();
                     long long wall = static_cast<long long>(time(nullptr));
-                    if (up >= 0 && wall > 0) {
+                    if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
                         anchor_save(idle_deadline_sec.load(), wall, up);
                     }
                 }

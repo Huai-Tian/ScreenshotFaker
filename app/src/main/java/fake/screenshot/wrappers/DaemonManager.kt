@@ -151,9 +151,15 @@ object DaemonManager {
             }
             return !daemonProcessAlive()
         }
-        // 发送成功，等待进程退出
-        repeat(20) {
-            if (!isDaemonRunning()) return true
+        // 发送成功，等待进程真正退出。daemon 收尾最长可达 10s（录屏 SIGINT
+        // 后等加密回写）+ 共享 supervisor 隧道拆除，旧 2s 窗口会在收尾仍在
+        // 进行时提前判活/误判失败：端口变更流程（依赖本返回值决定是否拉起
+        // 第二实例）会在旧实例仍占端口时就继续。对齐为 15s。
+        // 探测用单次 status（retries=1，不重试）：stop 已被接受后命令线程被
+        // 收尾阻塞（3s 超时 → 无响应）或进程已退出（连接拒绝），无响应即
+        // 视为停止中/已停止——不必与正常运行的慢响应区分
+        repeat(150) {
+            if (sendCommand("status", retries = 1)?.startsWith("Working") != true) return true
             delay(100.milliseconds)
         }
         return false

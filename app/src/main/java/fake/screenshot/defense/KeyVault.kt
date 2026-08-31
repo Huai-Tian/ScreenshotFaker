@@ -91,11 +91,15 @@ object KeyVault {
 
     /**
      * DK 当前是否可用：
-     * 拆分激活 = 需本会话已解锁组装；单段 = 恒可用（读盘按需）。
+     * 拆分激活 = 需本会话已解锁组装；单段 = 文件缺失（首用按需生成）或
+     * 存在且可解。文件存在但解不开（Keystore 条目丢失）时如实报未就绪，
      * 磁贴在 encrypt_outputs 开启时先查此标志，未就绪直接放弃（fail-closed，
-     * 绝不退化为明文落盘）
+     * 绝不退化为明文落盘，也绝不静默轮换 DK 孤儿化全部密文）
      */
-    fun isDaemonKeyReady(): Boolean = if (isSplitActive()) assembledDk != null else true
+    fun isDaemonKeyReady(): Boolean = if (isSplitActive()) assembledDk != null else {
+        val file = File(appContext.filesDir, DK_FILE_NAME)
+        !file.exists() || readStoredPart() != null
+    }
 
     /** 清会话内 DK（锁定/销毁序列/状态重置；SecretKeySpec 内部副本交由 GC，已知边界） */
     fun clearAssembledKey() {
@@ -109,7 +113,7 @@ object KeyVault {
      */
     fun getDaemonKeyOrNull(): SecretKeySpec? {
         if (isSplitActive()) return assembledDk?.let { SecretKeySpec(it, "AES") }
-        return SecretKeySpec(getOrCreateUnsplitDk(), "AES")
+        return getOrCreateUnsplitDk()?.let { SecretKeySpec(it, "AES") }
     }
 
     // ===================== DK 加解密入口（业务侧） =====================
@@ -146,7 +150,10 @@ object KeyVault {
         runCatching { recoverPendingMigration() }
         if (!isSplitActive()) {
             assembledDk?.fill(0)
-            assembledDk = getOrCreateUnsplitDk()
+            // 单段文件存在但解不开（Keystore 条目丢失）→ fail-closed，
+            // 不静默轮换 DK（旧密文全部孤儿化）
+            val dk = getOrCreateUnsplitDk() ?: return@withContext false
+            assembledDk = dk
             return@withContext true
         }
         val a = readStoredPart() ?: return@withContext false
@@ -424,12 +431,27 @@ object KeyVault {
             // 提前 false——否则常量版 dk_check（恰在 pepper 不可用期间写出）
             // 永远验不过：下方常量回退比较在其唯一被需要的时刻不可达，
             // 正确安全密码也无法组装 DK，改密自救会判为胁迫 → DK 孤儿化
+            val pepper = getOrCreatePepper()
             val withPepper = DK_CHECK_PLAINTEXT.toByteArray(Charsets.UTF_8) +
-                    (getOrCreatePepper() ?: ByteArray(0))
-            GuardManager.constantTimeEquals(plain, withPepper) ||
-                    GuardManager.constantTimeEquals(
-                        plain, DK_CHECK_PLAINTEXT.toByteArray(Charsets.UTF_8)
-                    )
+                    (pepper ?: ByteArray(0))
+            if (GuardManager.constantTimeEquals(plain, withPepper)) return@runCatching true
+            if (GuardManager.constantTimeEquals(
+                    plain, DK_CHECK_PLAINTEXT.toByteArray(Charsets.UTF_8)
+                )
+            ) {
+                // 常量版命中（存量升级或 pepper 故障窗口产出）且 pepper 当前
+                // 可用：就地把 dk_check 重写为 pepper 版——离线试密码防护
+                // 不必等到下次改密才生效（验证通过即 dk 正确，重写安全）
+                if (pepper != null) {
+                    runCatching {
+                        splitPrefs().edit(commit = true) {
+                            putString(KEY_DK_CHECK, makeCheck(dk))
+                        }
+                    }
+                }
+                return@runCatching true
+            }
+            false
         }.getOrDefault(false)
     }
 
@@ -461,9 +483,19 @@ object KeyVault {
         }.getOrNull()
     }
 
-    /** 单段模式：读（或首次生成）完整 DK；解包失败重生回写（旧版语义） */
-    private fun getOrCreateUnsplitDk(): ByteArray {
-        readStoredPart()?.let { return it }
+    /**
+     * 单段模式：读（或文件缺失时首次生成）完整 DK。
+     * 文件存在但解不开（典型：备份迁移后 hw_key.bin 随文件回来而
+     * AndroidKeyStore 条目不随备份迁移）→ fail-closed 返回 null：
+     * 旧版"静默重生新 DK 覆盖"会让全部 `_sec` 密文与既有加密产物永久
+     * 孤儿化，且"已配置但不可解"与"未配置"不可区分。调用方按
+     * fail-closed 处理；用户删除损坏文件后下次调用即走首建分支
+     */
+    private fun getOrCreateUnsplitDk(): ByteArray? {
+        val file = File(appContext.filesDir, DK_FILE_NAME)
+        if (file.exists()) {
+            return readStoredPart()
+        }
         val dk = ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
         writeWrapped(dk)
         return dk
