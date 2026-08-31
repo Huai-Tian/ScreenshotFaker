@@ -85,8 +85,9 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
 
     // ---- 会话自动锁定（DK 驻留窗口收窄）----
     // SIGSTOP 先手 dump 的可利用窗口 = DK 在内存的时间。锁定触发：
-    // 息屏立即 / 后台 30s 宽限 / 前台无操作 5min。锁定后磁贴与敏感功能
-    // 经 isDaemonKeyReady/isSensitiveConfigured fail-closed，超时计时不受影响
+    // 息屏立即（进程级注册，见 LSPosedServiceManager）/ 后台 30s 宽限 /
+    // 前台无操作 5min。锁定后磁贴与敏感功能经 isDaemonKeyReady/
+    // isSensitiveConfigured fail-closed，超时计时不受影响
     companion object {
         private const val LOCK_FOREGROUND_IDLE_MS = 5 * 60_000L
         private const val LOCK_BACKGROUND_MS = 30_000L
@@ -97,15 +98,6 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
 
     /** 本实例生命周期内解锁过（锁定后回前台重建门禁页的判定依据） */
     private var everUnlocked = false
-
-    private val screenOffReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                // 息屏立即清 DK（不 recreate：回前台由 onStart 一致性检查重建门禁）
-                GateManager.lockSession()
-            }
-        }
-    }
     val listener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResults ->
         if (requestCode == 1 && grantResults == PackageManager.PERMISSION_GRANTED) {
             isShellActivated = true
@@ -136,11 +128,9 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         // 超时销毁冷启动判定（雷管/超期检测 + 可能的销毁），一切配置加载之前；
         // 销毁同步等待完成，防止主界面读到半销毁状态
         runBlocking { IdleWatchdog.checkIdleExpired() }
-        // 息屏锁定（动态注册，随实例销毁）
-        androidx.core.content.ContextCompat.registerReceiver(
-            this, screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF),
-            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
-        )
+        // 息屏锁定已上移至 LSPosedServiceManager（进程级注册）：
+        // Activity 级注册在用户按返回键 finish 后注销，此后息屏不再
+        // 触发锁定——DK 与信道密钥缓存随进程存活无限驻留
         // 无操作计时的基准：以启动时刻初始化（否则默认 0 会让解锁后
         // 首个心跳 tick 误判"已无操作超时"立即锁定）
         lastInteractionEr = SystemClock.elapsedRealtime()
@@ -304,7 +294,6 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
 
     override fun onDestroy() {
         super.onDestroy()
-        runCatching { unregisterReceiver(screenOffReceiver) }
         Shizuku.removeRequestPermissionResultListener(listener)
         Shizuku.removeBinderDeadListener(deadListener)
         Shizuku.removeBinderReceivedListener(receivedListener)
@@ -427,6 +416,23 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         super.onCreate()
         XposedServiceHelper.registerListener(this)
         AeadConfig.register()
+        // 息屏锁定（进程级注册）：原实现注册在 MainActivity，用户解锁后
+        // 按返回键 finish Activity（进程因 FGS/缓存存活）即注销——此后
+        // 息屏不再锁定，DK 与信道密钥缓存随进程无限驻留，击穿防线 #10
+        // 声称的"DK 驻留窗口收窄"。Application 级注册随进程存活全程有效
+        //（lockSession 幂等：未解锁态下无操作，重复触发无害）
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                        GateManager.lockSession()
+                    }
+                }
+            },
+            IntentFilter(Intent.ACTION_SCREEN_OFF),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         // 通知渠道随机化在两个悬浮窗服务的 createNotification 内联完成
         //（明文 prefs 同步读，缺失键就地落盘随机值）——渠道只在服务创建
         // 通知时建立、随服务销毁删除，任何入口（含服务先于 Activity 的

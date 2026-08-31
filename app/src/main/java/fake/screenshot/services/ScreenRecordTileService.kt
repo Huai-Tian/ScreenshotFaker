@@ -246,7 +246,9 @@ class ScreenRecordTileService : TileService() {
                     }
                     val tempFile = File(tempPath + temp)
                     if (tempFile.exists()) {
-                        Auxiliary.exec("chmod 444 ${tempPath + temp}")
+                        // 444 维持（勿改 400，理由见 ScreenshotTileService：
+                        // shell/root 写 + app 读的跨 uid 链路）
+                        Auxiliary.exec("chmod 444 '$tempPath$temp'")
                         val encrypted = File("$save/$file")
                         KeyVault.encryptFileByKeystore(tempFile, encrypted)
                     }
@@ -294,7 +296,9 @@ class ScreenRecordTileService : TileService() {
                     if (isEncrypting) return@launch
                     isEncrypting = true
                     try {
-                        Auxiliary.exec("chmod 444 ${tempPath + temp}")
+                        // 444 维持（勿改 400，理由见 ScreenshotTileService：
+                        // shell/root 写 + app 读的跨 uid 链路）
+                        Auxiliary.exec("chmod 444 '$tempPath$temp'")
                         File(tempPath + temp).apply {
                             val encrypted = File("$save/$file")
                             KeyVault.encryptFileByKeystore(this, encrypted)

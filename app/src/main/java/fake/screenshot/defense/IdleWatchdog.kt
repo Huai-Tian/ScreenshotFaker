@@ -77,19 +77,34 @@ object IdleWatchdog {
 
     /**
      * idle 密文状态快照。
-     * readable=false 表示 DataStore/Tink 解密失败（密钥已死或密文损坏），
-     * 调用方按"已销毁/被篡改"处理——绝不能让异常直接逃逸导致启动崩溃循环。
+     * - readable=true：正常读取
+     * - readable=false 且 retryable=false：DataStore/Tink 解密失败（密钥已死
+     *   或密文损坏），调用方按"已销毁/被篡改"处理
+     * - readable=false 且 retryable=true：DataStore **基础设施**异常
+     *   （IllegalStateException——并发构造冲突/scope 状态错误等），绝非密文
+     *   损坏。原实现的 catch-all 把它折叠为 readable=false 会让无头检查
+     *   （Boot/Alarm）对完全健康的数据执行 8 步销毁。此类异常按"本轮无法
+     *   判定"放行（不引爆、不 touch），判定推迟到下一个触发点——
+     *   推迟销毁的代价远低于误毁
+     * 任何情况下异常都不得逃逸导致启动崩溃循环。
      */
-    private data class IdleState(val readable: Boolean, val limit: Long, val ts: String)
+    private data class IdleState(
+        val readable: Boolean, val retryable: Boolean = false,
+        val limit: Long = 0L, val ts: String = ""
+    )
 
     private suspend fun readIdleState(): IdleState = try {
         IdleState(
-            true,
+            true, false,
             ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_LIMIT, 0L),
             ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_TS, "")
         )
+    } catch (e: IllegalStateException) {
+        // 基础设施状态错误（构造竞态/scope 冲突）：与密文内容无关
+        IdleState(false, retryable = true)
     } catch (_: Exception) {
-        IdleState(false, 0L, "")
+        // Tink 解密失败（GeneralSecurityException）等：密钥已死/密文损坏
+        IdleState(false, false, 0L, "")
     }
 
     /**
@@ -103,9 +118,19 @@ object IdleWatchdog {
     /**
      * 写入三段式锚点：boot,elapsedRealtime,currentTimeMillis。
      * boot 显式区分开机周期——er 跨开机比较无意义，禁止用 er 大小猜测是否重启。
+     *
+     * 错误墙钟守卫：RTC 掉电/无网/关闭自动时间的设备墙钟可能停在
+     * WC0_MIN 之前——垃圾 wc0 一旦写入，下一次检查即引爆（wc0<WC0_MIN
+     * 判篡改）。拒绝写入（锚点保持旧值：旧锚点与本机 er 同开机时漂移
+     * 校验照常，跨开机时墙钟判定继续用旧 wc0——时钟恢复后自愈）。
+     * 时钟恢复（NTP/手动）后的前向跳变由 ANCHOR_DRIFT_TOLERANCE 吸收
+     * 不了的情形同样依赖此守卫：错钟期间没写过锚点，就不会有
+     * "错钟 wc0 + 校正后 wall"的超漂移误判。
      */
     private suspend fun writeAnchor() {
-        val ts = "${readBootCount()},${SystemClock.elapsedRealtime()},${System.currentTimeMillis()}"
+        val wc = System.currentTimeMillis()
+        if (wc < WC0_MIN) return
+        val ts = "${readBootCount()},${SystemClock.elapsedRealtime()},$wc"
         runCatching { ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_TS, ts) }
     }
 
@@ -162,6 +187,10 @@ object IdleWatchdog {
         if (!isIdleArmed()) return false
 
         val st = readIdleState()
+        // 基础设施异常（DataStore 构造竞态/scope 状态错）：绝非密文损坏，
+        // 引爆判定推迟到下一触发点（不引爆、不 touch、不布防——防误毁
+        // 优先于销毁及时性；ConfigManager 已加构造互斥，此为纵深兜底）
+        if (!st.readable && st.retryable) return false
         // 密文不可读（Tink/Keystore 已死或密文损坏）：按已销毁处理，走销毁复位，
         // 不让异常逃逸造成崩溃循环
         if (!st.readable) {
@@ -184,6 +213,13 @@ object IdleWatchdog {
         val boot = readBootCount()
         val er = SystemClock.elapsedRealtime()
         val wc = System.currentTimeMillis()
+        // 当前墙钟明显不可信（RTC 耗尽回到出厂值/1970，NTP 未及恢复）：
+        // 此时一切 wc 判定（倒退/漂移/跨重启到期）均无意义，继续走必然
+        // 引爆真实用户。推迟判定到时钟恢复后的下一触发点。安全代价：
+        // 攻击者持续冻结时钟在 <2020 可使跨重启墙钟判定失效——但同开机
+        // 死线判定只依赖 er 不受影响，且"冻结时钟至不可用状态"与已声明
+        // 边界（force-stop / 禁用 receiver）同级，防误毁优先
+        if (wc < WC0_MIN) return false
         val parts = st.ts.split(",")
 
         // 通过路径的到期剩余毫秒（布防闹钟用；null = 不布防）
@@ -380,7 +416,10 @@ object IdleWatchdog {
      * "limit>0 而 ts 空"不可达，出现即篡改（雷管覆盖）。
      */
     suspend fun setIdleTimeout(minutes: Long) {
-        prefs().edit { putBoolean(KEY_ARMED, true) }
+        // commit（同步落盘）：与注释"先立于不败"的时序声明一致——
+        // apply 异步落盘在写入后数毫秒内进程死亡会丢失哨兵（无门禁
+        // 用户启用超时后 app 侧超时静默失效）
+        prefs().edit(commit = true) { putBoolean(KEY_ARMED, true) }
         writeAnchor()
         ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_LIMIT, minutes)
         DaemonManager.renewIdleDeadline(minutes)

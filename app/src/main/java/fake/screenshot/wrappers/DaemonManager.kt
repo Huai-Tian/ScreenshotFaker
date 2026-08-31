@@ -58,7 +58,14 @@ object DaemonManager {
     }
 
     suspend fun startDaemon(): Boolean = mutex.withLock {
-        if (isDaemonRunning()) return true
+        if (isDaemonRunning()) {
+            // 已运行的实例也补发一次 config：上次启动若 2s 探测超时，
+            // syncConfig 从未送达——daemon 侧看门狗的死线引爆以
+            // config_synced 为前提（陈旧锚点宽限），config 补发即时
+            // 重置其锚点死线。幂等无害（daemon 侧 config 处理可重入）
+            syncConfig()
+            return true
+        }
 
         val port = getPort()
 
@@ -201,7 +208,12 @@ object DaemonManager {
                         // 2. 读取响应
                         val `in` = DataInputStream(socket.getInputStream())
                         val respLen = `in`.readInt()
-                        if (respLen <= 0) return@context null
+                        // 与 daemon 侧 recv_encrypted 的 65536 上限对等：daemon
+                        // 死亡后本地恶意进程可抢占端口回发巨型长度——
+                        // ByteArray(huge) 抛 OutOfMemoryError（Error 不被
+                        // catch(Exception) 捕获）直接崩溃 app（合法响应最长
+                        // 为 detail 命令输出，数千字节量级）
+                        if (respLen <= 0 || respLen > 65536) return@context null
                         val respData = ByteArray(respLen)
                         `in`.readFully(respData)
 

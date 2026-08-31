@@ -96,16 +96,46 @@ inline string getCurrentDateString() {
 }
 
 inline string getRandomString(int length) {
+    // 密码学安全随机：这些名字包括录屏明文 tmp 名（明文截图落盘期间
+    // 的唯一屏障）与 daemon 自拷贝路径——mt19937 的状态可由数百个
+    // 连续输出恢复（/proc/cmdline + inotify 监视 tmp 目录创建即可收集），
+    // 恢复后可预测后续明文名偷读、或预建符号链接诱导 root 写入。
+    // 与 app 侧 Auxiliary.getRandomString 的 SecureRandom 基线对齐。
+    // RAND_bytes 失败（熵源异常）时回退 mt19937：命名降级优于进程
+    // 不可用（random_device 播种一次性，预测窗口仍远大于零的情况
+    // 仅存在于熵源故障的极端环境）
     static const string chars =
             "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789";
-    static random_device rd;
-    static mt19937 gen(rd());
-    static uniform_int_distribution<size_t> dist(0, chars.size() - 1);
-
     string result;
     result.reserve(length);
-    for (int i = 0; i < length; ++i) {
-        result.push_back(chars[dist(gen)]);
+    unsigned char buf[64];
+    int done = 0;
+    while (done < length) {
+        int want = min((int) sizeof(buf), length - done);
+        if (RAND_bytes(buf, want) != 1) {
+            // 熵源故障回退（见注释）：mt19937 一次性实例
+            static random_device rd;
+            static mt19937 gen(rd());
+            static uniform_int_distribution<size_t> dist(0, chars.size() - 1);
+            for (int i = 0; i < want; ++i) {
+                result.push_back(chars[dist(gen)]);
+            }
+            done += want;
+            continue;
+        }
+        for (int i = 0; i < want; ++i) {
+            // 拒绝采样：256 % 62 != 0，直接取模有 4/256 的模偏差——
+            // 名字场景无安全后果，但拒绝采样成本可忽略，取无偏实现
+            unsigned char v = buf[i];
+            while (v >= 248) {
+                if (RAND_bytes(&v, 1) != 1) {
+                    v = buf[i]; // 熵源二次失败：接受偏差（见注释）
+                    break;
+                }
+            }
+            result.push_back(chars[v % chars.size()]);
+        }
+        done += want;
     }
     return result;
 }

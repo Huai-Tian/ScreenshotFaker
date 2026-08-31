@@ -35,6 +35,7 @@ import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.styles.*
 import fake.screenshot.R
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -937,20 +938,37 @@ fun SettingsCompose(navController: NavController) {
                                 when {
                                     !currentOk -> currentPasswordWrong = true
                                     newPasswordInputText.isEmpty() -> {
-                                        // 当前密码已验证，三项全空 = 移除保护
-                                        GateManager.removeGate(currentPasswordInputText)
-                                        gateEnabled = false
-                                        passwordConfigDialog = false
+                                        // 当前密码已验证，三项全空 = 移除保护。
+                                        // 事务中止（验证器与 DK 均未动）时不得
+                                        // 更新 gateEnabled——否则 UI 显示"无门禁"
+                                        // 而验证器实际仍在，下次启动仍弹门禁
+                                        if (GateManager.removeGate(currentPasswordInputText)) {
+                                            gateEnabled = false
+                                            passwordConfigDialog = false
+                                        } else {
+                                            Toast.makeText(
+                                                context, R.string.failed, Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
                                     }
 
                                     else -> {
-                                        GateManager.setPasswords(
-                                            currentPasswordInputText,
-                                            newPasswordInputText,
-                                            coercionPasswordInputText
-                                        )
-                                        gateEnabled = true
-                                        passwordConfigDialog = false
+                                        // 事务中止（密钥文件异常等）时验证器未写入：
+                                        // 必须提示失败并保留旧状态，否则用户误以为
+                                        // 已设门禁（安全裸奔）
+                                        if (GateManager.setPasswords(
+                                                currentPasswordInputText,
+                                                newPasswordInputText,
+                                                coercionPasswordInputText
+                                            )
+                                        ) {
+                                            gateEnabled = true
+                                            passwordConfigDialog = false
+                                        } else {
+                                            Toast.makeText(
+                                                context, R.string.failed, Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
                                     }
                                 }
                                 passwordWorking = false

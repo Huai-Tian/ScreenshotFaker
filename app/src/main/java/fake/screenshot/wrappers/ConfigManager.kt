@@ -74,28 +74,39 @@ object ConfigManager {
 
     private fun getEncryptedDataStore(context: Context): DataStore<Preferences> {
         val appContext = context.applicationContext
-        return dataStoreCache.getOrPut(appContext) {
-            val keysetManager = AndroidKeysetManager.Builder()
-                .withSharedPref(appContext, KEYSTORE_PREF_NAME, "tink_prefs")
-                .withKeyTemplate(KeyTemplates.get("AES256_GCM"))
-                .withMasterKeyUri(MASTER_KEY_URI)
-                .build()
+        // 构造互斥：Kotlin ConcurrentMap.getOrPut 是"先构造后 putIfAbsent"，
+        // 两个线程并发首访会各自构造 DataStore 实例——同文件第二个实例构造
+        // 即抛 IllegalStateException("multiple DataStores active")。该异常
+        // 曾被 IdleWatchdog.readIdleState 的 catch-all 吞成"密文不可读"并
+        // 触发无头销毁（Boot/Alarm 侧 IO 协程与 MainActivity.touchIdle 并发
+        // 首访的毫秒级窗口）。串行化后第二线程直接命中缓存。
+        // 锁只覆盖首访构造（含 Keystore/Tink 初始化，~100-500ms 一次性），
+        // 与 resetForCoercion 的 synchronized(this) 同一把锁，销毁轮换
+        // ref 期间不会并发构造。
+        synchronized(this) {
+            return dataStoreCache.getOrPut(appContext) {
+                val keysetManager = AndroidKeysetManager.Builder()
+                    .withSharedPref(appContext, KEYSTORE_PREF_NAME, "tink_prefs")
+                    .withKeyTemplate(KeyTemplates.get("AES256_GCM"))
+                    .withMasterKeyUri(MASTER_KEY_URI)
+                    .build()
 
-            val aead = keysetManager.keysetHandle.getPrimitive(
-                RegistryConfiguration.get(),
-                Aead::class.java
-            )
+                val aead = keysetManager.keysetHandle.getPrimitive(
+                    RegistryConfiguration.get(),
+                    Aead::class.java
+                )
 
-            val serializer = AeadSerializer(
-                aead = aead,
-                wrappedSerializer = PreferencesFileSerializer,
-                associatedData = "fake.screenshot".encodeToByteArray()
-            )
+                val serializer = AeadSerializer(
+                    aead = aead,
+                    wrappedSerializer = PreferencesFileSerializer,
+                    associatedData = "fake.screenshot".encodeToByteArray()
+                )
 
-            DataStoreFactory.create(
-                serializer = serializer,
-                produceFile = { dataStoreFile(appContext, currentDataRef(appContext)) }
-            )
+                DataStoreFactory.create(
+                    serializer = serializer,
+                    produceFile = { dataStoreFile(appContext, currentDataRef(appContext)) }
+                )
+            }
         }
     }
 

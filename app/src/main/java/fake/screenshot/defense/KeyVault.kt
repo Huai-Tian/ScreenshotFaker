@@ -170,18 +170,45 @@ object KeyVault {
      * A' = DK ⊕ B(newPassword) 落盘。全程走迁移事务协议——任意点崩溃
      * 由 [recoverPendingMigration] 回滚到迁移前自洽旧态，不再孤儿化。
      * 事务失败（备份 rename 失败等）中止且旧态完整，返回 false。
+     *
+     * [extraCommit]：调用方（GateManager 设密）随迁移同一次 commit 落地的
+     * 其他 prefs 键——用于把"新验证器"与"新 DK 状态"绑成同一原子单元，
+     * 封堵"验证器已换新密码、DK 仍被旧密码包裹"的跨层不一致窗口
+     * （该窗口下旧密码无处可验证 → 后续任何改密必然 DK 孤儿化）。
+     * 事务中止时 extraCommit 一并不落地（改密失败优于数据孤儿化）。
+     *
+     * 单段文件存在但解不开（Keystore 条目丢失）→ 中止返回 false（不重生：
+     * 静默轮换 DK 会让全部 `_sec` 密文孤儿化；与 getOrCreateUnsplitDk 的
+     * fail-closed 语义对齐）。
      */
-    suspend fun activateSplit(newPassword: String): Boolean = withContext(Dispatchers.Default) {
+    suspend fun activateSplit(
+        newPassword: String,
+        extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
+    ): Boolean = withContext(Dispatchers.Default) {
         recoverPendingMigration()
-        val dk = assembledDk ?: readStoredPart()
-        ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+        val existing = readStoredPart()
+        val fileExists = File(appContext.filesDir, DK_FILE_NAME).exists()
+        // 会话已组装（最权威）→ 单段文件可解 → 文件缺失（首建，正确重生）
+        // → 文件存在但解不开（中止，防孤儿化，见方法注释）
+        val dk: ByteArray
+        if (assembledDk != null) {
+            dk = assembledDk!!
+        } else if (existing != null) {
+            dk = existing
+        } else if (fileExists) {
+            return@withContext false
+        } else {
+            dk = ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+        }
         val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
+        val check = makeCheck(dk)
         if (!beginDkMigration()) return@withContext false
         writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
         commitDkMigration {
             putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
-            putString(KEY_DK_CHECK, makeCheck(dk))
+            putString(KEY_DK_CHECK, check)
             putBoolean(KEY_DK_SPLIT, true)
+            extraCommit()
         }
         finishDkMigration()
         assembledDk?.fill(0)
@@ -195,46 +222,65 @@ object KeyVault {
      * （软销毁语义：门禁可继续用，历史硬件加密产物永久不可解——与门禁层
      * 胁迫行为方向一致，且确定性不依赖缓存状态）。迁移事务化：重拆中断
      * 回滚到旧拆分态（旧密码继续有效），不产生半新半旧状态。
-     * @return true = 保留了原 DK
+     *
+     * [extraCommit] 语义见 [activateSplit]：新验证器与新 DK 同 commit 原子
+     * 落地；事务中止（begin 失败）时验证器一并不写。
+     * @return true = 事务完成（含孤儿化路径）；false = 事务中止（一切未动）
      */
-    suspend fun resplit(currentPassword: String, newPassword: String): Boolean =
-        withContext(Dispatchers.Default) {
-            recoverPendingMigration()
-            val preserved = reassembleVerified(currentPassword)
-            val dk = preserved
-                ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
-            val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
-            if (!beginDkMigration()) return@withContext preserved != null
-            writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
-            commitDkMigration {
-                putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
-                putString(KEY_DK_CHECK, makeCheck(dk))
-                putBoolean(KEY_DK_SPLIT, true)
-            }
-            finishDkMigration()
-            assembledDk?.fill(0)
-            assembledDk = dk
-            preserved != null
+    suspend fun resplit(
+        currentPassword: String,
+        newPassword: String,
+        extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
+    ): Boolean = withContext(Dispatchers.Default) {
+        recoverPendingMigration()
+        val preserved = reassembleVerified(currentPassword)
+        val dk = preserved
+            ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
+        val seed = ByteArray(DK_SEED_LENGTH).also { SecureRandom().nextBytes(it) }
+        val check = makeCheck(dk)
+        if (!beginDkMigration()) return@withContext false
+        writeWrapped(xorBytes(dk, derivePartB(newPassword, seed)))
+        commitDkMigration {
+            putString(KEY_DK_SEED, Base64.encodeToString(seed, Base64.NO_WRAP))
+            putString(KEY_DK_CHECK, check)
+            putBoolean(KEY_DK_SPLIT, true)
+            extraCommit()
         }
+        finishDkMigration()
+        assembledDk?.fill(0)
+        assembledDk = dk
+        // 到达此处 = 事务已完成（含孤儿化路径：extraCommit 已随 commit 落地）
+        true
+    }
 
     /**
      * 解除拆分（移除门禁）：以 currentPassword 重组 DK（校验失败 → 孤儿化重生成），
      * 完整 DK 落盘回单段模式。迁移事务化：中断回滚到拆分态（保持拆分，
      * 门禁仍可用），不出现"单段标记+密钥段文件"的坏钥组合。
+     *
+     * [extraCommit] 语义见 [activateSplit]：验证器删除与 DK 落回单段同
+     * commit——封堵"验证器已删、DK 仍拆分"窗口（该窗口下无门禁 →
+     * assembleDaemonKey 永不被调用 → DK 功能永久失效）。
+     * 事务中止时验证器一并不删（移除门禁失败优于密钥状态死锁）。
      */
-    suspend fun deactivateSplit(currentPassword: String) = withContext(Dispatchers.Default) {
+    suspend fun deactivateSplit(
+        currentPassword: String,
+        extraCommit: android.content.SharedPreferences.Editor.() -> Unit = {}
+    ): Boolean = withContext(Dispatchers.Default) {
         recoverPendingMigration()
         val preserved = reassembleVerified(currentPassword)
         val dk = preserved
             ?: ByteArray(DK_LENGTH).also { SecureRandom().nextBytes(it) }
-        if (!beginDkMigration()) return@withContext
+        if (!beginDkMigration()) return@withContext false
         writeWrapped(dk)
         commitDkMigration {
             remove(KEY_DK_SPLIT).remove(KEY_DK_SEED).remove(KEY_DK_CHECK)
+            extraCommit()
         }
         finishDkMigration()
         assembledDk?.fill(0)
         assembledDk = dk
+        true
     }
 
     /** 销毁序列配套：删除 hw_key.bin 主体文件（.bak/.tmp 由 [resetSplitState] 清） */

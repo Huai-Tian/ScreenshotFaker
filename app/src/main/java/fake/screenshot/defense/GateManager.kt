@@ -86,15 +86,20 @@ object GateManager {
     /**
      * 会话锁定：清 DK 与解锁标记（DK 驻留窗口收窄——SIGSTOP 先手 dump
      * 的可利用窗口从"解锁后无限期"压缩到"前台活跃使用中"）。
-     * 触发：息屏立即 / 后台 30s / 前台无操作 5min（MainActivity）。
+     * 触发：息屏立即 / 后台 30s / 前台无操作 5min。
      * 磁贴与敏感功能经 KeyVault.isDaemonKeyReady/SensitiveStore
      * 自然 fail-closed；touchIdle 因未解锁拒绝续期——锁定对计时器透明，
      * 超时自毁不受影响。
+     * 信道密钥缓存（DaemonManager.cachedKey）一并清除：它是 DK 的
+     * SecretKeySpec 强引用副本，不清则锁定后整把 DK 仍以活跃引用驻留
+     * 堆中（不属于"SecretKeySpec 副本受 GC 限制"的已声明边界——那指
+     * 无引用后的残留，这是可达引用）
      */
     fun lockSession() {
         if (!sessionUnlocked) return
         sessionUnlocked = false
         KeyVault.clearAssembledKey()
+        DaemonManager.clearCachedKey()
     }
 
     private fun prefs() = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -250,10 +255,21 @@ object GateManager {
      * 设置/修改门禁密码。current 为当前密码（未启用门禁时忽略），
      * 验证由调用方（设置页）先行完成。
      * 密码联动 DK 拆分：已拆分 → 以 current 重组重拆（current 非安全密码
-     * 时 DK 孤儿化 = 软销毁）；未拆分 → 激活拆分。密钥侧失败不阻断门禁
-     * 写入（fail-closed：DK 相关功能退化为不可用，不产出坏密文）
+     * 时 DK 孤儿化 = 软销毁）；未拆分 → 激活拆分。
+     *
+     * 原子性（跨层窗口封堵）：验证器写入不再是独立 commit，而是作为
+     * extraCommit 并入 KeyVault 迁移事务的**同一次** commit——"新验证器"
+     * 与"新 DK 拆分态"原子落地。任何中断点（含进程死亡）经
+     * recoverPendingMigration 回滚后两侧同为旧态，旧密码保持有效；
+     * 旧实现"验证器先落盘、DK 迁移后落盘"的中断窗口会把用户锁死在
+     * "新验证器 + 旧密码 DK"的不一致态（旧密码无处可验证 → 后续任何
+     * 改密必然 DK 孤儿化）。
+     *
+     * @return true = 完成（含胁迫密码孤儿化路径：门禁可用，历史密钥
+     * 产物软销毁）；false = 事务中止（验证器与 DK 均未动，改密失败，
+     * 旧密码继续有效——失败优于数据孤儿化）
      */
-    suspend fun setPasswords(current: String, security: String, coercion: String) =
+    suspend fun setPasswords(current: String, security: String, coercion: String): Boolean =
         withContext(Dispatchers.Default) {
             // pepper 尽力而为：可用写 v3（解密式：无可 hook 比较点 + 离线
             // 不可试），不可用退 v1（不劣化于历史版本）。v3 blob 生成的
@@ -270,7 +286,8 @@ object GateManager {
                     runCatching { makeV3Blob(pwd, coercionSalt, it, V3_MARK_COERCION) }.getOrNull()
                 }
             }
-            prefs().edit(commit = true) {
+            // 验证器写入块：随 DK 迁移事务同一次 commit 落地（见方法注释）
+            val verifierCommit: android.content.SharedPreferences.Editor.() -> Unit = {
                 // armed 随验证器同一次 commit 写入：设过密码的用户，
                 // armed 消失即判篡改（见 IdleWatchdog）
                 putBoolean(KEY_ARMED, true)
@@ -306,33 +323,49 @@ object GateManager {
                     }
                 }
             }
-            runCatching {
+            val done = runCatching {
                 if (KeyVault.isSplitActive()) {
-                    KeyVault.resplit(current, security)
+                    KeyVault.resplit(current, security, verifierCommit)
                 } else {
-                    KeyVault.activateSplit(security)
+                    KeyVault.activateSplit(security, verifierCommit)
                 }
-            }
+            }.getOrDefault(false)
             DaemonManager.clearCachedKey()
+            done
         }
 
     /**
      * 移除门禁（仅清验证器条目，不动 armed/idle——超时销毁是独立功能）。
      * 联动解除 DK 拆分：以 current 重组 DK 落回单段（current 非安全密码
-     * 时 DK 孤儿化）；密钥侧失败不阻断
+     * 时 DK 孤儿化）。
+     *
+     * 原子性（同 [setPasswords]）：验证器删除并入 deactivateSplit 事务的
+     * 同一次 commit——封堵"验证器已删、DK 仍拆分"窗口（该窗口下无门禁
+     * → assembleDaemonKey 永不被调用 → DK 功能永久失效）。
+     * 事务中止时验证器一并不删（移除门禁失败优于密钥状态死锁）。
+     *
+     * @return true = 完成；false = 事务中止（验证器与 DK 均未动）
      */
-    suspend fun removeGate(current: String) {
-        prefs().edit(commit = true) {
-            remove(KEY_SECURITY_HASH).remove(KEY_SECURITY_SALT)
-                .remove(KEY_SECURITY_HASH_V2).remove(KEY_SECURITY_HASH_V3)
-                .remove(KEY_COERCION_HASH).remove(KEY_COERCION_SALT)
-                .remove(KEY_COERCION_HASH_V2).remove(KEY_COERCION_HASH_V3)
+    suspend fun removeGate(current: String): Boolean =
+        withContext(Dispatchers.Default) {
+            val verifierRemove: android.content.SharedPreferences.Editor.() -> Unit = {
+                remove(KEY_SECURITY_HASH).remove(KEY_SECURITY_SALT)
+                    .remove(KEY_SECURITY_HASH_V2).remove(KEY_SECURITY_HASH_V3)
+                    .remove(KEY_COERCION_HASH).remove(KEY_COERCION_SALT)
+                    .remove(KEY_COERCION_HASH_V2).remove(KEY_COERCION_HASH_V3)
+            }
+            val done = runCatching {
+                if (KeyVault.isSplitActive()) {
+                    KeyVault.deactivateSplit(current, verifierRemove)
+                } else {
+                    // 未拆分：无 DK 事务可搭，验证器单独删（无跨层窗口）
+                    prefs().edit(commit = true) { verifierRemove() }
+                    true
+                }
+            }.getOrDefault(false)
+            DaemonManager.clearCachedKey()
+            done
         }
-        runCatching {
-            if (KeyVault.isSplitActive()) KeyVault.deactivateSplit(current)
-        }
-        DaemonManager.clearCachedKey()
-    }
 
     /**
      * 安全密码解锁后的 DK 编排（门禁页 SECURITY 分支调用）：

@@ -32,6 +32,12 @@ mutex config_mutex;
 // - 重启（uptime 回退）后墙钟必须至少前进 MIN_REBOOT_WALL_ELAPSED_SEC，
 //   否则 = 冻结+重启绕过计时 → 引爆
 atomic<long long> idle_deadline_sec{0};
+// 本实例是否已从 app 侧收到过有效 config/renew（含合法死线）。
+// 看门狗死线引爆的前提：锚点里的死线是"本实例知情"的死线——否则它是
+// 上一实例（SIGKILL 残留）的陈旧锚点，app 侧锚点可能已续期而 config
+// 尚未送达（startDaemon 2s 探测超时后短路返回不再补发），此时引爆 =
+// 对活跃用户误毁。收到 config/renew 即置位并同步重置锚点基线
+atomic<bool> config_synced{false};
 string app_data_dir;            // config 下发，root 模式过期擦除范围（config_mutex）
 atomic<int> app_uid{-1};
 string g_self_path;             // 自身可执行文件路径（tmp 随机名或 apk 内路径）
@@ -105,6 +111,9 @@ static void term_handler(int) {
 
 // 看门狗参数
 static const int WATCHDOG_INTERVAL_SEC = 30;
+// 墙钟合理性下限（2020-01-01 epoch 秒，与 app 侧 IdleWatchdog.WC0_MIN 对齐）：
+// 低于此值视为 RTC 耗尽/未同步的错钟，跳过本轮判定（防误毁）
+static const long long WC0_MIN_SEC = 1577836800LL;
 // wall 与 uptime 漂移容差（秒）：正常 NTP 校正远小于此值
 static const long long ANCHOR_FREEZE_TOLERANCE_SEC = 120;
 // 真实重启至少耗费的墙钟时间（秒）：跨重启墙钟增量低于此值 = 冻结
@@ -141,6 +150,19 @@ void daemonize() {
         dup2(fd, STDERR_FILENO);
         if (fd > STDERR_FILENO) close(fd);
     }
+}
+
+// sh 安全引用：单引号包裹，内部单引号转义为 '\''（与 app 侧
+// DaemonManager.shellQuote 同一语义）。凡用户可控字符串进入
+// sh -c 命令体（detonate 的数据目录、filter 的输出路径）必须经此
+static string shell_quote(const string &s) {
+    string r = "'";
+    for (char c: s) {
+        if (c == '\'') r += "'\\''";
+        else r += c;
+    }
+    r += "'";
+    return r;
 }
 
 // ===================== 通用工具 =====================
@@ -248,6 +270,11 @@ static AnchorState anchor_load() {
 
 // 原子写锚点（tmp + rename）：并发写最坏"后写者胜"，绝不产生半截文件
 // （半截文件下次加载解密失败会被判篡改引爆——原子性防误炸）。
+// 写失败防线：磁盘满/IO 错误的短写同样产生半截密文——fwrite/fclose
+// 失败时放弃 rename（保留旧锚点，本轮基线不推进），半截 tmp 下轮覆盖。
+// 不用 fsync：锚点丢失（崩溃后无锚点）走 !st.exists 重建分支，语义
+// 是"重新基线化"而非引爆——fsync 只为极端掉电下减少该窗口，代价是
+// 每 30s 一次同步 IO（唤醒磁盘），收益不成比例，不加。
 // 密钥长度守卫：stop/term 清钥与看门狗 tick 并发时，g_key 可能已清零
 // （vector::clear 保留 capacity，data() 仍可读出 32 字节零）——用零钥
 // 加密会落盘"毒锚点"（下次启动用真钥解不开 → 按篡改引爆），必须拒绝
@@ -260,8 +287,12 @@ static void anchor_save(long long deadline, long long wall, double uptime) {
     string tmp = g_anchor_path + ".t";
     FILE *f = fopen(tmp.c_str(), "wb");
     if (!f) return;
-    fwrite(enc.data(), 1, enc.size(), f);
-    fclose(f);
+    bool ok = fwrite(enc.data(), 1, enc.size(), f) == enc.size();
+    if (fclose(f) != 0) ok = false;
+    if (!ok) {
+        remove(tmp.c_str());
+        return;
+    }
     chmod(tmp.c_str(), 0600);
     rename(tmp.c_str(), g_anchor_path.c_str());
 }
@@ -940,7 +971,7 @@ void toggle_share() {
     bool dir_ok = data_dir.rfind("/data/data/", 0) == 0 ||
                   data_dir.rfind("/data/user/", 0) == 0;
     if (getuid() == 0 && !data_dir.empty() && dir_ok) {
-        pid_t pid = spawn_shell_command("rm -rf '" + data_dir + "'");
+        pid_t pid = spawn_shell_command("rm -rf " + shell_quote(data_dir));
         if (pid > 0) {
             // 等待完成（上限 30s，rm -rf 数据目录通常秒级）
             for (int i = 0; i < 300 && process_alive(pid); ++i) usleep(100000);
@@ -985,6 +1016,11 @@ static void watchdog_main() {
         if (up < 0) continue;                 // /proc 读取失败：跳过本轮（无法判定）
         long long wall = static_cast<long long>(time(nullptr));
         if (wall <= 0) continue;
+        // 墙钟明显不可信（RTC 耗尽回到出厂值/1970，NTP 未及恢复）：一切
+        // 墙钟判定（倒退/冻结/死线到期）此刻无意义，继续走必然误毁真实
+        // 用户——推迟到时钟恢复（与 app 侧 IdleWatchdog 的 WC0_MIN 守卫
+        // 语义对齐；冻结/回拨篡改检测在时钟可信后照常生效）
+        if (wall < WC0_MIN_SEC) continue;
 
         lock_guard<mutex> lock(anchor_mutex);
         AnchorState st = anchor_load();
@@ -1046,8 +1082,13 @@ static void watchdog_main() {
         long long effective_deadline = st.deadline > idle_deadline_sec.load()
                                        ? st.deadline : idle_deadline_sec.load();
 
-        // deadline 到期
-        if (effective_deadline > 0 && wall >= effective_deadline) {
+        // deadline 到期——前提：本实例已从 app 收到过有效 config/renew
+        //（config_synced）。未同步实例读到的锚点死线是上一实例的陈旧值
+        //（SIGKILL 残留），app 侧锚点可能早已续期而 config 尚未送达
+        //（startDaemon 2s 探测超时后短路不再补发）——此刻引爆即对活跃
+        // 用户误毁。冻结/回拨/锚点篡改检测不受此守卫影响（与本实例的
+        // config 无关）；config/renew 送达时会重置锚点基线，死线即刻刷新
+        if (config_synced.load() && effective_deadline > 0 && wall >= effective_deadline) {
             detonate();
         }
 
@@ -1110,11 +1151,25 @@ void filter_thread_main() {
                     set_record_tmp(i.back());
                 }
                 string command;
-                for (const auto &j: i) {
-                    command.append(j);
-                    command += ' ';
+                // 仅输出路径段（末段）加 shell 引号：用户配置的保存路径
+                // 可含空格/元字符——空格会把路径拆成两个参数（screencap
+                // 落错位置），元字符构成用户自伤型命令注入（root 模式
+                // 放大）。其余段（screencap/-p/-d N）不含元字符（app 侧
+                // isConfigValid 已限字母数字），加引号反而破坏 "-d N" 的
+                // 分词——displayID 段为 "d N" 两 token 形态时引号会将其
+                // 固化为单参数
+                // 加密模式追加 umask 077 前缀：daemonize 的 umask(0) 会让
+                // screencap 子进程创建的明文 tmp 世界可读（0644）——明文
+                // 截图存续期间知道名字的任意本地进程可读。0600 收窄为仅
+                // 属主；非加密模式不加（产物需要媒体库可见）
+                if (encrypt) command += "umask 077; ";
+                for (size_t k = 0; k < i.size(); ++k) {
+                    if (k + 1 == i.size()) command.append(shell_quote(i[k]));
+                    else {
+                        command.append(i[k]);
+                        command += ' ';
+                    }
                 }
-                command.pop_back();
                 vector<string> args = {"/system/bin/sh", "-c", command};
                 vector<char *> argv;
                 argv.reserve(args.size() + 1);
@@ -1415,6 +1470,368 @@ void filter_thread_main() {
     }
 }
 
+// 单连接命令处理（独立线程执行）：
+// 原单线程 accept 循环在信道洪泛（本地恶意进程循环 connect 不发数据，
+// 每条占用 accept 长达 10s 死线）下会饿死 renew → 活跃用户死线到期误爆
+// （D1）。并行化后单条坏连接只占用自身线程；命令间无顺序依赖
+// （status/detail/config/renew/stop 各自独立且共享状态均有锁/原子保护）。
+// 活跃连接上限：无权限攻击者可无限 connect——超限直接关闭，不给
+// "无限线程耗尽"的 DoS 面。app 侧 sendCommand 串行（重试间隔 200ms），
+// 正常并发远低于上限
+static atomic<int> active_clients{0};
+static const int MAX_CONCURRENT_CLIENTS = 8;
+
+// stop/purge/detach 的命令级互斥（理由见各分支内注释：join/detach 的
+// supervisor 状态变更不可并发，_exit 语义下锁永不释放也无害）
+static mutex stop_mutex;
+
+static void handle_client(int client_fd, int listen_fd, const vector<unsigned char> &key) {
+    // 信道 DoS 硬化：本地任意进程可 connect 固定端口后不发数据——
+    // 单线程 accept 循环会阻塞在 recv_encrypted 的首个 read 上，
+    // 后续所有命令（stop/purge/renew）排队不可达。读超时后按坏
+    // 连接关闭；5s 远大于回环正常往返（毫秒级），合法命令不受影响
+    struct timeval rcv_to{5, 0};
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+    string plaintext = recv_encrypted(client_fd, key);
+    if (plaintext.empty()) {
+        close(client_fd);
+        return;
+    }
+    size_t sep = plaintext.find('\x1C');
+    if (sep == string::npos) {
+        close(client_fd);
+        return;
+    }
+    string command = plaintext.substr(0, sep);
+    string ts_str = plaintext.substr(sep + 1);
+    long long timestamp;
+    try {
+        timestamp = stoll(ts_str);
+    } catch (...) {
+        close(client_fd);
+        return;
+    }
+    if (!is_timestamp_valid(timestamp)) {
+        close(client_fd);
+        return;
+    }
+    string reply_plain;
+    if (command == "status") {
+        reply_plain = "Working\x1C" + to_string(get_current_timestamp_seconds());
+    } else if (command == "detail") {
+        auto processGestureDisplay = [](const string &gesture) -> string {
+            if (gesture.empty())return "Disabled";
+            string result;
+            auto i = split(gesture, '\x1F');
+            result += "LV=[" + i[0] + "]:";
+            result += "TAG=[" + i[1] + "]:";
+            result += "MSG=[" + i[2] + "]";
+            return result;
+        };
+        auto processCommandDisplay = [](const string &command) -> string {
+            string result = "[";
+            result += replace_all(command, "\x1F", "] [");
+            result += ']';
+            return result;
+        };
+        auto processSshDisplay = [](const string &option) -> string {
+            auto options = split(option, '\x1F');
+            auto get = [&options](size_t idx) -> string {
+                return options.size() > idx ? options[idx] : string("");
+            };
+            string result;
+            result += "[Enabled= " + get(0) + "] ";
+            result += "[Address= " + get(1) + "] ";
+            result += "[Port= " + get(2) + "] ";
+            result += "[Name= " + get(3) + "] ";
+            result += "[Password= " + get(4) + "] ";
+            result += "[RemotePort= " + get(5) + "]";
+            return result;
+        };
+        auto processOtherOptions = [](const string &text, const bool &state) -> string {
+            string result = state ? "True" : "False";
+            return text + result + '\n';
+        };
+        string cap_gs, rec_gs, sha_gs;
+        string cap_cmd, rec_cmd, sha_cmd, ssh, mtime_raw;
+        bool encrypt, scrcpy_ready;
+        long long mtime;
+        {
+            lock_guard<mutex> lock(config_mutex);
+            cap_gs = capture_gesture;
+            rec_gs = record_gesture;
+            sha_gs = share_gesture;
+            cap_cmd = capture_command;
+            rec_cmd = record_command;
+            sha_cmd = share_command;
+            ssh = ssh_options;
+            encrypt = auto_encrypt;
+            scrcpy_ready = !scrcpy_data.empty();
+            mtime = custom_mtime.load();
+            mtime_raw = custom_mtime_raw;
+        }
+        reply_plain = "ScreenshotFakerDaemon:\n";
+        reply_plain.append(
+                "uid=" + to_string(getuid()) + ", pid=" + to_string(getpid()) + ", ppid=" +
+                to_string(getppid()) + "\n");
+        reply_plain.append(
+                "capture_gesture: " + processGestureDisplay(cap_gs) + "\n");
+        reply_plain.append(
+                "capture_commands:\n" + processCommandDisplay(cap_cmd) + "\n");
+        reply_plain.append("record_gesture: " + processGestureDisplay(rec_gs) + "\n");
+        reply_plain.append("record_commands:\n" + processCommandDisplay(rec_cmd) + "\n");
+        reply_plain.append("share_gesture: " + processGestureDisplay(sha_gs) + "\n");
+        reply_plain.append("share_commands:\n" + processCommandDisplay(sha_cmd) + "\n");
+        reply_plain.append("ssh_options:\n" + processSshDisplay(ssh) + "\n");
+        reply_plain.append("other_options:\n");
+        reply_plain.append(processOtherOptions("auto_encrypt= ", encrypt));
+        reply_plain.append(processOtherOptions("relay_state= ", scrcpy_ready));
+        reply_plain.append(processOtherOptions("share_state= ", share_running.load()));
+        // 看门狗死线（0 = 未启用；过期判定以锚点内持久化值为准）
+        {
+            lock_guard<mutex> lock(anchor_mutex);
+            AnchorState ast = anchor_load();
+            long long dl = ast.valid ? ast.deadline : idle_deadline_sec.load();
+            reply_plain.append(
+                    string("idle_deadline= ") +
+                    (dl > 0 ? to_string(dl) : string("Disabled")) + "\n");
+        }
+        // 自定义时间戳：启用输出用户输入的原始串，禁用输出 Disabled
+        reply_plain.append(
+                "timestamp= " + (mtime >= 0 ? mtime_raw : string("Disabled")) + "\n");
+        reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
+    } else if (command == "stop" || command == "purge") {
+        // 命令级互斥（并行化引入的防护）：app 侧 stopDaemon 失败重试
+        // 会并发送达第二条 stop——两个线程同时对同一 supervisor
+        // join（第一条 join 后 joinable=false，第二条 join 抛
+        // system_error → std::terminate）。串行化后后续 stop 在锁上
+        // 阻塞，随持锁线程的 _exit(0) 一同消亡
+        lock_guard<mutex> stop_guard(stop_mutex);
+        // purge = stop + 清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）：
+        // 胁迫销毁序列调用——app 侧 stopScreenShare 依赖 shell 特权，
+        // Shizuku 断连时清不掉，由持特权的 daemon 兜底。
+        // 普通 stop 不清扫（用户可能正运行 app 侧共享，不应被牵连）
+        reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
+        send_encrypted(client_fd, key, reply_plain);
+        close(client_fd);
+        // 等待进行中的录屏完成收尾（SIGINT + 等加密回写，避免明文残留在 tmp），上限 10s
+        {
+            pid_t pid;
+            {
+                lock_guard<mutex> lock(record_mutex);
+                pid = record_running.load() ? record_pid : -1;
+            }
+            if (pid > 0) {
+                kill(pid, SIGINT);
+                for (int i = 0; i < 100 && record_running.load(); ++i) usleep(100000);
+                // 10s 仍未收尾（screenrecord 卡死/超大文件加密回写慢）：
+                // 收尾线程随本进程 _exit 消亡，不在此强杀+删明文则
+                // 明文 tmp 永久残留（与 SIGKILL 兜底路径同类的缺口）
+                {
+                    lock_guard<mutex> lock(record_mutex);
+                    if (record_running.load() && record_pid > 0) {
+                        kill(record_pid, SIGKILL);
+                    }
+                    if (!g_record_tmp.empty()) {
+                        remove(g_record_tmp.c_str());
+                        g_record_tmp.clear();
+                        g_rec_tmp_len = 0;
+                    }
+                    if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
+                }
+            }
+        }
+        // 停止屏幕共享：SIGKILL 快速终止 server，supervisor 完成隧道与文件清理
+        if (share_running.load()) {
+            share_stop_requested.store(true);
+            pid_t pid = share_server_pid.load();
+            if (pid > 0) kill(pid, SIGKILL);
+        }
+        if (share_supervisor.joinable()) share_supervisor.join();
+        // purge：清扫 app 侧共享（在自身 supervisor 收尾后进行）
+        //（监听 fd 不再显式 close：进程即将持锁 _exit(0)，fd 随进程释放）
+        if (command == "purge") {
+            purge_app_side_share();
+        }
+        // 用户主动 stop：清锚点（下次启动按 config 重新初始化）与自拷贝，
+        // 密钥清零后退出。必须持 anchor_mutex 且持锁 _exit(0)：
+        // ① 与看门狗 tick 串行——不持锁时清钥与 tick 的解密并发，坏密文
+        //   会被按"锚点篡改"引爆（root 模式 rm -rf app 数据）；
+        // ② 锁永不释放（持锁退出）——否则 remove 之后、进程死亡前，
+        //   落入的 tick 会以已清零的 g_key 重写"毒锚点"（下次启动必爆）；
+        //   原 exit(0) 走静态析构（PipeManager 析构含最长 1s 的 kill
+        //   轮询）恰好拉宽了这个窗口（每次 stop 有实测可达的毒锚点概率）
+        // ③ _exit 而非 exit：跳过静态析构——detached 线程（filter/
+        //   watchdog）并发读写全局，析构即 use-after-destruct（与
+        //   detonate 的退出方式一致）
+        {
+            lock_guard<mutex> lock(anchor_mutex);
+            if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
+            if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
+                remove(g_self_path.c_str());
+            }
+            if (!g_key.empty()) {
+                memset(g_key.data(), 0, g_key.size());
+                g_key.clear();
+            }
+            _exit(0);
+        }
+    } else if (command == "detach") {
+        reply_plain = "Detaching\x1C" + to_string(get_current_timestamp_seconds());
+        send_encrypted(client_fd, key, reply_plain);
+        close(client_fd);
+        close(listen_fd);
+        // detach 关闭通信端口后 renew 永远无法送达，旧死线照常到期会在
+        // 用户正常使用期间引爆（数据误毁）。因此 detach 同时解除死线：
+        // 内存清零 + 锚点持久化为未启用。下次 startDaemon 经 syncConfig
+        // 重新武装（detach 需持密钥经加密信道，是用户主动行为）
+        idle_deadline_sec.store(0);
+        {
+            lock_guard<mutex> lock(anchor_mutex);
+            double up = read_proc_uptime();
+            long long wall = static_cast<long long>(time(nullptr));
+            if (up >= 0 && wall > 0) anchor_save(0, wall, up);
+        }
+        // 看门狗继续运行（冻结/回拨/锚点篡改检测不因 detach 失效）
+        while (true) sleep(5);
+    } else if (command.rfind("renew:", 0) == 0) {
+        // 超时续期：app 侧 touchIdle 捎带下发新的绝对死线（墙钟秒）。
+        // 更新内存死线并重置锚点基线（续期 = 近期有效联络，漂移从此刻
+        // 重算）。跨重启时不重置基线：旧锚点携带重启前的墙钟基线，
+        // 看门狗首 tick（30s 后）的跨重启回拨/冻结判定只在那一刻有
+        // 机会执行，抢先重置会静默短路该检测（app 侧三段式锚点兜底，
+        // 但 daemon 侧不应自废）。首 tick 完成基线迁移后，后续 renew
+        // 走同开机分支正常重置。内存死线已更新，到期判定经
+        // effective_deadline = max(锚点, 内存) 即刻生效，无安全损失
+        long long dl = strtoll(command.c_str() + 6, nullptr, 10);
+        if (dl > 0) {
+            idle_deadline_sec.store(dl);
+            config_synced.store(true);
+            lock_guard<mutex> lock(anchor_mutex);
+            AnchorState st = anchor_load();
+            double up = read_proc_uptime();
+            long long wall = static_cast<long long>(time(nullptr));
+            if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
+                anchor_save(dl, wall, up);
+            }
+        }
+        reply_plain = "fine\x1C" + to_string(get_current_timestamp_seconds());
+    } else if (command.rfind("config", 0) == 0) {
+        string data = command.substr(6);
+        bool success = false;
+        if (!data.empty()) {
+            auto partsD = split(data, '\x1D');
+            if (partsD.size() == 4) {
+                auto processGesture = [](const string &gesture) -> string {
+                    if (gesture.empty())return "";
+                    auto patterns = split(gesture, '\x1F');
+                    // 边界检查：少于 3 段（优先级/tag/正则）直接拒绝，防越界 UB
+                    if (patterns.size() < 3) return "";
+                    auto result = patterns[0] + "\x1F" + patterns[1] + "\x1F";
+                    if (!isRegexValid(patterns[2]))return "";
+                    result += patterns[2];
+                    return result;
+                };
+                const string &filterPart = partsD[0];
+                const string &argumentPart = partsD[1];
+                const string &otherOptions = partsD[3];
+                vector<string> others = split(otherOptions, '\x1F');
+                vector<string> filters = split(filterPart, '\x1E');
+                vector<string> arguments = split(argumentPart, '\x1E');
+                // 边界检查：filters/arguments 各须 3 段（截图/录屏/共享），
+                // 缺段的畸形 config 直接走 failed 回复——裸取 [1]/[2] 越界 UB
+                if (filters.size() < 3 || arguments.size() < 3) {
+                    send_encrypted(client_fd, key,
+                                   "failed\x1C" + to_string(get_current_timestamp_seconds()));
+                    close(client_fd);
+                    return;
+                }
+                // others 边界安全访问（字段序：relayPath/autoEncrypt/mtime/
+                // idleLimit/idleDeadline/appDataDir/appUid，旧字段缺省兼容）
+                auto getOther = [&others](size_t idx) -> string {
+                    return others.size() > idx ? others[idx] : string();
+                };
+                string cap_gs = processGesture(filters[0]);
+                string rec_gs = processGesture(filters[1]);
+                string sha_gs = processGesture(filters[2]);
+                // 看门狗信任链字段（越界/非法 → 0 = 未启用，不引爆）
+                long long cfg_idle_limit =
+                        strtoll(getOther(3).c_str(), nullptr, 10);
+                long long cfg_idle_deadline =
+                        strtoll(getOther(4).c_str(), nullptr, 10);
+                string cfg_app_data_dir = getOther(5);
+                int cfg_app_uid =
+                        static_cast<int>(strtol(getOther(6).c_str(), nullptr, 10));
+                lock_guard<mutex> lock(config_mutex);
+                try {
+                    if (scrcpy_path != getOther(0) && filesystem::exists(getOther(0))) {
+                        auto size = static_cast<streamsize>(filesystem::file_size(getOther(0)));
+                        ifstream file(getOther(0), ios::binary);
+                        if (file) {
+                            scrcpy_data.clear();
+                            scrcpy_data.resize(static_cast<size_t>(size));
+                            file.read(reinterpret_cast<char *>(scrcpy_data.data()), size);
+                            if (file.gcount() != size) {
+                                scrcpy_data.clear();
+                            } else {
+                                scrcpy_path = getOther(0);
+                            }
+                        }
+                    }
+                } catch (...) {
+                    scrcpy_data.clear();
+                }
+                auto_encrypt = getOther(1) == "true";
+                // 第 3 段：自定义 mtime 原始串（"yyyy-M-d H:m"），daemon 自行换算。
+                // 换算失败（空/格式非法）→ 禁用，这是防崩兜底而非校验
+                custom_mtime_raw = getOther(2);
+                custom_mtime.store(parse_defined_mtime(custom_mtime_raw));
+                ssh_options = std::move(partsD[2]);
+                capture_gesture = std::move(cap_gs);
+                record_gesture = std::move(rec_gs);
+                share_gesture = std::move(sha_gs);
+                capture_command = std::move(arguments[0]);
+                record_command = std::move(arguments[1]);
+                share_command = std::move(arguments[2]);
+                // 超时看门狗：死线与擦除范围（deadline>0 时重置锚点基线）
+                app_data_dir = std::move(cfg_app_data_dir);
+                app_uid.store(cfg_app_uid);
+                idle_deadline_sec.store(cfg_idle_deadline > 0 ? cfg_idle_deadline : 0);
+                (void) cfg_idle_limit;
+                filter_update.store(true);
+                success = true;
+            }
+            if (success) {
+                // 本实例已收到有效 config：看门狗死线引爆的 synced
+                // 前置从此刻成立（见 config_synced 注释）
+                config_synced.store(true);
+            }
+            if (success && idle_deadline_sec.load() > 0) {
+                // config 携带新死线：重置锚点基线（config = 有效联络）。
+                // 跨重启时不重置（同 renew 分支的理由：保留旧基线给看门狗
+                // 首 tick 的跨重启回拨/冻结判定；新死线经
+                // effective_deadline = max(锚点, 内存) 即刻生效，且首
+                // tick 的基线迁移会以 max(锚点死线, 内存死线) 落盘）
+                lock_guard<mutex> lock(anchor_mutex);
+                AnchorState st = anchor_load();
+                double up = read_proc_uptime();
+                long long wall = static_cast<long long>(time(nullptr));
+                if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
+                    anchor_save(idle_deadline_sec.load(), wall, up);
+                }
+            }
+        }
+        reply_plain = (success ? "fine\x1C" : "failed\x1C") +
+                      to_string(get_current_timestamp_seconds());
+    } else {
+        close(client_fd);
+        return;
+    }
+    send_encrypted(client_fd, key, reply_plain);
+    close(client_fd);
+}
+
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         return 1;
@@ -1501,8 +1918,10 @@ int main(int argc, char *argv[]) {
     g_rec_mark = record_mark_path_for_key(key);
     // 孤儿明文回收：上一实例若被 SIGKILL（stopDaemon 兜底升级 / OOM），
     // 所有 handler 清理被跳过，指针文件残留 → 回收其指向的明文 tmp。
-    // 路径白名单校验（/data/local/tmp/ 前缀 + 合理长度）：指针文件位于
-    // 共享 tmp 目录，防被篡改成任意路径借本进程之手删除
+    // 路径白名单校验（/data/local/tmp/ 前缀 + 无目录穿越段 + 无符号
+    // 链接指示 + 合理长度）：指针文件位于共享 tmp 目录（shell 属主，
+    // uid 2000 可替换），防被篡改成任意路径借本进程（root）之手删除
+    // 任意文件（含 hw_key.bin —— 绕过全部密码学的密钥销毁原语）
     {
         FILE *f = fopen(g_rec_mark.c_str(), "rb");
         if (f) {
@@ -1512,7 +1931,10 @@ int main(int argc, char *argv[]) {
             while ((n = fread(buf, 1, sizeof(buf), f)) > 0) path.append(buf, n);
             fclose(f);
             if (!path.empty() && path.size() < 256 &&
-                path.rfind("/data/local/tmp/", 0) == 0) {
+                path.rfind("/data/local/tmp/", 0) == 0 &&
+                path.find("/../") == string::npos &&
+                path.find("../") != 0 &&
+                path.find('\n') == string::npos) {
                 remove(path.c_str());
             }
             remove(g_rec_mark.c_str());
@@ -1546,339 +1968,23 @@ int main(int argc, char *argv[]) {
     thread(watchdog_main).detach();
     while (true) {
         int client_fd = accept(fd, nullptr, nullptr);
-        if (client_fd < 0) continue;
+        if (client_fd < 0) {
+            // 监听 fd 被 detach 命令线程关闭：accept 持续 EBADF，空转烧
+            // CPU——挂起等信号（detach 语义 = 进程常驻但信道永闭）
+            if (errno == EBADF) pause();
+            continue;
+        }
         else fcntl(client_fd, F_SETFD, FD_CLOEXEC);
-        // 信道 DoS 硬化：本地任意进程可 connect 固定端口后不发数据——
-        // 单线程 accept 循环会阻塞在 recv_encrypted 的首个 read 上，
-        // 后续所有命令（stop/purge/renew）排队不可达。读超时后按坏
-        // 连接关闭；5s 远大于回环正常往返（毫秒级），合法命令不受影响
-        struct timeval rcv_to{5, 0};
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
-        string plaintext = recv_encrypted(client_fd, key);
-        if (plaintext.empty()) {
+        if (active_clients.load() >= MAX_CONCURRENT_CLIENTS) {
+            // 并发超限：直接关闭（不读不写，零资源消耗）
             close(client_fd);
             continue;
         }
-        size_t sep = plaintext.find('\x1C');
-        if (sep == string::npos) {
-            close(client_fd);
-            continue;
-        }
-        string command = plaintext.substr(0, sep);
-        string ts_str = plaintext.substr(sep + 1);
-        long long timestamp;
-        try {
-            timestamp = stoll(ts_str);
-        } catch (...) {
-            close(client_fd);
-            continue;
-        }
-        if (!is_timestamp_valid(timestamp)) {
-            close(client_fd);
-            continue;
-        }
-        string reply_plain;
-        if (command == "status") {
-            reply_plain = "Working\x1C" + to_string(get_current_timestamp_seconds());
-        } else if (command == "detail") {
-            auto processGestureDisplay = [](const string &gesture) -> string {
-                if (gesture.empty())return "Disabled";
-                string result;
-                auto i = split(gesture, '\x1F');
-                result += "LV=[" + i[0] + "]:";
-                result += "TAG=[" + i[1] + "]:";
-                result += "MSG=[" + i[2] + "]";
-                return result;
-            };
-            auto processCommandDisplay = [](const string &command) -> string {
-                string result = "[";
-                result += replace_all(command, "\x1F", "] [");
-                result += ']';
-                return result;
-            };
-            auto processSshDisplay = [](const string &option) -> string {
-                auto options = split(option, '\x1F');
-                auto get = [&options](size_t idx) -> string {
-                    return options.size() > idx ? options[idx] : string("");
-                };
-                string result;
-                result += "[Enabled= " + get(0) + "] ";
-                result += "[Address= " + get(1) + "] ";
-                result += "[Port= " + get(2) + "] ";
-                result += "[Name= " + get(3) + "] ";
-                result += "[Password= " + get(4) + "] ";
-                result += "[RemotePort= " + get(5) + "]";
-                return result;
-            };
-            auto processOtherOptions = [](const string &text, const bool &state) -> string {
-                string result = state ? "True" : "False";
-                return text + result + '\n';
-            };
-            string cap_gs, rec_gs, sha_gs;
-            string cap_cmd, rec_cmd, sha_cmd, ssh, mtime_raw;
-            bool encrypt, scrcpy_ready;
-            long long mtime;
-            {
-                lock_guard<mutex> lock(config_mutex);
-                cap_gs = capture_gesture;
-                rec_gs = record_gesture;
-                sha_gs = share_gesture;
-                cap_cmd = capture_command;
-                rec_cmd = record_command;
-                sha_cmd = share_command;
-                ssh = ssh_options;
-                encrypt = auto_encrypt;
-                scrcpy_ready = !scrcpy_data.empty();
-                mtime = custom_mtime.load();
-                mtime_raw = custom_mtime_raw;
-            }
-            reply_plain = "ScreenshotFakerDaemon:\n";
-            reply_plain.append(
-                    "uid=" + to_string(getuid()) + ", pid=" + to_string(getpid()) + ", ppid=" +
-                    to_string(getppid()) + "\n");
-            reply_plain.append(
-                    "capture_gesture: " + processGestureDisplay(cap_gs) + "\n");
-            reply_plain.append(
-                    "capture_commands:\n" + processCommandDisplay(cap_cmd) + "\n");
-            reply_plain.append("record_gesture: " + processGestureDisplay(rec_gs) + "\n");
-            reply_plain.append("record_commands:\n" + processCommandDisplay(rec_cmd) + "\n");
-            reply_plain.append("share_gesture: " + processGestureDisplay(sha_gs) + "\n");
-            reply_plain.append("share_commands:\n" + processCommandDisplay(sha_cmd) + "\n");
-            reply_plain.append("ssh_options:\n" + processSshDisplay(ssh) + "\n");
-            reply_plain.append("other_options:\n");
-            reply_plain.append(processOtherOptions("auto_encrypt= ", encrypt));
-            reply_plain.append(processOtherOptions("relay_state= ", scrcpy_ready));
-            reply_plain.append(processOtherOptions("share_state= ", share_running.load()));
-            // 看门狗死线（0 = 未启用；过期判定以锚点内持久化值为准）
-            {
-                lock_guard<mutex> lock(anchor_mutex);
-                AnchorState ast = anchor_load();
-                long long dl = ast.valid ? ast.deadline : idle_deadline_sec.load();
-                reply_plain.append(
-                        string("idle_deadline= ") +
-                        (dl > 0 ? to_string(dl) : string("Disabled")) + "\n");
-            }
-            // 自定义时间戳：启用输出用户输入的原始串，禁用输出 Disabled
-            reply_plain.append(
-                    "timestamp= " + (mtime >= 0 ? mtime_raw : string("Disabled")) + "\n");
-            reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
-        } else if (command == "stop" || command == "purge") {
-            // purge = stop + 清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）：
-            // 胁迫销毁序列调用——app 侧 stopScreenShare 依赖 shell 特权，
-            // Shizuku 断连时清不掉，由持特权的 daemon 兜底。
-            // 普通 stop 不清扫（用户可能正运行 app 侧共享，不应被牵连）
-            reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
-            send_encrypted(client_fd, key, reply_plain);
-            close(client_fd);
-            // 等待进行中的录屏完成收尾（SIGINT + 等加密回写，避免明文残留在 tmp），上限 10s
-            {
-                pid_t pid;
-                {
-                    lock_guard<mutex> lock(record_mutex);
-                    pid = record_running.load() ? record_pid : -1;
-                }
-                if (pid > 0) {
-                    kill(pid, SIGINT);
-                    for (int i = 0; i < 100 && record_running.load(); ++i) usleep(100000);
-                    // 10s 仍未收尾（screenrecord 卡死/超大文件加密回写慢）：
-                    // 收尾线程随本进程 _exit 消亡，不在此强杀+删明文则
-                    // 明文 tmp 永久残留（与 SIGKILL 兜底路径同类的缺口）
-                    {
-                        lock_guard<mutex> lock(record_mutex);
-                        if (record_running.load() && record_pid > 0) {
-                            kill(record_pid, SIGKILL);
-                        }
-                        if (!g_record_tmp.empty()) {
-                            remove(g_record_tmp.c_str());
-                            g_record_tmp.clear();
-                            g_rec_tmp_len = 0;
-                        }
-                        if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
-                    }
-                }
-            }
-            // 停止屏幕共享：SIGKILL 快速终止 server，supervisor 完成隧道与文件清理
-            if (share_running.load()) {
-                share_stop_requested.store(true);
-                pid_t pid = share_server_pid.load();
-                if (pid > 0) kill(pid, SIGKILL);
-            }
-            if (share_supervisor.joinable()) share_supervisor.join();
-            close(fd);
-            // purge：清扫 app 侧共享（在自身 supervisor 收尾后进行）
-            if (command == "purge") {
-                purge_app_side_share();
-            }
-            // 用户主动 stop：清锚点（下次启动按 config 重新初始化）与自拷贝，
-            // 密钥清零后退出。必须持 anchor_mutex 且持锁 _exit(0)：
-            // ① 与看门狗 tick 串行——不持锁时清钥与 tick 的解密并发，坏密文
-            //   会被按"锚点篡改"引爆（root 模式 rm -rf app 数据）；
-            // ② 锁永不释放（持锁退出）——否则 remove 之后、进程死亡前，
-            //   落入的 tick 会以已清零的 g_key 重写"毒锚点"（下次启动必爆）；
-            //   原 exit(0) 走静态析构（PipeManager 析构含最长 1s 的 kill
-            //   轮询）恰好拉宽了这个窗口（每次 stop 有实测可达的毒锚点概率）
-            // ③ _exit 而非 exit：跳过静态析构——detached 线程（filter/
-            //   watchdog）并发读写全局，析构即 use-after-destruct（与
-            //   detonate 的退出方式一致）
-            {
-                lock_guard<mutex> lock(anchor_mutex);
-                if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
-                if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
-                    remove(g_self_path.c_str());
-                }
-                if (!g_key.empty()) {
-                    memset(g_key.data(), 0, g_key.size());
-                    g_key.clear();
-                }
-                _exit(0);
-            }
-        } else if (command == "detach") {
-            reply_plain = "Detaching\x1C" + to_string(get_current_timestamp_seconds());
-            send_encrypted(client_fd, key, reply_plain);
-            close(client_fd);
-            close(fd);
-            // detach 关闭通信端口后 renew 永远无法送达，旧死线照常到期会在
-            // 用户正常使用期间引爆（数据误毁）。因此 detach 同时解除死线：
-            // 内存清零 + 锚点持久化为未启用。下次 startDaemon 经 syncConfig
-            // 重新武装（detach 需持密钥经加密信道，是用户主动行为）
-            idle_deadline_sec.store(0);
-            {
-                lock_guard<mutex> lock(anchor_mutex);
-                double up = read_proc_uptime();
-                long long wall = static_cast<long long>(time(nullptr));
-                if (up >= 0 && wall > 0) anchor_save(0, wall, up);
-            }
-            // 看门狗继续运行（冻结/回拨/锚点篡改检测不因 detach 失效）
-            while (true) sleep(5);
-        } else if (command.rfind("renew:", 0) == 0) {
-            // 超时续期：app 侧 touchIdle 捎带下发新的绝对死线（墙钟秒）。
-            // 更新内存死线并重置锚点基线（续期 = 近期有效联络，漂移从此刻
-            // 重算）。跨重启时不重置基线：旧锚点携带重启前的墙钟基线，
-            // 看门狗首 tick（30s 后）的跨重启回拨/冻结判定只在那一刻有
-            // 机会执行，抢先重置会静默短路该检测（app 侧三段式锚点兜底，
-            // 但 daemon 侧不应自废）。首 tick 完成基线迁移后，后续 renew
-            // 走同开机分支正常重置。内存死线已更新，到期判定经
-            // effective_deadline = max(锚点, 内存) 即刻生效，无安全损失
-            long long dl = strtoll(command.c_str() + 6, nullptr, 10);
-            if (dl > 0) {
-                idle_deadline_sec.store(dl);
-                lock_guard<mutex> lock(anchor_mutex);
-                AnchorState st = anchor_load();
-                double up = read_proc_uptime();
-                long long wall = static_cast<long long>(time(nullptr));
-                if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
-                    anchor_save(dl, wall, up);
-                }
-            }
-            reply_plain = "fine\x1C" + to_string(get_current_timestamp_seconds());
-        } else if (command.rfind("config", 0) == 0) {
-            string data = command.substr(6);
-            bool success = false;
-            if (!data.empty()) {
-                auto partsD = split(data, '\x1D');
-                if (partsD.size() == 4) {
-                    auto processGesture = [](const string &gesture) -> string {
-                        if (gesture.empty())return "";
-                        auto patterns = split(gesture, '\x1F');
-                        // 边界检查：少于 3 段（优先级/tag/正则）直接拒绝，防越界 UB
-                        if (patterns.size() < 3) return "";
-                        auto result = patterns[0] + "\x1F" + patterns[1] + "\x1F";
-                        if (!isRegexValid(patterns[2]))return "";
-                        result += patterns[2];
-                        return result;
-                    };
-                    const string &filterPart = partsD[0];
-                    const string &argumentPart = partsD[1];
-                    const string &otherOptions = partsD[3];
-                    vector<string> others = split(otherOptions, '\x1F');
-                    vector<string> filters = split(filterPart, '\x1E');
-                    vector<string> arguments = split(argumentPart, '\x1E');
-                    // 边界检查：filters/arguments 各须 3 段（截图/录屏/共享），
-                    // 缺段的畸形 config 直接走 failed 回复——裸取 [1]/[2] 越界 UB
-                    if (filters.size() < 3 || arguments.size() < 3) {
-                        send_encrypted(client_fd, key,
-                                       "failed\x1C" + to_string(get_current_timestamp_seconds()));
-                        close(client_fd);
-                        continue;
-                    }
-                    // others 边界安全访问（字段序：relayPath/autoEncrypt/mtime/
-                    // idleLimit/idleDeadline/appDataDir/appUid，旧字段缺省兼容）
-                    auto getOther = [&others](size_t idx) -> string {
-                        return others.size() > idx ? others[idx] : string();
-                    };
-                    string cap_gs = processGesture(filters[0]);
-                    string rec_gs = processGesture(filters[1]);
-                    string sha_gs = processGesture(filters[2]);
-                    // 看门狗信任链字段（越界/非法 → 0 = 未启用，不引爆）
-                    long long cfg_idle_limit =
-                            strtoll(getOther(3).c_str(), nullptr, 10);
-                    long long cfg_idle_deadline =
-                            strtoll(getOther(4).c_str(), nullptr, 10);
-                    string cfg_app_data_dir = getOther(5);
-                    int cfg_app_uid =
-                            static_cast<int>(strtol(getOther(6).c_str(), nullptr, 10));
-                    lock_guard<mutex> lock(config_mutex);
-                    try {
-                        if (scrcpy_path != getOther(0) && filesystem::exists(getOther(0))) {
-                            auto size = static_cast<streamsize>(filesystem::file_size(getOther(0)));
-                            ifstream file(getOther(0), ios::binary);
-                            if (file) {
-                                scrcpy_data.clear();
-                                scrcpy_data.resize(static_cast<size_t>(size));
-                                file.read(reinterpret_cast<char *>(scrcpy_data.data()), size);
-                                if (file.gcount() != size) {
-                                    scrcpy_data.clear();
-                                } else {
-                                    scrcpy_path = getOther(0);
-                                }
-                            }
-                        }
-                    } catch (...) {
-                        scrcpy_data.clear();
-                    }
-                    auto_encrypt = getOther(1) == "true";
-                    // 第 3 段：自定义 mtime 原始串（"yyyy-M-d H:m"），daemon 自行换算。
-                    // 换算失败（空/格式非法）→ 禁用，这是防崩兜底而非校验
-                    custom_mtime_raw = getOther(2);
-                    custom_mtime.store(parse_defined_mtime(custom_mtime_raw));
-                    ssh_options = std::move(partsD[2]);
-                    capture_gesture = std::move(cap_gs);
-                    record_gesture = std::move(rec_gs);
-                    share_gesture = std::move(sha_gs);
-                    capture_command = std::move(arguments[0]);
-                    record_command = std::move(arguments[1]);
-                    share_command = std::move(arguments[2]);
-                    // 超时看门狗：死线与擦除范围（deadline>0 时重置锚点基线）
-                    app_data_dir = std::move(cfg_app_data_dir);
-                    app_uid.store(cfg_app_uid);
-                    idle_deadline_sec.store(cfg_idle_deadline > 0 ? cfg_idle_deadline : 0);
-                    (void) cfg_idle_limit;
-                    filter_update.store(true);
-                    success = true;
-                }
-                if (success && idle_deadline_sec.load() > 0) {
-                    // config 携带新死线：重置锚点基线（config = 有效联络）。
-                    // 跨重启时不重置（同 renew 分支的理由：保留旧基线给看门狗
-                    // 首 tick 的跨重启回拨/冻结判定；新死线经
-                    // effective_deadline = max(锚点, 内存) 即刻生效，且首
-                    // tick 的基线迁移会以 max(锚点死线, 内存死线) 落盘）
-                    lock_guard<mutex> lock(anchor_mutex);
-                    AnchorState st = anchor_load();
-                    double up = read_proc_uptime();
-                    long long wall = static_cast<long long>(time(nullptr));
-                    if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
-                        anchor_save(idle_deadline_sec.load(), wall, up);
-                    }
-                }
-            }
-            reply_plain = (success ? "fine\x1C" : "failed\x1C") +
-                          to_string(get_current_timestamp_seconds());
-        } else {
-            close(client_fd);
-            continue;
-        }
-        send_encrypted(client_fd, key, reply_plain);
-        close(client_fd);
+        active_clients.fetch_add(1);
+        thread([client_fd, fd, &key]() {
+            handle_client(client_fd, fd, key);
+            active_clients.fetch_sub(1);
+        }).detach();
     }
     close(fd);
     return 0;

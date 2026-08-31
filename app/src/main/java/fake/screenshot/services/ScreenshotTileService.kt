@@ -97,7 +97,13 @@ class ScreenshotTileService : TileService() {
                 ).filter { it.isNotEmpty() }
                 Auxiliary.exec(args.joinToString(" "))
                 if (encryptOutputs) {
-                    Auxiliary.exec("chmod 444 ${tempPath + tempName}")
+                    // 444 维持（勿改 400）：明文 tmp 由 shell/root 的 screencap
+                    // 子进程创建、app 进程读取加密——跨 uid，400 会令 app
+                    // 读取失败 → 加密失败 → finally 删除明文 = 用户数据丢失。
+                    // 444 是"app 可读"的最小权限；名字为 SecureRandom 不可
+                    // 预测，实际暴露需 ps 抓 screencap cmdline 的运行窗口
+                    //（百毫秒级竞速，接受为已知边界）
+                    Auxiliary.exec("chmod 444 '$tempPath$tempName'")
                     try {
                         File(tempPath + tempName).apply {
                             val encrypted = File("$savePath/$fileName")
