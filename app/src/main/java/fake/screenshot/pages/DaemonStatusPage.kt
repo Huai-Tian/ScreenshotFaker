@@ -28,8 +28,10 @@ fun DaemonStatusCompose() {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var detachWarning by remember { mutableStateOf(false) }
     val errorText = stringResource(R.string.daemon_connect_failed)
-    // 加载数据
-    LaunchedEffect(Unit) {
+
+    // 加载守护进程详情（首次进入/手动刷新/失败重试/detach 后共用；
+    // sendCommand 为独立 socket 短连接，并发触发仅晚到者覆盖，无害）
+    suspend fun loadStatus() {
         isLoading = true
         errorMessage = null
         val response = DaemonManager.sendCommand("detail")
@@ -39,6 +41,11 @@ fun DaemonStatusCompose() {
         } else {
             statusText = response
         }
+    }
+
+    // 加载数据
+    LaunchedEffect(Unit) {
+        loadStatus()
     }
 
     Scaffold(
@@ -56,17 +63,7 @@ fun DaemonStatusCompose() {
                     }
                     IconButton(
                         onClick = {
-                            scope.launch {
-                                isLoading = true
-                                errorMessage = null
-                                val response = DaemonManager.sendCommand("detail")
-                                isLoading = false
-                                if (response == null) {
-                                    errorMessage = errorText
-                                } else {
-                                    statusText = response
-                                }
-                            }
+                            scope.launch { loadStatus() }
                         }
                     ) {
                         Icon(
@@ -104,17 +101,7 @@ fun DaemonStatusCompose() {
                         Spacer(modifier = Modifier.height(16.dp))
                         Button(
                             onClick = {
-                                scope.launch {
-                                    isLoading = true
-                                    errorMessage = null
-                                    val response = DaemonManager.sendCommand("detail")
-                                    isLoading = false
-                                    if (response == null) {
-                                        errorMessage = errorText
-                                    } else {
-                                        statusText = response
-                                    }
-                                }
+                                scope.launch { loadStatus() }
                             }
                         ) {
                             Text(stringResource(R.string.refresh))
@@ -164,6 +151,7 @@ fun DaemonStatusCompose() {
                         onClick = {
                             scope.launch {
                                 DaemonManager.detachDaemon()
+                                loadStatus()
                             }
                             detachWarning = false
                         },

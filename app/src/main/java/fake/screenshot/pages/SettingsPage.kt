@@ -645,7 +645,7 @@ fun SettingsCompose(navController: NavController) {
                             },
                             supportingText = {
                                 Text(
-                                    text = "LV <- (V/D/I/W/E/F/S)\n" +
+                                    text = "LV <- (V/D/I/W/E/F)\n" +
                                             stringResource(R.string.disable_if_empty),
                                     fontSize = 9.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant

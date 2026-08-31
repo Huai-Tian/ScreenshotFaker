@@ -15,7 +15,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -538,195 +541,215 @@ fun ExtensionCompose() {
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 16.dp),
-            // 关键：通过 spacedBy 控制卡片之间的垂直间距
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(bottom = 20.dp),
         ) {
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.Screenshot,
-                        title = stringResource(R.string.stealth_screenshot),
-                        subtitle = stringResource(R.string.click_to_config_stealth_screenshot),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            screenshotConfigDialogSavaPathInputText = screenshotSavePath
-                            screenshotConfigDialogPrefixInputText = screenshotPrefix
-                            screenshotConfigDialogSuffixInputText = screenshotSuffix
-                            screenshotConfigDialogDisplayIDInputText = screenshotDisplayID
-                            screenshotConfigDialogCustomPrefixInputText = screenshotCustomPrefix
-                            screenshotConfigDialogFullRandomInputText = screenshotFullRandom
-                            screenshotConfigDialog = true
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.Videocam,
-                        title = stringResource(R.string.stealth_screen_recording),
-                        subtitle = stringResource(R.string.click_to_config_stealth_screen_recording),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            screenRecordConfigDialogSavePathInputText = screenRecordSavePath
-                            screenRecordConfigDialogPrefixInputText = screenRecordPrefix
-                            screenRecordConfigDialogSuffixInputText = screenRecordSuffix
-                            screenRecordConfigDialogDisplayIDInputText = screenRecordDisplayID
-                            screenRecordConfigDialogDurationInputText = screenRecordDuration
-                            screenRecordConfigDialogBitRateInputText = screenRecordBitRate
-                            screenRecordConfigDialogResolutionInputText = screenRecordResolution
-                            screenRecordConfigDialogCustomPrefixInputText = screenRecordCustomPrefix
-                            screenRecordConfigDialogFullRandomInputText = screenRecordFullRandom
-                            screenRecordConfigDialogEnableBugreport = screenRecordBugreport
-                            screenRecordConfigDialog = true
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Outlined.VisibilityOff,
-                        title = stringResource(R.string.stealth_overlay),
-                        subtitle = stringResource(R.string.stealth_overlay_description),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            if (!Settings.canDrawOverlays(context)) {
-                                overlayPermissionRequireDialog = true
-                            } else {
-                                stealthOverlayConfigDialog = true
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp),
+                // 关键：通过 spacedBy 控制卡片之间的垂直间距
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 20.dp),
+            ) {
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.Screenshot,
+                            title = stringResource(R.string.stealth_screenshot),
+                            subtitle = stringResource(R.string.click_to_config_stealth_screenshot),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                screenshotConfigDialogSavaPathInputText = screenshotSavePath
+                                screenshotConfigDialogPrefixInputText = screenshotPrefix
+                                screenshotConfigDialogSuffixInputText = screenshotSuffix
+                                screenshotConfigDialogDisplayIDInputText = screenshotDisplayID
+                                screenshotConfigDialogCustomPrefixInputText = screenshotCustomPrefix
+                                screenshotConfigDialogFullRandomInputText = screenshotFullRandom
+                                screenshotConfigDialog = true
                             }
-                        }
-                    )
+                        )
+                    }
                 }
-            }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.Cast,
-                        title = stringResource(R.string.stealth_screen_sharing),
-                        subtitle = stringResource(R.string.click_to_config_stealth_screen_sharing),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            screenShareConfigDialogLocalPort = screenShareLocalPort.toString()
-                            screenShareConfigDialogMaxSize = screenShareMaxSize.toString()
-                            screenShareConfigDialogMaxFps = screenShareMaxFps.toString()
-                            screenShareConfigDialogVideoBitRate = screenShareVideoBitRate.toString()
-                            screenShareConfigDialogAllowControl = screenShareControl
-                            screenShareConfigDialogSyncClipboard = screenShareSyncClipboard
-                            screenShareConfigDialogEnableVideo = screenShareVideo
-                            screenShareConfigDialogVideoDisplay = screenShareVideoDisplay
-                            screenShareConfigDialogVideoDisplayID = screenShareVideoDisplayID
-                            screenShareConfigDialogVideoCamera = screenShareVideoCamera
-                            screenShareConfigDialogVideoCameraID = screenShareVideoCameraID
-                            screenShareConfigDialogVideoCameraZoom = screenShareVideoCameraZoom
-                            screenShareConfigDialogVideoCameraTorch = screenShareVideoCameraTorch
-                            screenShareConfigDialogEnableAudio = screenShareAudio
-                            screenShareConfigDialogAudioOutput = screenShareAudioOutput
-                            screenShareConfigDialogAudioMic = screenShareAudioMic
-                            // 密码必须回填：否则对话框显示空，确认时"旧值≠空"被判定
-                            // 为用户清除了密码，putSensitive("") 抹掉已存密码——
-                            // app 侧随后 fail-closed 拒绝共享、daemon 侧无鉴权裸奔
-                            screenShareConfigDialogPassword = screenSharePassword
-                            screenShareConfigDialog = true
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.CellTower,
-                        title = stringResource(R.string.ssh_tunnel),
-                        subtitle = stringResource(R.string.click_to_config_ssh_tunnel),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            sshTunnelConfigDialogEnabled = sshTunnelEnabled
-                            sshTunnelConfigDialogServerAddress = sshTunnelServerAddress
-                            sshTunnelConfigDialogServerPort = sshTunnelServerPort.toString()
-                            sshTunnelConfigDialogUserName = sshTunnelUserName
-                            sshTunnelConfigDialogUserPassword = sshTunnelUserPassword
-                            // 回填 remotePort：漏掉会保留上次未保存的编辑值
-                            sshTunnelConfigDialogRemotePort =
-                                if (sshTunnelRemotePort == 0) "" else sshTunnelRemotePort.toString()
-                            sshTunnelConfigDialog = true
-                        }
-                    )
-                }
-            }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.LockReset,
-                        title = stringResource(R.string.hardware_file_encryption_and_decryption),
-                        subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            if (Environment.isExternalStorageManager()) {
-                                fileEncryptionWarnings = true
-                            } else {
-                                externalStorageRequireDialog = true
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.Videocam,
+                            title = stringResource(R.string.stealth_screen_recording),
+                            subtitle = stringResource(R.string.click_to_config_stealth_screen_recording),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                screenRecordConfigDialogSavePathInputText = screenRecordSavePath
+                                screenRecordConfigDialogPrefixInputText = screenRecordPrefix
+                                screenRecordConfigDialogSuffixInputText = screenRecordSuffix
+                                screenRecordConfigDialogDisplayIDInputText = screenRecordDisplayID
+                                screenRecordConfigDialogDurationInputText = screenRecordDuration
+                                screenRecordConfigDialogBitRateInputText = screenRecordBitRate
+                                screenRecordConfigDialogResolutionInputText = screenRecordResolution
+                                screenRecordConfigDialogCustomPrefixInputText = screenRecordCustomPrefix
+                                screenRecordConfigDialogFullRandomInputText = screenRecordFullRandom
+                                screenRecordConfigDialogEnableBugreport = screenRecordBugreport
+                                screenRecordConfigDialog = true
                             }
-                        }
-                    )
+                        )
+                    }
+                }
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Outlined.VisibilityOff,
+                            title = stringResource(R.string.stealth_overlay),
+                            subtitle = stringResource(R.string.stealth_overlay_description),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                if (!Settings.canDrawOverlays(context)) {
+                                    overlayPermissionRequireDialog = true
+                                } else {
+                                    stealthOverlayConfigDialog = true
+                                }
+                            }
+                        )
+                    }
+                }
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.Cast,
+                            title = stringResource(R.string.stealth_screen_sharing),
+                            subtitle = stringResource(R.string.click_to_config_stealth_screen_sharing),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                screenShareConfigDialogLocalPort = screenShareLocalPort.toString()
+                                screenShareConfigDialogMaxSize = screenShareMaxSize.toString()
+                                screenShareConfigDialogMaxFps = screenShareMaxFps.toString()
+                                screenShareConfigDialogVideoBitRate = screenShareVideoBitRate.toString()
+                                screenShareConfigDialogAllowControl = screenShareControl
+                                screenShareConfigDialogSyncClipboard = screenShareSyncClipboard
+                                screenShareConfigDialogEnableVideo = screenShareVideo
+                                screenShareConfigDialogVideoDisplay = screenShareVideoDisplay
+                                screenShareConfigDialogVideoDisplayID = screenShareVideoDisplayID
+                                screenShareConfigDialogVideoCamera = screenShareVideoCamera
+                                screenShareConfigDialogVideoCameraID = screenShareVideoCameraID
+                                screenShareConfigDialogVideoCameraZoom = screenShareVideoCameraZoom
+                                screenShareConfigDialogVideoCameraTorch = screenShareVideoCameraTorch
+                                screenShareConfigDialogEnableAudio = screenShareAudio
+                                screenShareConfigDialogAudioOutput = screenShareAudioOutput
+                                screenShareConfigDialogAudioMic = screenShareAudioMic
+                                // 密码必须回填：否则对话框显示空，确认时"旧值≠空"被判定
+                                // 为用户清除了密码，putSensitive("") 抹掉已存密码——
+                                // app 侧随后 fail-closed 拒绝共享、daemon 侧无鉴权裸奔
+                                screenShareConfigDialogPassword = screenSharePassword
+                                screenShareConfigDialog = true
+                            }
+                        )
+                    }
+                }
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.CellTower,
+                            title = stringResource(R.string.ssh_tunnel),
+                            subtitle = stringResource(R.string.click_to_config_ssh_tunnel),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                sshTunnelConfigDialogEnabled = sshTunnelEnabled
+                                sshTunnelConfigDialogServerAddress = sshTunnelServerAddress
+                                sshTunnelConfigDialogServerPort = sshTunnelServerPort.toString()
+                                sshTunnelConfigDialogUserName = sshTunnelUserName
+                                sshTunnelConfigDialogUserPassword = sshTunnelUserPassword
+                                // 回填 remotePort：漏掉会保留上次未保存的编辑值。
+                                // 判空口径与初始 remember 统一（合法区间 1024..65535
+                                // 之外一律视为未配置——运行时两侧本就按该区间回退
+                                // 本地端口，显示越界存量值只会造成两处显示不一致）
+                                sshTunnelConfigDialogRemotePort =
+                                    if (sshTunnelRemotePort in 1024..65535) sshTunnelRemotePort.toString() else ""
+                                sshTunnelConfigDialog = true
+                            }
+                        )
+                    }
+                }
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.LockReset,
+                            title = stringResource(R.string.hardware_file_encryption_and_decryption),
+                            subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                if (Environment.isExternalStorageManager()) {
+                                    fileEncryptionWarnings = true
+                                } else {
+                                    externalStorageRequireDialog = true
+                                }
+                            }
+                        )
+                    }
+                }
+                item {
+                    CommonCard {
+                        PreferenceItemEx(
+                            icon = Icons.Default.LockReset,
+                            title = stringResource(R.string.software_file_encryption_and_decryption),
+                            subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
+                            trailingContent = {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    contentDescription = null
+                                )
+                            },
+                            onClick = {
+                                if (Environment.isExternalStorageManager()) {
+                                    pickFilesForPasswordLauncher.launch(arrayOf("*/*"))
+                                } else {
+                                    externalStorageRequireDialog = true
+                                }
+                            }
+                        )
+                    }
                 }
             }
-            item {
-                CommonCard {
-                    PreferenceItemEx(
-                        icon = Icons.Default.LockReset,
-                        title = stringResource(R.string.software_file_encryption_and_decryption),
-                        subtitle = stringResource(R.string.click_to_encrypt_or_decrypt_files),
-                        trailingContent = {
-                            Icon(
-                                Icons.Default.ChevronRight,
-                                contentDescription = null
-                            )
-                        },
-                        onClick = {
-                            if (Environment.isExternalStorageManager()) {
-                                pickFilesForPasswordLauncher.launch(arrayOf("*/*"))
-                            } else {
-                                externalStorageRequireDialog = true
-                            }
-                        }
-                    )
+            // 文件批量加/解密进行中：模态遮罩提供进行中反馈，并拦截点击
+            // 防止经入口卡片重复触发并发处理
+            if (isProcessing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f))
+                        .pointerInput(Unit) { detectTapGestures { } }
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                 }
             }
         }
