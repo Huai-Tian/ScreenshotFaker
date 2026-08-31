@@ -118,18 +118,25 @@ object ScreenShareManager {
             val videoDisplay =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_display", true)
                     .let { if (it) "video_source=display" else "" }
+            // display_id/camera_id/camera_zoom 为用户自由文本，最终经 sh 执行
+            //（守护脚本/daemon 侧 sh -c）——校验防元字符，非法值按未配置处理
+            //（与磁贴 displayID/bitrate/resolution 的校验同语义）
             val videoDisplayID =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_display_id", "")
-                    .let { if (it.isEmpty()) "" else "display_id=$it" }
+                    .let {
+                        if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "display_id=$it"
+                    }
             val videoCamera =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera", false)
                     .let { if (it) "video_source=camera" else "" }
             val videoCameraID =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_id", "0")
-                    .let { "camera_id=$it" }
+                    .let { if (Auxiliary.isConfigValid(it)) "camera_id=$it" else "" }
             val videoCameraZoom =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_zoom", "")
-                    .let { if (it.isEmpty()) "" else "camera_zoom=$it" }
+                    .let {
+                        if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "camera_zoom=$it"
+                    }
             val videoCameraTorch =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_torch", false)
                     .let { "camera_torch=$it" }

@@ -225,13 +225,18 @@ object IdleWatchdog {
         val boot = readBootCount()
         val er = SystemClock.elapsedRealtime()
         val wc = System.currentTimeMillis()
-        // 当前墙钟明显不可信（RTC 耗尽回到出厂值/1970，NTP 未及恢复）：
-        // 此时一切 wc 判定（倒退/漂移/跨重启到期）均无意义，继续走必然
-        // 引爆真实用户。推迟判定到时钟恢复后的下一触发点。安全代价：
-        // 攻击者持续冻结时钟在 <2020 可使跨重启墙钟判定失效——但同开机
-        // 死线判定只依赖 er 不受影响，且"冻结时钟至不可用状态"与已声明
-        // 边界（force-stop / 禁用 receiver）同级，防误毁优先
-        if (wc < WC0_MIN) return false
+        // 错钟守卫（收窄版）：当前墙钟明显不可信（RTC 耗尽回到出厂值/
+        // 1970，NTP 未及恢复）时，一切依赖 wc 的判定（漂移/倒退/跨重启
+        // 到期）推迟到时钟恢复后的下一触发点——继续走必然引爆真实用户
+        // （误毁零容忍）。到期判定虽只依赖单调 er，但错钟期间 writeAnchor
+        // 拒绝落盘 → 锚点无法续期 → "钟坏但活跃"的用户（RTC 掉电 + 无网，
+        // 短档位）会被陈旧 er0 误判到期，同样推迟。冻结/回拨方向由 daemon
+        // 侧 uptime 锚点兜底（不依赖墙钟）。
+        // 时钟无关的篡改判定不受守卫影响，照常执行（封堵"冻结时钟至
+        // <2020 令全部判定失效"的旁路）：锚点格式非法/字段越界/
+        // BOOT_COUNT 回退/同开机 er 回退——四者均为精确不变量，与当前
+        // 墙钟无关，错钟期间执行零误毁风险
+        val wallOk = wc >= WC0_MIN
         val parts = st.ts.split(",")
 
         // 通过路径的到期剩余毫秒（布防闹钟用；null = 不布防）
@@ -251,54 +256,63 @@ object IdleWatchdog {
                 if (boot < 0 || boot0 < 0) {
                     // 设备不支持 BOOT_COUNT：退回双锚点启发式（与旧行为一致）。
                     // 注意：评估完直接短路（不走下方 when）——否则 boot=-1 与
-                    // 合法 boot0 比较落入 else 分支误判"BOOT_COUNT 回退"误杀
-                    if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
-                        DefenseProtocol.destroyForCoercionLocked()
-                        return true
+                    // 合法 boot0 比较落入 else 分支误判"BOOT_COUNT 回退"误杀。
+                    // 启发式含墙钟判定，错钟期间整体推迟
+                    if (wallOk) {
+                        if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
                     }
-                    armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
                 } else when {
                     boot == boot0 -> {
-                        // 同一开机：er 单调，er<er0 即非法
+                        // 同一开机：er 单调，er<er0 即非法（时钟无关，
+                        // 错钟期间照常执行）
                         if (er < er0) {
                             DefenseProtocol.destroyForCoercionLocked()
                             return true
                         }
-                        val erDiff = er - er0
-                        val wcDiff = wc - wc0
-                        // 双锚点交叉校验——单向引爆（仅 wc 落后 er 超容差）：
-                        // - 落后方向（erDiff - wcDiff > 容差）= 墙钟冻结/回拨，
-                        //   是攻击方向（拖后墙钟 = 延长跨重启死线）→ 引爆
-                        // - 超前方向（wc 前跳）= 用户手动对时/长途时区跨越/
-                        //   长时间离线后 NTP 步进校正，攻击无收益（同开机死线
-                        //   只依赖 er，前跳只会让墙钟死线提前）→ 绝不引爆
-                        //   （误毁零容忍）。不重写锚点：er0 是同开机死线基准，
-                        //   重写会放宽它；跨重启 wc0 基线保持旧值，前跳至多
-                        //   令跨重启判定顺延同等时长，无引爆风险
-                        if (erDiff - wcDiff > ANCHOR_DRIFT_TOLERANCE_MS) {
-                            DefenseProtocol.destroyForCoercionLocked()
-                            return true
+                        if (wallOk) {
+                            val erDiff = er - er0
+                            val wcDiff = wc - wc0
+                            // 双锚点交叉校验——单向引爆（仅 wc 落后 er 超容差）：
+                            // - 落后方向（erDiff - wcDiff > 容差）= 墙钟冻结/回拨，
+                            //   是攻击方向（拖后墙钟 = 延长跨重启死线）→ 引爆
+                            // - 超前方向（wc 前跳）= 用户手动对时/长途时区跨越/
+                            //   长时间离线后 NTP 步进校正，攻击无收益（同开机死线
+                            //   只依赖 er，前跳只会让墙钟死线提前）→ 绝不引爆
+                            //   （误毁零容忍）。不重写锚点：er0 是同开机死线基准，
+                            //   重写会放宽它；跨重启 wc0 基线保持旧值，前跳至多
+                            //   令跨重启判定顺延同等时长，无引爆风险
+                            if (erDiff - wcDiff > ANCHOR_DRIFT_TOLERANCE_MS) {
+                                DefenseProtocol.destroyForCoercionLocked()
+                                return true
+                            }
+                            if (erDiff >= limitMs) {
+                                DefenseProtocol.destroyForCoercionLocked()
+                                return true
+                            }
+                            armDelayMs = (er0 + limitMs) - er
                         }
-                        if (erDiff >= limitMs) {
-                            DefenseProtocol.destroyForCoercionLocked()
-                            return true
-                        }
-                        armDelayMs = (er0 + limitMs) - er
                     }
 
                     boot > boot0 -> {
                         // 重启过（可能多次）：er 跨开机比较无意义，墙钟判定。
                         // 大幅倒退（超出容差）= 回拨 = 非法；容差内倒退容忍
-                        // （NTP 校正），死线至多顺延同等时长
-                        if (wc < wc0 - ROLLBACK_TOLERANCE_MS) {
-                            DefenseProtocol.destroyForCoercionLocked()
-                            return true
+                        // （NTP 校正），死线至多顺延同等时长。错钟期间墙钟
+                        // 判定无意义，整体推迟
+                        if (wallOk) {
+                            if (wc < wc0 - ROLLBACK_TOLERANCE_MS) {
+                                DefenseProtocol.destroyForCoercionLocked()
+                                return true
+                            }
+                            if (wc - wc0 >= limitMs) {
+                                DefenseProtocol.destroyForCoercionLocked()
+                                return true
+                            }
+                            armDelayMs = (wc0 + limitMs) - wc
                         }
-                        if (wc - wc0 >= limitMs) {
-                            DefenseProtocol.destroyForCoercionLocked()
-                            return true
-                        }
-                        armDelayMs = (wc0 + limitMs) - wc
                     }
 
                     else -> {
@@ -311,19 +325,23 @@ object IdleWatchdog {
 
             2 -> {
                 // 旧版两段式锚点（更早版本写入）：按旧规则评估一次，通过则迁移新格式。
-                // 评估逻辑与旧代码一致，不比旧版更严格（升级用户不引入新误炸）
+                // 评估逻辑与旧代码一致，不比旧版更严格（升级用户不引入新误炸）。
+                // 字段合法性为时钟无关判定照常执行；墙钟评估与迁移写入
+                // （writeAnchor 在错钟期间拒绝落盘，迁移必然失败）推迟
                 val er0 = parts[0].toLongOrNull()
                 val wc0 = parts[1].toLongOrNull()
                 if (er0 == null || wc0 == null || er0 < 0 || wc0 < WC0_MIN) {
                     DefenseProtocol.destroyForCoercionLocked()
                     return true
                 }
-                if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
-                    DefenseProtocol.destroyForCoercionLocked()
-                    return true
+                if (wallOk) {
+                    if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                        DefenseProtocol.destroyForCoercionLocked()
+                        return true
+                    }
+                    writeAnchor()
+                    armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
                 }
-                writeAnchor()
-                armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
             }
 
             else -> {
@@ -438,15 +456,20 @@ object IdleWatchdog {
      * 下一次检查（ts 空检查先于错钟守卫执行）即判篡改引爆。错钟期间整体
      * 中止启用（本次设置不生效，时钟恢复后用户重新启用即可）；
      * 锚点 IO 失败同理——宁可不启用，不制造引爆态
+     *
+     * @return false = 启用中止（锚点落盘失败），本次设置未生效——调用方
+     * 不得按已生效反馈（UI 回填新档位），否则用户看到"已启用 X 分钟
+     * 销毁"而实际防护仍是旧值/未启用（虚假安全感）
      */
-    suspend fun setIdleTimeout(minutes: Long) {
+    suspend fun setIdleTimeout(minutes: Long): Boolean {
         // commit（同步落盘）：与注释"先立于不败"的时序声明一致——
         // apply 异步落盘在写入后数毫秒内进程死亡会丢失哨兵（无门禁
         // 用户启用超时后 app 侧超时静默失效）
         prefs().edit(commit = true) { putBoolean(KEY_ARMED, true) }
-        if (!writeAnchor()) return
+        if (!writeAnchor()) return false
         ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_LIMIT, minutes)
         DaemonManager.renewIdleDeadline(minutes)
+        return true
     }
 
     /** 当前档位（未启用返回 null，用于设置页副标题） */

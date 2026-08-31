@@ -303,11 +303,14 @@ object DaemonManager {
                 key = "screenshot_suffix",
                 defaultValue = ".png"
             )
+            // displayID 校验（防元字符进 shell）：daemon 侧 execute_command 对
+            // 非末段原样拼接进 sh -c（其注释明言依赖本侧 isConfigValid），
+            // 非法值按未配置处理——与磁贴路径对齐，消除"同一配置两种执行结果"
             val displayID = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenshot_display_id",
                 defaultValue = ""
-            ).let { if (it.isEmpty()) "" else "-d $it" }
+            ).let { if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "-d $it" }
             listOf(
                 "screencap",
                 "-p",
@@ -332,21 +335,22 @@ object DaemonManager {
                 key = "screenRecord_suffix",
                 defaultValue = ".mp4"
             )
+            // 同 screenshot_display_id：daemon 侧原样拼接进 sh -c，须先校验
             val displayID = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_display_id",
                 defaultValue = ""
-            ).let { if (it.isEmpty()) "" else "--display-id $it" }
+            ).let { if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--display-id $it" }
             val bitrate = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_bitrate",
                 defaultValue = ""
-            ).let { if (it.isEmpty()) "" else "--bit-rate $it" }
+            ).let { if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--bit-rate $it" }
             val resolution = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_resolution",
                 defaultValue = ""
-            ).let { if (it.isEmpty()) "" else "--size $it" }
+            ).let { if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--size $it" }
             val bugreport = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_bugreport",
@@ -376,18 +380,25 @@ object DaemonManager {
             val videoDisplay =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_display", true)
                     .let { if (it) "video_source=display" else "" }
+            // 共享参数校验（与 ScreenShareManager.startScreenShareInternal 同语义）：
+            // daemon 侧 spawn_shell_command 经 sh -c 执行该命令串，自由文本
+            // 参数须防元字符，非法值按未配置处理
             val videoDisplayID =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_display_id", "")
-                    .let { if (it.isEmpty()) "" else "display_id=$it" }
+                    .let {
+                        if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "display_id=$it"
+                    }
             val videoCamera =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera", false)
                     .let { if (it) "video_source=camera" else "" }
             val videoCameraID =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_id", "0")
-                    .let { "camera_id=$it" }
+                    .let { if (Auxiliary.isConfigValid(it)) "camera_id=$it" else "" }
             val videoCameraZoom =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_zoom", "")
-                    .let { if (it.isEmpty()) "" else "camera_zoom=$it" }
+                    .let {
+                        if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "camera_zoom=$it"
+                    }
             val videoCameraTorch =
                 ConfigManager.getDataOnce(appContext, "screenShare_video_camera_torch", false)
                     .let { "camera_torch=$it" }

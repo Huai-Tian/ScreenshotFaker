@@ -233,7 +233,11 @@ object Auxiliary {
                 t, DateTimeFormatter.ofPattern("yyyy-M-d H:m")
             ).format(DateTimeFormatter.ofPattern("yyyyMMddHHmm.ss"))
         }.getOrNull() ?: return
-        exec("touch -t $fmt '$path'")
+        // fmt 由 LocalDateTime 格式化而来（纯数字+点，无元字符）；path 含
+        // 用户可控的保存路径/前缀/后缀，必须 shellQuote——裸单引号包裹遇
+        // 路径内单引号即闭合逃逸，构成用户自伤型命令注入（root 模式放大），
+        // 与磁贴输出路径的引用修复同语义
+        exec("touch -t $fmt ${shellQuote(path)}")
     }
 
     private val secureRandom = java.security.SecureRandom()

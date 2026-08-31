@@ -1023,8 +1023,15 @@ fun SettingsCompose(navController: NavController) {
                         onClick = {
                             idleSelectedLimit?.let { selected ->
                                 scope.launch {
-                                    IdleWatchdog.setIdleTimeout(selected)
-                                    idleCurrentLimit = selected
+                                    // 启用中止（错钟/锚点 IO 失败）时回读真实
+                                    // 生效档位——无条件回填新值会让副标题显示
+                                    // 一个并未生效的防护档位（虚假安全感）
+                                    if (IdleWatchdog.setIdleTimeout(selected)) {
+                                        idleCurrentLimit = selected
+                                    } else {
+                                        idleCurrentLimit =
+                                            IdleWatchdog.getCurrentIdleTimeout()
+                                    }
                                 }
                             }
                             idleTimeoutDialog = false
