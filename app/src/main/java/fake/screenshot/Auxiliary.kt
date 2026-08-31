@@ -135,6 +135,26 @@ object Auxiliary {
         return exitCode == 0
     }
 
+    /**
+     * 带身份复核的进程终止：仅当 /proc/<pid>/cmdline 仍含预期标记时发信号。
+     * PID 复用防护——screenrecord 早期崩溃后其 PID 被系统复用时，
+     * 不复核的 kill -2 会打到无关进程（与 daemon 侧 proc_start_ticks
+     * 复核同一语义；app 侧无法直接读 /proc starttime，用 cmdline 标记
+     * 替代——复用者 cmdline 含同一标记的概率可忽略）。
+     * @return true = 已发信号；false = 进程不存在或身份不符（未发信号）
+     */
+    fun killProcessIfCmdlineMatches(pid: Int, marker: String): Boolean {
+        if (pid <= 0) return false
+        val (exitCode, _) = exec(
+            "grep -q ${shellQuote(marker)} /proc/$pid/cmdline 2>/dev/null && kill -2 $pid"
+        )
+        return exitCode == 0
+    }
+
+    /** sh 安全引用：单引号包裹，内部单引号转义为 '\''（与 daemon 侧 shell_quote 同语义） */
+    fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
+
     fun refreshShellState() {
         isShellActivated = try {
             val binder = Shizuku.getBinder()

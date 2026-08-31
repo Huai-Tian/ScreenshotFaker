@@ -43,7 +43,11 @@ class ScreenshotTileService : TileService() {
                     context = this@ScreenshotTileService,
                     key = "screenshot_display_id",
                     defaultValue = ""
-                ).let { if (it.isEmpty()) "" else "-d $it" }
+                ).let {
+                    // 校验（防元字符进 shell，与 daemon 侧处理对齐）：
+                    // 非法值按未配置处理
+                    if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "-d $it"
+                }
                 val customPrefix = ConfigManager.getDataOnce(
                     context = this@ScreenshotTileService,
                     key = "screenshot_custom_prefix",
@@ -89,11 +93,16 @@ class ScreenshotTileService : TileService() {
                     }$suffix"
                 }
                 val tempName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
+                // 输出路径（唯一含用户可控元字符的段）安全引用：与 daemon 侧
+                // shell_quote 对齐——保存路径可含空格/引号/元字符，裸拼会
+                // 拆分参数（screencap 落错位置）或构成用户自伤型命令注入
+                //（root 模式放大）。其余段（screencap/-p/-d N）经校验无元字符
                 val args = listOf(
                     "screencap",
                     "-p",
                     displayID,
-                    if (encryptOutputs) tempPath + tempName else "$savePath/$fileName"
+                    if (encryptOutputs) Auxiliary.shellQuote(tempPath + tempName)
+                    else Auxiliary.shellQuote("$savePath/$fileName")
                 ).filter { it.isNotEmpty() }
                 Auxiliary.exec(args.joinToString(" "))
                 if (encryptOutputs) {

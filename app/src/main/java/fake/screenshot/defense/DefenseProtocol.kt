@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -86,9 +87,21 @@ object DefenseProtocol {
 
     /**
      * 公开销毁入口（胁迫解锁 / 注入检测命中时调用）：加锁执行完整序列。
+     *
+     * NonCancellable：GatePage 曾把销毁跑在 rememberCoroutineScope 上——
+     * 销毁序列含 ~6.5s 有界等待，期间 Activity 重建（旋转/深色模式切换/
+     * 折叠屏展开）即取消协程，中断发生在步骤 3（删 Keystore）之前时
+     * 销毁完全未发生，而该次胁迫输入已被消费：用户以为已销毁，密文
+     * 实际完好且后续检查判定"状态合法"永不补发——胁迫功能被静默废除。
+     * 全调用方（GatePage/MainActivity/Application）统一在此处包裹，
+     * 调用方作用域被取消只影响其后的 UI 回调，不影响销毁本身。
+     * （runBounded 的 withTimeoutOrNull 在 NonCancellable 上下文中
+     * 依然生效：超时取消的是其自建的 TimeoutCoroutine 子作用域）
      */
     suspend fun destroyForCoercion() {
-        checkMutex.withLock { destroyForCoercionLocked() }
+        withContext(NonCancellable) {
+            checkMutex.withLock { destroyForCoercionLocked() }
+        }
     }
 
     /**

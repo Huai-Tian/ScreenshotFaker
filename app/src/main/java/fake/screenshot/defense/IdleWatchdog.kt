@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.content.edit
+import java.io.IOException
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 
@@ -102,6 +103,13 @@ object IdleWatchdog {
     } catch (e: IllegalStateException) {
         // 基础设施状态错误（构造竞态/scope 冲突）：与密文内容无关
         IdleState(false, retryable = true)
+    } catch (_: IOException) {
+        // DataStore IO 层异常（磁盘错误/读取中断/暂时性故障）：与密文
+        // 内容无关。折叠为"密文不可读"会让一次暂时性读失败触发全量
+        // 销毁——误毁代价远高于推迟判定，按"本轮无法判定"放行。
+        // 真正的密钥死亡/密文损坏在 Tink 层抛 GeneralSecurityException，
+        // 走下方分支照常引爆
+        IdleState(false, retryable = true)
     } catch (_: Exception) {
         // Tink 解密失败（GeneralSecurityException）等：密钥已死/密文损坏
         IdleState(false, false, 0L, "")
@@ -126,12 +134,15 @@ object IdleWatchdog {
      * 时钟恢复（NTP/手动）后的前向跳变由 ANCHOR_DRIFT_TOLERANCE 吸收
      * 不了的情形同样依赖此守卫：错钟期间没写过锚点，就不会有
      * "错钟 wc0 + 校正后 wall"的超漂移误判。
+     *
+     * @return false = 未落盘（错钟拒绝 / IO 失败）。调用方据此避免
+     * 制造 "(armed, limit>0, ts 空)" 的引爆态（见 setIdleTimeout）
      */
-    private suspend fun writeAnchor() {
+    private suspend fun writeAnchor(): Boolean {
         val wc = System.currentTimeMillis()
-        if (wc < WC0_MIN) return
+        if (wc < WC0_MIN) return false
         val ts = "${readBootCount()},${SystemClock.elapsedRealtime()},$wc"
-        runCatching { ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_TS, ts) }
+        return runCatching { ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_TS, ts) }.isSuccess
     }
 
     /**
@@ -199,10 +210,11 @@ object IdleWatchdog {
         }
         // limit<=0：未启用。ts 残留视为垃圾忽略（修复：旧版会把 (0, ts≠"") 引爆）
         if (st.limit <= 0L) return false
-        if (st.limit !in idleTimeoutOptions) {
-            DefenseProtocol.destroyForCoercionLocked()
-            return true
-        }
+        // 注：旧版对 limit 不在档位表即引爆——该值存于 GCM 加密的
+        // DataStore，攻击者无法在不持密钥的情况下写入任意值（密文一旦
+        // 被改写，解密直接失败走 readable=false 路径）；"表外值"的唯一
+        // 现实来源是未来版本新增档位后降级安装旧版——引爆 = 纯误毁。
+        // 表校验仅保留在 UI 层（getCurrentIdleTimeout 显示用）
         // limit>0 而 ts 为空：写入时序上不可达（ts 先写），出现即篡改
         if (st.ts.isEmpty()) {
             DefenseProtocol.destroyForCoercionLocked()
@@ -254,11 +266,16 @@ object IdleWatchdog {
                         }
                         val erDiff = er - er0
                         val wcDiff = wc - wc0
-                        // 双锚点交叉校验（抓"只改 er0/wc0 其一"的定向篡改）。
-                        // 同开机到期判定只依赖 er（单调不可回拨，改系统时间
-                        // 对它无效）——wc 倒退不单独引爆：NTP 向后校正是正常
-                        // 行为，小倒退由漂移容差吸收，大倒退(>漂移容差)在此引爆
-                        if (kotlin.math.abs(erDiff - wcDiff) > ANCHOR_DRIFT_TOLERANCE_MS) {
+                        // 双锚点交叉校验——单向引爆（仅 wc 落后 er 超容差）：
+                        // - 落后方向（erDiff - wcDiff > 容差）= 墙钟冻结/回拨，
+                        //   是攻击方向（拖后墙钟 = 延长跨重启死线）→ 引爆
+                        // - 超前方向（wc 前跳）= 用户手动对时/长途时区跨越/
+                        //   长时间离线后 NTP 步进校正，攻击无收益（同开机死线
+                        //   只依赖 er，前跳只会让墙钟死线提前）→ 绝不引爆
+                        //   （误毁零容忍）。不重写锚点：er0 是同开机死线基准，
+                        //   重写会放宽它；跨重启 wc0 基线保持旧值，前跳至多
+                        //   令跨重启判定顺延同等时长，无引爆风险
+                        if (erDiff - wcDiff > ANCHOR_DRIFT_TOLERANCE_MS) {
                             DefenseProtocol.destroyForCoercionLocked()
                             return true
                         }
@@ -325,16 +342,17 @@ object IdleWatchdog {
      * 双锚点启发式（旧版规则，仅两处使用）：
      * er>=er0 视为同一开机做交叉校验；er<er0 视为重启走墙钟判定。
      * BOOT_COUNT 不可用设备的新锚点（boot=-1）也走此路径。
+     * 漂移校验与三段式分支同为单向（仅 wc 落后方向引爆，见其注释）。
      */
     private fun checkLegacyAnchor(
         er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long
     ): Boolean {
         if (er >= er0) {
-            // 同开机语义（与三段式分支一致）：到期只看 er；wc 倒退不单独
-            // 引爆（NTP 校正），小倒退由漂移容差吸收、大倒退在此引爆
+            // 同开机语义（与三段式分支一致）：到期只看 er；漂移仅 wc 落后
+            // 方向引爆（wc 前跳 = 用户对时，攻击无收益，绝不引爆）
             val erDiff = er - er0
             val wcDiff = wc - wc0
-            if (kotlin.math.abs(erDiff - wcDiff) > ANCHOR_DRIFT_TOLERANCE_MS) {
+            if (erDiff - wcDiff > ANCHOR_DRIFT_TOLERANCE_MS) {
                 return true
             }
             return erDiff >= limitMs
@@ -414,13 +432,19 @@ object IdleWatchdog {
      * 任意步骤间崩溃产生的部分状态均为合法态：
      * (armed, 0, "") / (armed, 0, ts) → 未启用；(armed, limit>0, ts) → 完整启用。
      * "limit>0 而 ts 空"不可达，出现即篡改（雷管覆盖）。
+     *
+     * B1 修复：writeAnchor 在墙钟不可信（< WC0_MIN）时拒绝落盘——若此处
+     * 无视失败继续写 limit，会产生 (armed, limit>0, ts="") 的"不可达"状态，
+     * 下一次检查（ts 空检查先于错钟守卫执行）即判篡改引爆。错钟期间整体
+     * 中止启用（本次设置不生效，时钟恢复后用户重新启用即可）；
+     * 锚点 IO 失败同理——宁可不启用，不制造引爆态
      */
     suspend fun setIdleTimeout(minutes: Long) {
         // commit（同步落盘）：与注释"先立于不败"的时序声明一致——
         // apply 异步落盘在写入后数毫秒内进程死亡会丢失哨兵（无门禁
         // 用户启用超时后 app 侧超时静默失效）
         prefs().edit(commit = true) { putBoolean(KEY_ARMED, true) }
-        writeAnchor()
+        if (!writeAnchor()) return
         ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_LIMIT, minutes)
         DaemonManager.renewIdleDeadline(minutes)
     }
@@ -440,12 +464,16 @@ object IdleWatchdog {
      * 旧实现因此恒为 no-op）。仅"真正启用过"（limit>0）时写默认档 +
      * 当前锚点，计时器自愈；armed-only（只设过门禁未启用超时）销毁后
      * 回到未启用态 = 全新状态语义。armed 永不清除。
+     *
+     * B1 同源修复：锚点先行（与"ts 先 limit 后"不变量一致）——锚点
+     * 落盘失败（错钟/IO）则不写 limit，保持销毁后的未启用态
+     * （limit 已被 wipe 清零），绝不制造 (limit>0, ts="") 引爆态
      */
     internal suspend fun resetIdleAfterDestroy(wasActivated: Boolean) {
         if (!wasActivated) return
+        if (!writeAnchor()) return
         ConfigManager.saveData(
             appContext, CONFIG_KEY_IDLE_LIMIT, DEFAULT_IDLE_LIMIT_MINUTES
         )
-        writeAnchor()
     }
 }

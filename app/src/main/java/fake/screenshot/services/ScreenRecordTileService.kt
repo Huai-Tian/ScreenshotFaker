@@ -131,17 +131,24 @@ class ScreenRecordTileService : TileService() {
             context = this,
             key = "screenRecord_display_id",
             defaultValue = ""
-        ).let { if (it.isEmpty()) "" else "--display-id $it" }
+        ).let {
+            // 校验（防元字符进 shell，与 daemon 侧处理对齐）：非法值按未配置处理
+            if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--display-id $it"
+        }
         val bitrate = ConfigManager.getDataOnce(
             context = this,
             key = "screenRecord_bitrate",
             defaultValue = ""
-        ).let { if (it.isEmpty()) "" else "--bit-rate $it" }
+        ).let {
+            if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--bit-rate $it"
+        }
         val resolution = ConfigManager.getDataOnce(
             context = this,
             key = "screenRecord_resolution",
             defaultValue = ""
-        ).let { if (it.isEmpty()) "" else "--size $it" }
+        ).let {
+            if (it.isEmpty() || !Auxiliary.isConfigValid(it)) "" else "--size $it"
+        }
         val customPrefix = ConfigManager.getDataOnce(
             context = this,
             key = "screenRecord_custom_prefix",
@@ -183,7 +190,11 @@ class ScreenRecordTileService : TileService() {
             else -> "${Auxiliary.getCurrentDateString()}_${Auxiliary.getRandomString(4)}$suffix"
         }
         val tempName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
-        val outputPath = if (encryptOutputs) tempPath + tempName else "$savePath/$fileName"
+        // 输出路径（唯一含用户可控元字符的段）安全引用：与 daemon 侧
+        // shell_quote 对齐——保存路径可含空格/引号/元字符，裸拼会拆分
+        // 参数或构成用户自伤型命令注入（root 模式放大）。其余段经校验
+        val outputPath = if (encryptOutputs) Auxiliary.shellQuote(tempPath + tempName)
+        else Auxiliary.shellQuote("$savePath/$fileName")
 
         lastEncryptOutputs = encryptOutputs
         lastSavePath = savePath
@@ -223,7 +234,9 @@ class ScreenRecordTileService : TileService() {
         }
         val pid = recordPid
         if (pid != null) {
-            Auxiliary.killProcess(pid)
+            // 身份复核：screenrecord 早期崩溃后 PID 被复用时，裸 kill -2
+            // 会误杀无关进程（与 daemon 侧 PID 复用防护同一语义）
+            Auxiliary.killProcessIfCmdlineMatches(pid, "screenrecord")
         }
         isRecording = false
         recordPid = null

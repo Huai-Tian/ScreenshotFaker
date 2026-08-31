@@ -89,17 +89,24 @@ fun GateCompose(onUnlocked: () -> Unit) {
                 onClick = {
                     verifying = true
                     scope.launch {
-                        when (GateManager.verifyGate(password)) {
+                        // 兜底：验证链任何意外异常按"密码错误"处理——
+                        // 不捕获会让 verifying 永久为 true（按钮卡死在
+                        // 加载态且无提示）或直接崩溃进程
+                        val result = runCatching { GateManager.verifyGate(password) }
+                            .getOrNull()
+                        when (result) {
                             GateResult.SECURITY -> {
                                 // 组装/激活 DK 拆分（失败不阻断解锁，DK 功能 fail-closed）
-                                GateManager.onSecurityUnlock(password)
+                                runCatching { GateManager.onSecurityUnlock(password) }
                                 onUnlocked()
                             }
                             GateResult.COERCION -> {
-                                DefenseProtocol.destroyForCoercion()
+                                // NonCancellable 在 DefenseProtocol 内部包裹：
+                                // 本协程随 Activity 重建被取消也不中断销毁序列
+                                runCatching { DefenseProtocol.destroyForCoercion() }
                                 onUnlocked()
                             }
-                            GateResult.INVALID -> {
+                            else -> {
                                 failed = true
                                 verifying = false
                             }

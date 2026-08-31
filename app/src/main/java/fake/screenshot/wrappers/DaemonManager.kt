@@ -172,6 +172,16 @@ object DaemonManager {
         return false
     }
 
+    /**
+     * 停止 daemon 管理的屏幕共享（不停止 daemon 本身）。
+     * app 侧的 pkill 杀不掉 supervisor 守护的 server（1s 内自动重启），
+     * 必须经加密信道通知 daemon——否则用户点"停止"后推流继续，
+     * 隐私持续泄露且无感知。daemon 不在线（返回 false）= 无 daemon
+     * 管理的共享可停，调用方继续常规 pkill 清理即可
+     */
+    suspend fun stopDaemonManagedShare(): Boolean =
+        runCatching { sendCommand("shareoff") }.getOrNull() == "fine"
+
     suspend fun detachDaemon(): Boolean = mutex.withLock {
         sendCommand("detach") ?: return !isDaemonRunning()
         // 发送成功，等待进程退出

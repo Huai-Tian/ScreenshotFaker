@@ -290,6 +290,11 @@ object ScreenShareManager {
         Auxiliary.refreshShellState()
         scope.launch {
             if (relayRunning || isServerActuallyRunning()) {
+                // daemon 管理的共享（日志触发启动）经加密信道停止：app 侧
+                // pkill 杀不掉 supervisor 守护的 server（1s 内重启），不通知
+                // 则推流继续而用户以为已停止（隐私持续泄露）。daemon 不在线
+                // 时秒级失败，继续常规清理，无害
+                runCatching { DaemonManager.stopDaemonManagedShare() }
                 stopScreenShare()
                 notifyStateChanged()
                 return@launch

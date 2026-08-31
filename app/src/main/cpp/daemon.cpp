@@ -50,7 +50,13 @@ string g_record_tmp;            // record_mutex 保护
 static char g_rec_tmp_buf[256];
 static volatile sig_atomic_t g_rec_tmp_len = 0;
 // 共享 server 落地文件路径（detonate 时删除）
+// 双表示（同 g_record_tmp）：std::string 供线程内加锁访问；定长缓冲 +
+// sig_atomic 长度供 SIGTERM handler 无锁读取——原实现 handler 不清理该
+// 文件，kill-by-discovery 兜底路径（pkill -TERM）会把它残留在共享 tmp
+// 目录（tmp 中唯一带 dex 魔数的随机名文件 = 功能特征）
 string g_share_server_file;     // record_mutex 复用保护（低频写，无竞争热点）
+static char g_share_file_buf[256];
+static volatile sig_atomic_t g_share_file_len = 0;
 // 录屏明文 tmp 指针文件路径（key 派生随机隐藏名，main 初始化后只读）：
 // 明文落盘期间存在，收尾/清理路径删除；SIGKILL 后由下次启动的孤儿回收消费
 string g_rec_mark;
@@ -85,6 +91,22 @@ static void clear_record_tmp() {
     if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
 }
 
+// 共享 server 落地文件路径维护（record_mutex 下调用，同 set_record_tmp 的
+// sig_atomic 双表示协议：先清长度后拷贝）
+static void set_share_server_file(const string &p) {
+    g_share_file_len = 0;
+    if (p.size() < sizeof(g_share_file_buf)) {
+        memcpy(g_share_file_buf, p.c_str(), p.size());
+        g_share_file_len = static_cast<sig_atomic_t>(p.size());
+    }
+    g_share_server_file = p;
+}
+
+static void clear_share_server_file() {
+    g_share_file_len = 0;
+    g_share_server_file.clear();
+}
+
 /**
  * SIGTERM 兜底清理（kill-by-discovery 路径：app 侧信道不可用时按端口杀进程）。
  * 信号安全说明：锚点/自拷贝路径在 main 初始化后只读（其他线程不写），
@@ -100,6 +122,12 @@ static void term_handler(int) {
         memcpy(buf, g_rec_tmp_buf, static_cast<size_t>(g_rec_tmp_len));
         buf[g_rec_tmp_len] = 0;
         remove(buf);
+    }
+    if (g_share_file_len > 0) {
+        char sbuf[256];
+        memcpy(sbuf, g_share_file_buf, static_cast<size_t>(g_share_file_len));
+        sbuf[g_share_file_len] = 0;
+        remove(sbuf);
     }
     if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
     if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
@@ -138,6 +166,12 @@ atomic<pid_t> share_server_pid{-1};
 // ——延迟补杀（stop/detach/引爆/toggle）前的 PID 身份复核依据
 static atomic<long long> share_server_pid_start{-1};
 static thread share_supervisor;
+// share_supervisor 的 join/move-assign 串行化：toggle_share（filter 线程）
+// 与 stop/purge 命令（client 线程）可并发触达——两个线程对同一
+// std::thread 同时 join（第二个抛 system_error → terminate）或 join 与
+// 赋值交错（UB）。锁序：stop 命令持 stop_mutex 后再取本锁，toggle 只取
+// 本锁，无环。supervisor 线程自身不取本锁（join 它的持锁者不会被它阻塞）
+static mutex share_supervisor_mutex;
 
 void daemonize() {
     pid_t pid = fork();
@@ -654,6 +688,17 @@ struct SshTunnel {
         do {
             sock = connect_with_timeout(host, port, 8000);
             if (sock < 0) break;
+            // 阻塞阶段（握手/认证/远程监听建立）的总时限：libssh2 阻塞模式
+            // 的收发沿用 socket 超时（超时表现为 EAGAIN → 握手失败）——
+            // 配置的服务器"接受 TCP 但不响应协议"时 handshake 会永久挂起，
+            // supervisor 卡死在 tunnel.start（此时尚未进入可检查停止标志的
+            // 循环）→ stop 命令的 join 无界 + 共享 toggle 的 join 卡死 filter
+            // 线程（全部日志触发失效）。15s 远大于正常握手+认证（<2s）；
+            // 进入非阻塞模式后该超时不再参与（非阻塞 read 立即 EAGAIN 返回，
+            // 走各自的 usleep 轮询节奏）
+            struct timeval ssh_to{15, 0};
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &ssh_to, sizeof(ssh_to));
+            setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &ssh_to, sizeof(ssh_to));
             session = libssh2_session_init();
             if (!session) break;
             libssh2_session_set_blocking(session, 1);
@@ -895,10 +940,10 @@ void share_supervisor_main() {
         }
     }
     chmod(server_file.c_str(), 0600);
-    // 记录落地路径（detonate 时删除；supervisor 退出时清除）
+    // 记录落地路径（detonate/SIGTERM 时删除；supervisor 退出时清除）
     {
         lock_guard<mutex> lock(record_mutex);
-        g_share_server_file = server_file;
+        set_share_server_file(server_file);
     }
     SshTunnel tunnel;
     if (ssh_enabled) {
@@ -906,7 +951,7 @@ void share_supervisor_main() {
             remove(server_file.c_str());
             {
                 lock_guard<mutex> lock(record_mutex);
-                g_share_server_file.clear();
+                clear_share_server_file();
             }
             share_running.store(false);
             return;
@@ -956,7 +1001,7 @@ void share_supervisor_main() {
     remove(server_file.c_str());
     {
         lock_guard<mutex> lock(record_mutex);
-        g_share_server_file.clear();
+        clear_share_server_file();
     }
     share_running.store(false);
 }
@@ -973,10 +1018,14 @@ void toggle_share() {
     }
     // daemon 未管理共享：先清理可能残留的 server（daemon 重启场景）
     kill_relay_processes();
-    if (share_supervisor.joinable()) share_supervisor.join();
-    share_stop_requested.store(false);
-    share_running.store(true);
-    share_supervisor = thread(share_supervisor_main);
+    {
+        // supervisor 生命周期互斥（见 share_supervisor_mutex 注释）
+        lock_guard<mutex> sup_lock(share_supervisor_mutex);
+        if (share_supervisor.joinable()) share_supervisor.join();
+        share_stop_requested.store(false);
+        share_running.store(true);
+        share_supervisor = thread(share_supervisor_main);
+    }
 }
 
 // ===================== 超时看门狗 =====================
@@ -1013,7 +1062,7 @@ void toggle_share() {
         }
         if (!g_share_server_file.empty()) {
             remove(g_share_server_file.c_str());
-            g_share_server_file.clear();
+            clear_share_server_file();
         }
         // 指针文件一并清除（明文 tmp 已删；防 detonate 后残留指向已删文件的指针）
         if (!g_rec_mark.empty()) remove(g_rec_mark.c_str());
@@ -1724,7 +1773,12 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             // 身份复核后再补杀（防 PID 复用误杀；见 share_server_pid_start）
             if (pid_is_same(pid, share_server_pid_start.load())) kill(pid, SIGKILL);
         }
-        if (share_supervisor.joinable()) share_supervisor.join();
+        {
+            // supervisor 生命周期互斥（见 share_supervisor_mutex 注释；
+            // 锁序 stop_mutex → share_supervisor_mutex，与 toggle 侧一致）
+            lock_guard<mutex> sup_lock(share_supervisor_mutex);
+            if (share_supervisor.joinable()) share_supervisor.join();
+        }
         // purge：清扫 app 侧共享（在自身 supervisor 收尾后进行）
         //（监听 fd 不再显式 close：进程即将持锁 _exit(0)，fd 随进程释放）
         if (command == "purge") {
@@ -1753,6 +1807,20 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             }
             _exit(0);
         }
+    } else if (command == "shareoff") {
+        // app 侧停止共享（磁贴/页面 toggle）：app 的 pkill 杀不掉本进程
+        // 管理的 server（supervisor 1s 内重启），必须经加密信道通知——
+        // 否则用户以为已停止而推流继续（隐私持续泄露且无感知）。
+        // 与 toggle_share 停止分支同构：置停止标志 + SIGINT（身份复核），
+        // supervisor 异步完成收尾（1s 后 SIGKILL 兜底、隧道拆除、落地
+        // 文件删除）。不 join（异步收尾，调用方不等）
+        if (share_running.load()) {
+            share_stop_requested.store(true);
+            pid_t pid = share_server_pid.load();
+            if (pid_is_same(pid, share_server_pid_start.load())) kill(pid, SIGINT);
+            share_running.store(false);
+        }
+        reply_plain = "fine\x1C" + to_string(get_current_timestamp_seconds());
     } else if (command == "detach") {
         reply_plain = "Detaching\x1C" + to_string(get_current_timestamp_seconds());
         send_encrypted(client_fd, key, reply_plain);
