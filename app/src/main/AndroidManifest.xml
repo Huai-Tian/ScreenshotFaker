@@ -13,6 +13,20 @@
     <uses-permission
         android:name="android.permission.REQUEST_INSTALL_PACKAGES"
         tools:ignore="RequestInstallPackagesPolicy" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 通知栏遮盖防护（防 tapjacking）：令恶意悬浮窗无法盖在门禁/设置
+         密码框上偷窥或劫持输入（MainActivity.applyOverlayProtection） -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <!-- 超时销毁到期复查闹钟（精确档）权限组合：
+         31-32：SCHEDULE_EXACT_ALARM 安装即授予（仅限这两个版本，13+ 默认拒绝）
+         33+  ：USE_EXACT_ALARM 安装即授予且不可撤销——本 app 核心功能即
+                "计时雷管"，符合该权限设计语义；sideload 分发，无 Play 政策约束
+         运行时仍保留 canScheduleExactAlarms 探测降级（兜底：Android 12 用户
+         手动撤销等罕见情形，降级 setAndAllowWhileIdle，销毁推迟不缺席） -->
+    <uses-permission
+        android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
         android:name=".LSPosedServiceManager"
@@ -102,6 +116,7 @@
         </service>
         <service
             android:name=".services.ScreenShareTileService"
+            android:enabled="true"
             android:exported="true"
             android:icon="@drawable/ic_launcher_foreground"
             android:label="@string/stealth_screencast"
@@ -113,5 +128,22 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+        <!-- 重启后的超时自毁检查：BOOT_COMPLETED 为受保护广播，仅系统可发 -->
+        <receiver
+            android:name=".services.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <!-- 超时销毁到期复查闹钟：检查通过但未到期时布防，到点无头复查
+             （未到期则重新布防，链条自续）。不跨重启：重启由
+             BootCompletedReceiver 接管链条。exported=false，仅本 app
+             PendingIntent 可触发 -->
+        <receiver
+            android:name=".defense.AlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 </manifest>

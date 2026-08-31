@@ -3,6 +3,8 @@ package fake.screenshot.wrappers
 import android.content.Context
 import android.os.Environment
 import fake.screenshot.Auxiliary
+import fake.screenshot.defense.KeyVault
+import fake.screenshot.defense.SensitiveStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -44,7 +46,7 @@ object DaemonManager {
 
     /** 可空：DK 拆分激活且本会话未解锁组装时无密钥可用（fail-closed） */
     private fun getKey(): SecretKeySpec? =
-        cachedKey ?: EncryptManager.getDaemonKeyOrNull()?.also { cachedKey = it }
+        cachedKey ?: KeyVault.getDaemonKeyOrNull()?.also { cachedKey = it }
 
     /** 胁迫销毁后清信道密钥缓存：后续操作走重新生成的 DK，不复用已销毁密钥 */
     fun clearCachedKey() {
@@ -72,7 +74,8 @@ object DaemonManager {
             // DK 拆分激活且未组装 → 无密钥 → 启动失败（fail-closed：
             // 解锁一次即可恢复，绝不在无密钥状态下给出半可用语义）
             val key = getKey() ?: return@withContext false
-            val daemonPath = "${appContext.applicationInfo.nativeLibraryDir}/libdaemon.so"
+            // 库名中性化（隐蔽性）：daemon 就地运行时路径进入 cmdline（ps 可见）
+            val daemonPath = "${appContext.applicationInfo.nativeLibraryDir}/libnetsvc.so"
             val (exitCode, _) = Auxiliary.execWithStdin("$daemonPath $port", key.encoded)
             if (exitCode != 0) {
                 return@withContext false
@@ -91,32 +94,58 @@ object DaemonManager {
     }
 
     /**
-     * daemon 进程是否仍存活（按端口特征探测，不依赖加密信道）。
-     * 自拷贝体 cmdline："/data/local/tmp/.<rand> <port>"；
-     * 就地运行回落态 cmdline 含 "libdaemon.so <port>"
+     * daemon 兜底探测/杀进程模式（不依赖加密信道，不依赖端口）。
+     * daemon 启动后会把端口从 argv 内存擦除（memset argv[1]，防 cmdline
+     * 泄露），因此模式不能含端口：
+     * - 自拷贝体：cmdline = "/data/local/tmp/.<rand20-35>"（端口已擦空），
+     *   锚定隐藏随机名的形状（'.' 前缀 + 20..35 位字母数字，random_hidden_tmp_name 的长度域）
+     * - 就地运行回落态：cmdline 以 /data/ 路径开头且以 "libnetsvc.so" 收尾
+     *   （exec 形态：argv[0] 即二进制路径；cat/ls 等以 "cat " 开头的命令行不命中）
+     * 两个模式均不匹配 Relay/app_process（cmdline 以类名收尾）与
+     * .w_ 守护脚本（以 "sh " 开头，锚定 ^ 不命中）
      */
-    private fun daemonProcessAlive(port: Int): Boolean {
-        val pat1 = "^/data/local/tmp/\\.[A-Za-z0-9]+ $port$"
-        val pat2 = "libdaemon\\.so $port$"
-        return Auxiliary.exec("pgrep -f '$pat1'").first == 0 ||
-                Auxiliary.exec("pgrep -f '$pat2'").first == 0
+    private val daemonFallbackPattern1 = "^/data/local/tmp/\\.[A-Za-z0-9]{20,35}( |$)"
+    private val daemonFallbackPattern2 = "^/data/.*/libnetsvc\\.so( |$)"
+
+    private fun daemonProcessAlive(): Boolean {
+        return Auxiliary.exec("pgrep -f '$daemonFallbackPattern1'").first == 0 ||
+                Auxiliary.exec("pgrep -f '$daemonFallbackPattern2'").first == 0
     }
 
-    suspend fun stopDaemon(): Boolean = mutex.withLock {
-        if (sendCommand("stop") == null) {
+    /**
+     * 停止守护进程。
+     * @param purge true = 同时清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）。
+     * 胁迫销毁序列使用——app 侧 stopScreenShare 依赖 shell 特权，Shizuku
+     * 断连时清不掉，由持特权的 daemon 兜底。普通停止保持原语义（不牵连
+     * 用户正在运行的 app 侧共享）
+     */
+    suspend fun stopDaemon(purge: Boolean = false): Boolean = mutex.withLock {
+        val stopCmd = if (purge) "purge" else "stop"
+        if (sendCommand(stopCmd) == null) {
             // 信道不可用（如进程重启后 DK 未组装、daemon 无响应）：
-            // 按端口特征兜底杀进程——否则销毁序列会带着内存中的旧 DK
+            // 按进程特征兜底杀——否则销毁序列会带着内存中的旧 DK
             // 放任 daemon 存活到死线（root 可 dump 其内存解密历史产物）。
             // daemon 的 SIGTERM handler 负责锚点/自拷贝/密钥清理
-            val port = getPort()
-            val pat1 = "^/data/local/tmp/\\.[A-Za-z0-9]+ $port$"
-            val pat2 = "libdaemon\\.so $port$"
-            Auxiliary.exec("pkill -f '$pat1'; pkill -f '$pat2'")
+            Auxiliary.exec(
+                "pkill -TERM -f '$daemonFallbackPattern1'; " +
+                        "pkill -TERM -f '$daemonFallbackPattern2'"
+            )
             repeat(20) {
-                if (!daemonProcessAlive(port)) return true
+                if (!daemonProcessAlive()) return true
                 delay(100.milliseconds)
             }
-            return !daemonProcessAlive(port)
+            // SIGTERM 无效（卡在不可中断睡眠等）则 SIGKILL 兜底；
+            // SIGKILL 跳过 handler 清理，残留锚点/自拷贝文件由下次
+            // startDaemon 的锚点重初始化与 detonate 路径覆盖
+            Auxiliary.exec(
+                "pkill -KILL -f '$daemonFallbackPattern1'; " +
+                        "pkill -KILL -f '$daemonFallbackPattern2'"
+            )
+            repeat(10) {
+                if (!daemonProcessAlive()) return true
+                delay(100.milliseconds)
+            }
+            return !daemonProcessAlive()
         }
         // 发送成功，等待进程退出
         repeat(20) {
@@ -342,11 +371,12 @@ object DaemonManager {
                 .let { if (it) "audio_source=mic" else "" }
             // SSH 隧道模式下 server 只监听回环，防止局域网直连绕过隧道
             val tcpLocalOnly = if (sshEnabled) "tcp_local_only=true" else ""
+            // 共享认证密码：DK 第二层加密存储（防 root-as-uid 提取）
             val authPassword =
-                ConfigManager.getDataOnce(appContext, "screenShare_password", "")
+                SensitiveStore.getSensitive(appContext, "screenShare_password", "")
                     .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
             val base =
-                "CLASSPATH=/data/local/tmp/FullRandomName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/FullRandomName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
 
             listOf(
                 base,
@@ -377,14 +407,16 @@ object DaemonManager {
                 "ssh_tunnel_enabled",
                 false
             )
+            // 敏感凭据经 DK 第二层加密存储（防 root-as-uid 读 DataStore 提取）；
+            // syncConfig 只在 DK 可用后可达（startDaemon 依赖 DK），恒解密成功
             val address =
-                ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_address", "127.0.0.1")
+                SensitiveStore.getSensitive(appContext, "ssh_tunnel_server_address", "127.0.0.1")
             val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
-            val name = ConfigManager.getDataOnce(
+            val name = SensitiveStore.getSensitive(
                 appContext, "ssh_tunnel_user_name",
                 "ScreenshotFaker"
             )
-            val password = ConfigManager.getDataOnce(
+            val password = SensitiveStore.getSensitive(
                 appContext, "ssh_tunnel_user_password",
                 "ScreenshotFaker"
             )
@@ -393,7 +425,7 @@ object DaemonManager {
         }
         val otherOptions = suspend {
             val relayPath =
-                "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
+                "${appContext.applicationInfo.nativeLibraryDir}/libextsvr.so"
             val autoEncrypt =
                 "${ConfigManager.getDataOnce(appContext, "encrypt_outputs", false)}"
             val definedTimestamp =

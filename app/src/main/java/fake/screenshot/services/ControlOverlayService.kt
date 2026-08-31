@@ -21,9 +21,7 @@ import android.view.View
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import fake.screenshot.Auxiliary
-import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
-import kotlinx.coroutines.runBlocking
 import kotlin.math.abs
 
 class ControlOverlayService : Service() {
@@ -96,6 +94,9 @@ class ControlOverlayService : Service() {
     private lateinit var scaleDetector: ScaleGestureDetector
     private lateinit var gestureDetector: GestureDetector
 
+    /** 当前前台通知渠道 ID（onDestroy 时删除渠道，避免系统设置残留）。 */
+    private var notificationChannelId: String? = null
+
     private val minSize = 80
     private val touchSlop = 60
 
@@ -105,18 +106,30 @@ class ControlOverlayService : Service() {
         val pos = DisplayOverlayService.getPosition()
         val size = DisplayOverlayService.getSize()
         if (pos == null || size == null) {
+            // companion.start 用的是 startForegroundService：Android 8+ 要求
+            // 服务启动后必须先 startForeground 再停止，否则系统抛
+            // ForegroundServiceDidNotStartInTimeException。先挂一个空通知
+            // 满足契约再 stopSelf（显示服务未就绪/已销毁的竞态窗口会走到这里）。
+            // 通知 ID 经同一随机化读取（硬编码会与 Display 的随机 ID 空间
+            // 1000..4999 撞号，两个 FGS 通知互相覆盖）
+            runCatching {
+                val id = OverlayServiceManager.controlNotificationId(this)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(
+                        id,
+                        createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } else {
+                    startForeground(id, createNotification())
+                }
+            }
             stopSelf()
             return
         }
 
         OverlayServiceManager.setControlRunning(true)
-        val id = runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                "overlay_service_control_channel_id",
-                1002
-            )
-        }
+        val id = OverlayServiceManager.controlNotificationId(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 id,
@@ -434,20 +447,29 @@ class ControlOverlayService : Service() {
         super.onDestroy()
         stopSeekLoop()
         OverlayServiceManager.setControlRunning(false)
-        controlView?.let { windowManager.removeView(it) }
+        // lateinit 守卫（同 DisplayOverlayService.onDestroy）
+        if (controlView != null && this::windowManager.isInitialized) {
+            runCatching { windowManager.removeView(controlView) }
+        }
+        // 渠道随服务销毁（含 pos/size 未就绪的提前退出路径——该路径同样
+        // 经 createNotification 建渠道）：系统设置零残留；进程被杀跳过
+        // onDestroy 时，稳定 ID 保证每服务最多残留 1 个渠道，不累积
+        notificationChannelId?.let { id ->
+            runCatching {
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .deleteNotificationChannel(id)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotification(): Notification {
-        val channelId = runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                "overlay_service_control_channel_name",
-                "Control"
-            )
-        }
+        // 内联随机化（明文 prefs 同步读取，语义与生命周期见
+        // DisplayOverlayService.createNotification 与 OverlayServiceManager 文档）
+        val channelId = OverlayServiceManager.controlChannelId(this)
+        notificationChannelId = channelId
         val channel = NotificationChannel(
             channelId,
             Auxiliary.getRandomString(Auxiliary.getSecureRandomInt(20..30)),

@@ -4,8 +4,9 @@ import android.os.Environment
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.Auxiliary
+import fake.screenshot.defense.DefenseProtocol
+import fake.screenshot.defense.KeyVault
 import fake.screenshot.wrappers.ConfigManager
-import fake.screenshot.wrappers.EncryptManager
 import fake.screenshot.R
 import kotlinx.coroutines.*
 import java.io.File
@@ -32,7 +33,7 @@ class ScreenRecordTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         // 磁贴可能先于 MainActivity 运行（如重启后直接点磁贴），确保 DK 上下文就绪
-        EncryptManager.init(applicationContext)
+        DefenseProtocol.init(applicationContext)
         checkAndResetIfProcessDead()
         updateTileUI()
     }
@@ -163,7 +164,7 @@ class ScreenRecordTileService : TileService() {
         )
         // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
         // screenrecord 全程向 tmp 写明文，未就绪时启动 = 明文全程暴露
-        if (encryptOutputs && !EncryptManager.isDaemonKeyReady()) {
+        if (encryptOutputs && !KeyVault.isDaemonKeyReady()) {
             withContext(Dispatchers.Main) {
                 android.widget.Toast.makeText(
                     this@ScreenRecordTileService,
@@ -247,7 +248,7 @@ class ScreenRecordTileService : TileService() {
                     if (tempFile.exists()) {
                         Auxiliary.exec("chmod 444 ${tempPath + temp}")
                         val encrypted = File("$save/$file")
-                        EncryptManager.encryptFileByKeystore(tempFile, encrypted)
+                        KeyVault.encryptFileByKeystore(tempFile, encrypted)
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -296,7 +297,7 @@ class ScreenRecordTileService : TileService() {
                         Auxiliary.exec("chmod 444 ${tempPath + temp}")
                         File(tempPath + temp).apply {
                             val encrypted = File("$save/$file")
-                            EncryptManager.encryptFileByKeystore(this, encrypted)
+                            KeyVault.encryptFileByKeystore(this, encrypted)
                         }
                     } catch (_: Exception) {
                     } finally {

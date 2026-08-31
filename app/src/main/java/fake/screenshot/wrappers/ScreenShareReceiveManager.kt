@@ -1,6 +1,7 @@
 package fake.screenshot.wrappers
 
 import android.content.Context
+import fake.screenshot.defense.SensitiveStore
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -28,7 +29,10 @@ object ScreenShareReceiverManager {
         context: Context,
         id: Int
     ): ScreenShareReceiverConfig? {
-        val raw = ConfigManager.getDataOnce(context, CONFIG_PREFIX + id, "")
+        // 接收配置含 SSH 服务器凭据与共享认证密码：整包经 DK 第二层加密存储
+        // （防 root-as-uid 读 DataStore 提取用户的基础设施凭据）。
+        // 页面在门禁之后，DK 恒可用；迁移由 getSensitive 自动完成
+        val raw = SensitiveStore.getSensitive(context, CONFIG_PREFIX + id, "")
         if (raw.isEmpty()) return null
         val parts = raw.split(SEPARATOR)
         if (parts.size < 9) return null
@@ -49,10 +53,14 @@ object ScreenShareReceiverManager {
         }.getOrNull()
     }
 
+    /**
+     * @return false = DK 不可用导致密文写入失败（配置未保存——继续登记 id
+     * 会造成"保存成功"的假象，刷新后配置消失）
+     */
     suspend fun saveConfig(
         context: Context,
         config: ScreenShareReceiverConfig
-    ) {
+    ): Boolean {
         // 槽位 7/8 写固定占位保持格式稳定（password 固定在槽位 9），
         // 使旧版本数据与新数据共用同一解析路径
         val raw = listOf(
@@ -61,21 +69,28 @@ object ScreenShareReceiverManager {
             "true", "true",
             config.password
         ).joinToString(SEPARATOR)
-        ConfigManager.saveData(context, CONFIG_PREFIX + config.id, raw)
+        if (!SensitiveStore.putSensitive(context, CONFIG_PREFIX + config.id, raw)) {
+            return false
+        }
         val ids = loadIds(context).toMutableSet()
         ids.add(config.id)
         ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
         // 配置已变更，缓存中的旧实例不再有效：停止并移除，
         // 下次使用时按新配置重建（新增时无缓存实例，无副作用）
         receivers.remove(config.id)?.stop()
+        return true
     }
 
-    suspend fun deleteConfig(context: Context, id: Int) {
-        ConfigManager.saveData(context, CONFIG_PREFIX + id, "")
+    /** @return false = 密文清除失败（配置仍可能复活——调用方应提示） */
+    suspend fun deleteConfig(context: Context, id: Int): Boolean {
+        if (!SensitiveStore.putSensitive(context, CONFIG_PREFIX + id, "")) {
+            return false
+        }
         val ids = loadIds(context).toMutableSet()
         ids.remove(id)
         ConfigManager.saveData(context, IDS_KEY, ids.joinToString(","))
         receivers.remove(id)?.stop()
+        return true
     }
 
     suspend fun nextId(context: Context): Int {

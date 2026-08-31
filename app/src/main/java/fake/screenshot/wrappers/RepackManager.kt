@@ -104,22 +104,53 @@ object RepackManager {
             val unsignedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
             val signedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
 
-            val replacements = buildReplacements(appContext, sourceApk, identity, icon)
-            ApkBuilder.build(sourceApk, unsignedApk, replacements)
-            RepackSigner.sign(unsignedApk, signedApk)
-            unsignedApk.delete()
-
-            signedApk
+            try {
+                val replacements = buildReplacements(appContext, sourceApk, identity, icon)
+                ApkBuilder.build(sourceApk, unsignedApk, replacements)
+                RepackSigner.sign(unsignedApk, signedApk)
+                unsignedApk.delete()
+                // 签名自检：AndroidKeyStore 签名链路产出无效签名时在此给出
+                // 精确原因，而不是把坏包交给系统安装器报"安装包已损坏"
+                val verifyResult = RepackSigner.verifySignedApk(signedApk)
+                check(!verifyResult.containsErrors()) {
+                    "verify failed: " + verifyResult.errors.joinToString("; ")
+                }
+                signedApk
+            } catch (t: Throwable) {
+                // 失败清理：含已改写 manifest 的完整中间产物不得残留在 cacheDir
+                //（敏感中间产物 + 磁盘泄漏）；删除整个随机名工作目录
+                runCatching { workDir.deleteRecursively() }
+                throw t
+            }
         }
     }
 
     @SuppressLint("RequestInstallPackagesPolicy")
     fun install(context: Context, apk: File, newPackageName: String) {
         val appContext = context.applicationContext
+        try {
+            installSession(appContext, apk, newPackageName)
+            // commit 前 APK 已完整拷入安装会话（openWrite + fsync），commit 后
+            // 系统不再引用源文件，此刻删除数据安全。不保留到"安装成功"：
+            // 已签名的伪装克隆 APK 残留 cacheDir 本身是暴露面（root 取证可
+            // 直接取得伪装身份产物），重试代价只是重新打包（秒级）
+            apk.delete()
+            runCatching { apk.parentFile?.delete() }
+        } catch (t: Throwable) {
+            // 全部失败路径（未授权安装/包名已装/会话异常/进程死亡前抛出）同样
+            // 不得残留已签名克隆 APK——"删除只在成功路径执行"会让首次使用
+            // （跳设置开权限必然失败一次）与所有失败重试无限期泄漏产物
+            runCatching { apk.delete() }
+            runCatching { apk.parentFile?.delete() }
+            throw t
+        }
+    }
+
+    private fun installSession(appContext: Context, apk: File, newPackageName: String) {
         val pm = appContext.packageManager
 
         if (runCatching { pm.getPackageInfo(newPackageName, 0) }.isSuccess) {
-            throw IllegalStateException()
+            throw IllegalStateException("package already installed: $newPackageName")
         }
 
         if (!pm.canRequestPackageInstalls()) {
@@ -129,7 +160,7 @@ object RepackManager {
                     "package:${appContext.packageName}".toUri()
                 ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
-            throw IllegalStateException()
+            throw IllegalStateException("install permission not granted")
         }
 
         val statusAction = "fake.screenshot.repack.INSTALL_STATUS"
@@ -181,9 +212,6 @@ object RepackManager {
             runCatching { appContext.unregisterReceiver(statusReceiver) }
             throw t
         }
-
-        apk.delete()
-        runCatching { apk.parentFile?.delete() }
     }
 
 

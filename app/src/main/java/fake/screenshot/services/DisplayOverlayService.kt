@@ -198,17 +198,14 @@ class DisplayOverlayService : Service() {
 
     private var cornerHandleView: CornerHandleView? = null
 
+    /** 当前前台通知渠道 ID（onDestroy 时删除渠道，避免系统设置残留）。 */
+    private var notificationChannelId: String? = null
+
     override fun onCreate() {
         super.onCreate()
         OverlayServiceManager.setDisplayRunning(true)
         instanceRef = WeakReference(this)
-        val id = runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                "overlay_service_display_channel_id",
-                1001
-            )
-        }
+        val id = OverlayServiceManager.displayNotificationId(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 id,
@@ -302,7 +299,21 @@ class DisplayOverlayService : Service() {
         instanceRef = null
         releasePlayer()
         clearMedia()
-        windowManager.removeView(floatingView)
+        // isInitialized 守卫：部分 ROM 上 startForeground 抛异常后仍回调
+        // onDestroy，此时 view 尚未 addView、windowManager 未初始化——
+        // 直接访问 lateinit 会二次崩溃
+        if (this::floatingView.isInitialized && this::windowManager.isInitialized) {
+            runCatching { windowManager.removeView(floatingView) }
+        }
+        // 渠道随服务销毁：系统设置不残留随机名渠道。进程被杀跳过 onDestroy
+        // 时，ID 跨销毁稳定保证下次复用同一渠道——每服务最多残留 1 个，
+        // 数量恒定，不构成"销毁过/重启过"侧信道
+        notificationChannelId?.let { id ->
+            runCatching {
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .deleteNotificationChannel(id)
+            }
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -312,13 +323,12 @@ class DisplayOverlayService : Service() {
     }
 
     private fun createNotification(): Notification {
-        val channelId = runBlocking {
-            ConfigManager.getDataOnce(
-                applicationContext,
-                "overlay_service_display_channel_name",
-                "Display"
-            )
-        }
+        // 渠道 ID 内联随机化（明文 prefs 同步读取，见 OverlayServiceManager 文档）：
+        // 读到缺失键就地产出随机值落盘，任何入口（含服务先于 Activity 冷启动）
+        // 都不会以可识别名建渠道。渠道随服务销毁（onDestroy 删除），静止态
+        // 系统设置零残留；ID 跨胁迫销毁稳定，渠道数恒定不泄漏销毁历史
+        val channelId = OverlayServiceManager.displayChannelId(this)
+        notificationChannelId = channelId
         val channel =
             NotificationChannel(
                 channelId,

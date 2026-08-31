@@ -7,6 +7,8 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import fake.screenshot.Auxiliary
 import fake.screenshot.R
+import fake.screenshot.defense.DefenseProtocol
+import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.services.ScreenShareTileService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -63,14 +65,17 @@ object ScreenShareManager {
     private suspend fun initializeInternal(): InitResult {
         if (initialized) return InitResult.Ok
         if (ConfigManager.getDataOnce(appContext, "ssh_tunnel_enabled", false)) {
+            // SSH 凭据经 DK 第二层加密存储（防 root-as-uid 读 DataStore 提取）。
+            // DK 拆分激活且未解锁（磁贴直接触发共享）→ 凭据不可得 → SSH 连接
+            // 失败返回 SshFailed（fail-closed：解锁一次即恢复；直连模式不受影响）
             val address =
-                ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_address", "127.0.0.1")
+                SensitiveStore.getSensitive(appContext, "ssh_tunnel_server_address", "127.0.0.1")
             val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
-            val name = ConfigManager.getDataOnce(
+            val name = SensitiveStore.getSensitive(
                 appContext, "ssh_tunnel_user_name",
                 "ScreenshotFaker"
             )
-            val password = ConfigManager.getDataOnce(
+            val password = SensitiveStore.getSensitive(
                 appContext, "ssh_tunnel_user_password",
                 "ScreenshotFaker"
             )
@@ -89,7 +94,7 @@ object ScreenShareManager {
             }
         }
         relayName = Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
-        val src = "${appContext.applicationInfo.nativeLibraryDir}/libscrcpy-server.so"
+        val src = "${appContext.applicationInfo.nativeLibraryDir}/libextsvr.so"
         val (exitCode, output) = Auxiliary.exec("cp $src /data/local/tmp/$relayName")
         if (exitCode != 0) {
             return InitResult.CopyFailed(output.take(80))
@@ -158,12 +163,27 @@ object ScreenShareManager {
             val tcpLocalOnly =
                 if (sshSession != null) "tcp_local_only=true" else ""
             val authPassword =
-                ConfigManager.getDataOnce(appContext, "screenShare_password", "")
+                SensitiveStore.getSensitive(appContext, "screenShare_password", "")
                     .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
-            // 入口类用中性的 Relay：ps/pgrep 的进程 cmdline 中只出现
-            // fake.screenshot.core.Relay，内部实现包名不暴露
+            // fail-closed：共享密码已配置（_sec 密文存在）但本会话不可解
+            // （锁定态，DK 未组装）→ 中止启动。静默降级为无认证共享等于
+            // 把认证控制 fail-open 给任何接收者。此时 server 尚未拉起，
+            // 复位状态并通知磁贴即可
+            if (authPassword.isEmpty() &&
+                SensitiveStore.isSensitiveConfigured(appContext, "screenShare_password")
+            ) {
+                relayRunning = false
+                initialized = false
+                sshSession?.disconnect()
+                sshSession = null
+                lastError = "locked_no_credentials"
+                notifyStateChanged()
+                return@launch
+            }
+            // 入口类用中性名 vendor.entry.Main：ps/pgrep 的进程 cmdline
+            // 不暴露 app 身份（fake.screenshot）与功能提示，内部实现包名亦不出现
             val base =
-                "CLASSPATH=/data/local/tmp/$relayName app_process / fake.screenshot.core.Relay $VERSION tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/$relayName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
                 base,
                 enableControl,
@@ -200,8 +220,8 @@ object ScreenShareManager {
             // 仍在系统里运行（守护循环独立于 app 进程），必须先清理再启动，
             // 否则新 server 会因端口被占用而启动失败
             Auxiliary.exec(
-                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f fake.screenshot.core.Relay; sleep 1; " +
-                        "pkill -KILL -f fake.screenshot.core.Relay; " +
+                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f vendor.entry.Main; sleep 1; " +
+                        "pkill -KILL -f vendor.entry.Main; " +
                         "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
             )
 
@@ -261,6 +281,12 @@ object ScreenShareManager {
      */
     fun toggleScreenShare(context: Context) {
         appContext = context.applicationContext
+        // 磁贴可能是冷启动进程的第一个入口（重启后未打开过 app 即点磁贴）：
+        // KeyVault/DaemonManager 的 context 是 lateinit，未初始化时
+        // SensitiveStore→KeyVault 路径直接抛 UninitializedPropertyAccessException。
+        // 与 Screenshot/ScreenRecord 磁贴的初始化保持一致
+        DaemonManager.init(context)
+        DefenseProtocol.init(context)
         Auxiliary.refreshShellState()
         scope.launch {
             if (relayRunning || isServerActuallyRunning()) {
@@ -286,7 +312,7 @@ object ScreenShareManager {
 
     /** server 进程是否实际在运行（app 进程重启后标志位丢失时以此为准） */
     private fun isServerActuallyRunning(): Boolean =
-        Auxiliary.exec("pgrep -f fake.screenshot.core.Relay").first == 0
+        Auxiliary.exec("pgrep -f vendor.entry.Main").first == 0
 
     fun stopScreenShare() {
         // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
@@ -300,7 +326,7 @@ object ScreenShareManager {
             //    必须按 app_process 的实际命令行（含入口类名）匹配。
             //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
             Auxiliary.exec(
-                "pkill -INT -f fake.screenshot.core.Relay; sleep 1; pkill -KILL -f fake.screenshot.core.Relay"
+                "pkill -INT -f vendor.entry.Main; sleep 1; pkill -KILL -f vendor.entry.Main"
             )
             // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
             Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
@@ -308,8 +334,8 @@ object ScreenShareManager {
             // app 进程被杀重启后名称已丢失：按通配模式清理所有守护脚本与 server。
             // 守护循环用固定 $STOP 文件名判断退出，脚本被杀即不再拉起，标记文件可删
             Auxiliary.exec(
-                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f fake.screenshot.core.Relay; sleep 1; " +
-                        "pkill -KILL -f fake.screenshot.core.Relay; " +
+                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f vendor.entry.Main; sleep 1; " +
+                        "pkill -KILL -f vendor.entry.Main; " +
                         "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
             )
         }

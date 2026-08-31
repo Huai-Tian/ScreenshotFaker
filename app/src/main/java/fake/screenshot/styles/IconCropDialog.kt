@@ -85,7 +85,11 @@ fun IconCropDialog(
                                 val drawH = image.height * fitScale
                                 val minS = max(box.width / drawW, box.height / drawH)
 
-                                val newScale = (scale * zoom).coerceIn(minS, 12f)
+                                // 上限须 ≥ 下限：极端宽高比图片（如横幅截图）的
+                                // minS（覆盖裁剪框所需最小缩放）可能超过 12，
+                                // coerceIn 空区间直接抛 IllegalArgumentException 崩溃
+                                val newScale = (scale * zoom)
+                                    .coerceIn(minS, max(minS, 12f))
                                 // 缩放围绕手势中心，再叠加平移
                                 var newTopLeft = centroid -
                                         (centroid - topLeft) * (newScale / scale) + pan
@@ -147,8 +151,10 @@ fun IconCropDialog(
                     val totalScale = scale * fitScale
                     val left = (-topLeft.x / totalScale).toInt()
                     val top = (-topLeft.y / totalScale).toInt()
+                    // 极小源图（最小边 <12px）在高缩放下 cropSize 可能截断为 0，
+                    // createBitmap(宽=0) 抛 IllegalArgumentException——下限钳到 1
                     val cropSize = (box.width / totalScale).toInt()
-                        .coerceAtMost(min(image.width, image.height))
+                        .coerceIn(1, min(image.width, image.height))
                     val safeLeft = left.coerceIn(0, image.width - cropSize)
                     val safeTop = top.coerceIn(0, image.height - cropSize)
                     val cropped = Bitmap.createBitmap(

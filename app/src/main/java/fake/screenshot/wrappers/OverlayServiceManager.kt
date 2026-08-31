@@ -5,6 +5,7 @@ import android.net.Uri
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.core.content.ContextCompat.getString
+import fake.screenshot.Auxiliary
 import fake.screenshot.R
 import fake.screenshot.services.ControlOverlayService
 import fake.screenshot.services.DisplayOverlayService
@@ -25,6 +26,72 @@ object OverlayServiceManager {
     val isDisplayRunning: StateFlow<Boolean> = _isDisplayRunning.asStateFlow()
     val isControlRunning: StateFlow<Boolean> = _isControlRunning.asStateFlow()
     val mediaList: StateFlow<List<Uri>> = _mediaList.asStateFlow()
+
+    // ==================== 通知渠道/通知 ID 随机化（隐蔽性） ====================
+
+    /**
+     * 渠道 ID / 通知 ID 随机值持久化（明文 prefs，与 ConfigManager.data_ref
+     * 同文件同策略）。
+     *
+     * 为什么不入加密 DataStore：
+     * 1. 胁迫销毁会清空 DataStore——渠道 ID 丢失后下次启动会以新 ID 创建
+     *    新渠道，旧渠道永久残留系统设置（系统从不自动删除），渠道数随每次
+     *    销毁 +1，恰好构成"销毁过"侧信道（data_ref 明文随机化要消除的
+     *    正是同类侧信道）。明文存储下 ID 跨销毁稳定，渠道数恒定。
+     * 2. 明文键名/值均为无语义随机串，取证读到也只是随机值，"从未销毁"
+     *    与"销毁后"不可区分。
+     * 3. SharedPreferences 同步轻量，服务 onCreate 主线程直接读取无
+     *    DataStore 加密首读（磁盘 IO + Keystore 解密）的阻塞/ANR 风险
+     *    （本类 configScope 文档明确禁止主线程 runBlocking 配置 IO）。
+     *
+     * 键名刻意中性（s_a..s_d）：明文 prefs 的键名本身是取证可见信息，
+     * 不得出现 "overlay"/"channel" 等语义。语义映射见下方调用处。
+     * 配合各服务 onDestroy 的 deleteNotificationChannel：静止态零渠道残留。
+     */
+    private const val OVERLAY_PREFS_NAME = "sync_preferences"
+    private const val KEY_CHANNEL_ID_DISPLAY = "s_a"
+    private const val KEY_CHANNEL_ID_CONTROL = "s_b"
+    private const val KEY_NOTIF_ID_DISPLAY = "s_c"
+    private const val KEY_NOTIF_ID_CONTROL = "s_d"
+
+    /** Display 悬浮窗通知渠道 ID：首读缺失就地产出随机值落盘（幂等、跨销毁稳定）。 */
+    fun displayChannelId(context: Context): String =
+        randomizedString(context, KEY_CHANNEL_ID_DISPLAY, 20..30)
+
+    /** Control 悬浮窗通知渠道 ID（ID 长度与 Display 错开，风格无关联）。 */
+    fun controlChannelId(context: Context): String =
+        randomizedString(context, KEY_CHANNEL_ID_CONTROL, 31..36)
+
+    /**
+     * Display 悬浮窗前台通知 ID：随机区间 1000..4999，与 Control 的
+     * 5000..9999 互斥——两个 FGS 通知共存时随机取值也不会互相覆盖。
+     */
+    fun displayNotificationId(context: Context): Int =
+        randomizedInt(context, KEY_NOTIF_ID_DISPLAY, 1000..4999)
+
+    /** Control 悬浮窗前台通知 ID（随机区间与 Display 互斥，见上）。 */
+    fun controlNotificationId(context: Context): Int =
+        randomizedInt(context, KEY_NOTIF_ID_CONTROL, 5000..9999)
+
+    private fun randomizedString(context: Context, key: String, lengthRange: IntRange): String {
+        val prefs = context.applicationContext
+            .getSharedPreferences(OVERLAY_PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.getString(key, null)?.let { return it }
+        val random = Auxiliary.getRandomString(Auxiliary.getSecureRandomInt(lengthRange))
+        // commit（同步落盘）：渠道创建前确保持久化，进程死亡不产生第二个值
+        prefs.edit().putString(key, random).commit()
+        return random
+    }
+
+    private fun randomizedInt(context: Context, key: String, range: IntRange): Int {
+        val prefs = context.applicationContext
+            .getSharedPreferences(OVERLAY_PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = prefs.getInt(key, -1)
+        if (existing != -1) return existing
+        val random = Auxiliary.getSecureRandomInt(range)
+        prefs.edit().putInt(key, random).commit()
+        return random
+    }
 
     // ==================== 路由：ROOT 无痕路线优先，普通路线兜底 ====================
 
@@ -234,8 +301,11 @@ object OverlayServiceManager {
     }
 
     private fun startNormalRoute(context: Context, withControl: Boolean) {
-        DisplayOverlayService.start(context)
-        if (withControl) ControlOverlayService.start(context)
+        // fallback 触发时机常在 app 已退后台（su 8s 超时/Shizuku 死亡回调），
+        // Android 12+ 后台 FGS 启动限制会抛 ForegroundServiceStartNotAllowedException
+        // ——不捕获则主线程崩溃。启动失败仅置状态（用户下次前台操作再拉起）
+        runCatching { DisplayOverlayService.start(context) }
+        if (withControl) runCatching { ControlOverlayService.start(context) }
     }
 
     /** root 端连接到达：挂窗口并显示首个媒体（初始几何与普通路线一致）。 */

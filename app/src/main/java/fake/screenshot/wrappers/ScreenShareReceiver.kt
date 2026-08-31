@@ -88,6 +88,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     }
 
     companion object {
+        /**
+         * 单帧/单包长度上限：恶意或损坏的发送端可宣告超大 size，
+         * ByteArray(size) 抛 OutOfMemoryError（Error 不被 catch(Exception)
+         * 捕获，直接崩溃 app）——超限按流损坏走 IOException 重试路径
+         */
+        const val MAX_PACKET_BYTES = 8 * 1024 * 1024
+
         /** scrcpy Codec id（名称的 4 字节 ASCII 大端表示） */
         const val CODEC_H264 = 0x68323634
         const val CODEC_H265 = 0x68323635
@@ -169,6 +176,17 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     private var job: Job? = null
 
     /**
+     * 单帧/单包长度上限：恶意或损坏的发送端可宣告超大 size，
+     * ByteArray(size) 抛 OutOfMemoryError（Error 不被 catch(Exception) 捕获，
+     * 直接崩溃 app）——超限按流损坏走 IOException 重试路径
+     */
+    private fun checkPacketSize(size: Int) {
+        if (size < 0 || size > MAX_PACKET_BYTES) {
+            throw IOException("implausible packet size: $size")
+        }
+    }
+
+    /**
      * 会话代数：stop() 递增使旧 runLoop 的 finally 失效，
      * 防止旧会话清理时误关新会话的 socket / 置空新会话的 controlOut
      * （快速退出再进入 viewer、旋转屏幕触发 surface 重建时会发生）。
@@ -190,10 +208,19 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 控制消息发送线程：所有 sendXXX 都可能从 UI（主线程）调用，
      * 直接写 socket 会抛 NetworkOnMainThreadException（控制失效的根因）。
      * 单线程执行器既完成线程切换，又天然保证消息顺序（如 DOWN 先于 UP）。
+     *
+     * 生命周期：stop() 时 shutdown 并重建——实例被 Manager 替换/丢弃后
+     * 线程不再永久驻留（每次保存配置重建实例都会产生新线程）。
+     * execute 包 runCatching：重建竞态窗口内旧 executor 已 shutdown，
+     * 拒绝任务若不吞会在 UI 线程抛 RejectedExecutionException
      */
-    private val controlExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "net-worker").apply { isDaemon = true }
-    }
+    @Volatile
+    private var controlExecutor = createControlExecutor()
+
+    private fun createControlExecutor() =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "net-worker").apply { isDaemon = true }
+        }
 
     /**
      * 把一次控制消息写入投递到 [controlExecutor]（见其文档：主线程禁网）。
@@ -201,13 +228,15 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      */
     private fun postControl(what: String, write: (java.io.DataOutputStream) -> Unit) {
         val out = controlOut ?: return
-        controlExecutor.execute {
-            try {
-                val buffer = java.io.DataOutputStream(out)
-                write(buffer)
-                buffer.flush()
-            } catch (_: Exception) {
-                // 写失败（socket 已断）：静默丢弃
+        runCatching {
+            controlExecutor.execute {
+                try {
+                    val buffer = java.io.DataOutputStream(out)
+                    write(buffer)
+                    buffer.flush()
+                } catch (_: Exception) {
+                    // 写失败（socket 已断）：静默丢弃
+                }
             }
         }
     }
@@ -269,6 +298,10 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         videoAvailable.value = false
         controlAvailable.value = false
         state.value = State.Stopped
+        // 关停并重建控制线程：实例被 Manager 丢弃后旧线程不再驻留，
+        // 重建保证后续 start() 的 postControl 可用
+        controlExecutor.shutdownNow()
+        controlExecutor = createControlExecutor()
     }
 
     // ---------------------------------------------------------------- 连接
@@ -424,6 +457,14 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                         videoAvailable.value = false
                         controlAvailable.value = false
                         closeSockets()
+                        // SSH 隧道中途死亡时重置 session：openSocket 复用
+                        // sshSession 引用，不重置则剩余重试全部在死 session 上
+                        // 抛异常白白耗尽（Sender 宕机但 SSH 存活时 session 仍
+                        // 连接、正常复用——只重置已断开的）
+                        if (sshSession?.isConnected != true) {
+                            runCatching { sshSession?.disconnect() }
+                            sshSession = null
+                        }
                     }
                     if (!running.get() || gen != generation.get()) return
                     attempts++
@@ -477,6 +518,20 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
         firstSocket.soTimeout = 0
 
+        // 僵尸会话守卫：stop() 与本会话的 negotiateChannels/元数据读取之间
+        // 存在不可中断窗口（socket.connect 阻塞），旧会话可能在此后才走到
+        // 这里——若无守卫，它会覆盖新会话的 state/controlOut（触摸注入到
+        // 已死 socket）。守卫命中时自行关闭本次协商的 socket 后退出
+        if (gen != generation.get() || !running.get()) {
+            listOfNotNull(
+                channels.videoSocket, channels.audioSocket, channels.controlSocket
+            ).forEach {
+                runCatching { it.close() }
+                sockets.remove(it)
+            }
+            return
+        }
+
         state.value = State.Running(deviceName)
         videoAvailable.value = channels.videoSocket != null
 
@@ -487,8 +542,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
             if (!running.get()) return
         }
 
-        channels.controlSocket?.let { controlOut = it.getOutputStream() }
-        controlAvailable.value = channels.controlSocket != null
+        // controlOut 赋值同样带 gen 守卫（与上方守卫之间的微小窗口）
+        channels.controlSocket?.let {
+            if (gen == generation.get()) controlOut = it.getOutputStream()
+        }
+        controlAvailable.value = channels.controlSocket != null && gen == generation.get()
 
         var audioJob: Job? = null
         var controlJob: Job? = null
@@ -587,6 +645,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 }
                 val isConfig = ptsAndFlags and PACKET_FLAG_CONFIG != 0L
                 val size = readIntBE(header, 8)
+                checkPacketSize(size)
                 if (frameBuffer.size < size) frameBuffer = ByteArray(size)
                 input.readFully(frameBuffer, 0, size)
 
@@ -603,10 +662,17 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                         // MediaFormat.KEY_CSD_0 已从新 SDK 中移除，值为 "csd-0"
                         "csd-0", ByteBufferWrap(frameBuffer, size)
                     )
-                    codec = MediaCodec.createDecoderByType(mime).apply {
-                        configure(format, surface, null, 0)
-                        start()
+                    // 先创建局部变量再 configure：configure 抛异常（CSD 损坏/
+                    // surface 失效）时已创建的实例逃逸——每次重试泄漏一个解码器
+                    val created = MediaCodec.createDecoderByType(mime)
+                    runCatching {
+                        created.configure(format, surface, null, 0)
+                        created.start()
+                    }.onFailure {
+                        runCatching { created.release() }
+                        throw it
                     }
+                    codec = created
                 } else if (waitingForReset) {
                     // 等待 RESET_VIDEO 产生的新 config：丢弃旧帧快速排水。
                     // 保险阀：reset 请求失败（无控制通道等）时避免无限丢帧
@@ -691,6 +757,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 if (ptsAndFlags and PACKET_FLAG_SESSION != 0L) continue
                 val isConfig = ptsAndFlags and PACKET_FLAG_CONFIG != 0L
                 val size = readIntBE(header, 8)
+                checkPacketSize(size)
                 if (packetBuffer.size < size) packetBuffer = ByteArray(size)
                 input.readFully(packetBuffer, 0, size)
 
@@ -768,6 +835,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 if (ptsAndFlags and PACKET_FLAG_SESSION != 0L) continue
                 val isConfig = ptsAndFlags and PACKET_FLAG_CONFIG != 0L
                 val size = readIntBE(header, 8)
+                checkPacketSize(size)
                 if (packetBuffer.size < size) packetBuffer = ByteArray(size)
                 input.readFully(packetBuffer, 0, size)
                 if (isConfig) continue
@@ -798,12 +866,16 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, channels)
         format.setByteBuffer("csd-0", ByteBuffer.wrap(configBytes))
 
-        // 候选依次尝试：软件解码器 → 系统默认选择
-        val codecs = mutableListOf<MediaCodec>()
-        runCatching { codecs.add(MediaCodec.createByCodecName("c2.android.opus.decoder")) }
-        runCatching { codecs.add(MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)) }
-
-        for (c in codecs) {
+        // 候选依次尝试：软件解码器 → 系统默认选择。
+        // 延迟创建（前一个失败释放后才创建下一个）：同时创建两个候选时，
+        // 第一个成功即 return，第二个永不 release——每次重建（分辨率变化/
+        // ISE 自愈最多 50 次）泄漏一个 codec 实例，长会话耗尽系统解码器
+        val factories = listOf<(MediaFormat) -> MediaCodec>(
+            { MediaCodec.createByCodecName("c2.android.opus.decoder") },
+            { MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS) }
+        )
+        for (factory in factories) {
+            val c = runCatching { factory(format) }.getOrNull() ?: continue
             val ok = runCatching {
                 c.configure(format, null, null, 0)
                 c.start()
@@ -895,6 +967,11 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 -1 -> return
                 0 -> {
                     val length = input.readInt()
+                    // 发送端协议上限 256K；超限/负值 = 恶意或损坏流，
+                    // 巨大值 ByteArray 直接 OOM 崩溃（Error 不被 catch 捕获）
+                    if (length < 0 || length > 256 * 1024) {
+                        throw IOException("implausible clipboard length: $length")
+                    }
                     val data = ByteArray(length)
                     input.readFully(data)
                     clipboardContent.value = String(data, Charsets.UTF_8)
@@ -904,6 +981,9 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                 3 -> {
                     // 注入失败上报：发送端无法注入输入事件（权限被拒等）
                     val length = input.readInt()
+                    if (length < 0 || length > 1024) {
+                        throw IOException("implausible error length: $length")
+                    }
                     val data = ByteArray(length)
                     input.readFully(data)
                     injectError.value = String(data, Charsets.UTF_8)

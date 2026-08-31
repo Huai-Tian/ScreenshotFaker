@@ -101,7 +101,7 @@ pid_t record_pid = -1;
 
 // ===================== 屏幕共享运行状态 =====================
 // 匹配触发一次开启，再次触发关闭，循环往复
-static const char *RELAY_MARKER = "fake.screenshot.core.Relay";
+static const char *RELAY_MARKER = "vendor.entry.Main";
 atomic_bool share_running = false;
 atomic_bool share_stop_requested = false;
 atomic<pid_t> share_server_pid{-1};
@@ -399,6 +399,27 @@ void kill_relay_processes() {
         usleep(100000);
     }
     for (pid_t pid: find_relay_pids()) kill(pid, SIGKILL);
+}
+
+/**
+ * 清扫 app 侧共享（磁贴/页面启动的 relay 与其 sh 守护循环）。
+ * 顺序关键：先杀守护 sh——否则 server 被杀后 1s 内被循环重新拉起；
+ * 再杀 relay server；最后清理停止标记与脚本文件。
+ * sh 匹配模式锚定行尾（\.sh$）：sh -c 包装进程自身命令行以引号收尾，
+ * 不会被匹配（pkill 自杀的经典足枪规避）。
+ * 使用场景：detonate（看门狗引爆——用户停止使用后 relay 仍可能在推流）
+ * 与 purge 命令（胁迫销毁——app 侧 stopScreenShare 无特权时的兜底）。
+ */
+static void purge_app_side_share() {
+    pid_t p1 = spawn_shell_command("pkill -f '\\.w_[A-Za-z0-9_-]+\\.sh$'");
+    if (p1 > 0) {
+        for (int i = 0; i < 30 && process_alive(p1); ++i) usleep(100000);
+    }
+    kill_relay_processes();
+    pid_t p2 = spawn_shell_command("rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh");
+    if (p2 > 0) {
+        for (int i = 0; i < 50 && process_alive(p2); ++i) usleep(100000);
+    }
 }
 
 // ===================== SSH 隧道（libssh2 远程端口转发） =====================
@@ -804,11 +825,14 @@ void toggle_share() {
  * 末尾 memset 清密钥后 _exit（跳过析构，规避与命令线程的锁交互）。
  */
 [[noreturn]] static void detonate() {
-    // 1. 停共享：置停止标志 + 杀 server 进程 + 扫残留
+    // 1. 停自身管理的共享：置停止标志 + 杀 server 进程
     share_stop_requested.store(true);
     pid_t spid = share_server_pid.load();
     if (spid > 0) kill(spid, SIGKILL);
-    kill_relay_processes();
+    // 清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）：
+    // 用户停止使用后 app 侧共享仍可能独立运行（sh 循环不依赖 app 进程），
+    // 引爆时必须一并停止推流——且必须先杀 sh 再杀 server（防自动重启）
+    purge_app_side_share();
 
     // 2. 停录屏并清明文 tmp（SIGINT 让 screenrecord 收尾，但明文必须删而非加密）
     {
@@ -925,8 +949,15 @@ static void watchdog_main() {
             detonate();
         }
 
-        // 通过检查：刷新锚点（基线=now，死线取生效值防回退）
-        anchor_save(effective_deadline, wall, up);
+        // 通过检查：仅当墙钟严格前进时推进基线——冻结/回拨期间基线不动，
+        // 漂移跨轮累积直至容差引爆。旧实现每轮回写基线：单轮漂移至多
+        // ~WATCHDOG_INTERVAL_SEC(30s)，永远达不到 120s 容差，冻结检测
+        // 形同虚设（扣押设备+冻结墙钟 = 看门狗完全失效）
+        if (wall > st.lastwall) {
+            anchor_save(effective_deadline, wall, up);
+        }
+        // wall == lastwall（冻结）或 wall < lastwall（回拨）：保留旧基线，
+        // 下一轮 up_elapsed 继续增长 / wall_elapsed 继续为负，累积判爆
     }
 }
 
@@ -1290,7 +1321,7 @@ int main(int argc, char *argv[]) {
     }
 
     // ---- 去指纹：自拷贝到随机 tmp 路径再 exec ----
-    // argv[0] 原为 /data/app/.../lib/arm64/libdaemon.so（含包名，ps 一眼定位）。
+    // argv[0] 原为 /data/app/.../lib/arm64/libnetsvc.so（含包名，ps 一眼定位）。
     // 自拷贝后进程 cmdline 只剩随机路径；密钥经管道转交给拷贝体，不经 argv。
     // 已在 tmp 路径下运行（拷贝体的再入）则跳过，防止无限复制。
     g_self_path = argv[0];
@@ -1378,6 +1409,12 @@ int main(int argc, char *argv[]) {
         int client_fd = accept(fd, nullptr, nullptr);
         if (client_fd < 0) continue;
         else fcntl(client_fd, F_SETFD, FD_CLOEXEC);
+        // 信道 DoS 硬化：本地任意进程可 connect 固定端口后不发数据——
+        // 单线程 accept 循环会阻塞在 recv_encrypted 的首个 read 上，
+        // 后续所有命令（stop/purge/renew）排队不可达。读超时后按坏
+        // 连接关闭；5s 远大于回环正常往返（毫秒级），合法命令不受影响
+        struct timeval rcv_to{5, 0};
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
         string plaintext = recv_encrypted(client_fd, key);
         if (plaintext.empty()) {
             close(client_fd);
@@ -1486,7 +1523,11 @@ int main(int argc, char *argv[]) {
             reply_plain.append(
                     "timestamp= " + (mtime >= 0 ? mtime_raw : string("Disabled")) + "\n");
             reply_plain.append("\x1C" + to_string(get_current_timestamp_seconds()));
-        } else if (command == "stop") {
+        } else if (command == "stop" || command == "purge") {
+            // purge = stop + 清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）：
+            // 胁迫销毁序列调用——app 侧 stopScreenShare 依赖 shell 特权，
+            // Shizuku 断连时清不掉，由持特权的 daemon 兜底。
+            // 普通 stop 不清扫（用户可能正运行 app 侧共享，不应被牵连）
             reply_plain = "Stopping\x1C" + to_string(get_current_timestamp_seconds());
             send_encrypted(client_fd, key, reply_plain);
             close(client_fd);
@@ -1510,6 +1551,10 @@ int main(int argc, char *argv[]) {
             }
             if (share_supervisor.joinable()) share_supervisor.join();
             close(fd);
+            // purge：清扫 app 侧共享（在自身 supervisor 收尾后进行）
+            if (command == "purge") {
+                purge_app_side_share();
+            }
             // 用户主动 stop：清锚点（下次启动按 config 重新初始化）与自拷贝，
             // 密钥清零后退出
             if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
@@ -1526,7 +1571,18 @@ int main(int argc, char *argv[]) {
             send_encrypted(client_fd, key, reply_plain);
             close(client_fd);
             close(fd);
-            // detach 仅关闭通信端口：看门狗继续运行（超时保护不因 detach 失效）
+            // detach 关闭通信端口后 renew 永远无法送达，旧死线照常到期会在
+            // 用户正常使用期间引爆（数据误毁）。因此 detach 同时解除死线：
+            // 内存清零 + 锚点持久化为未启用。下次 startDaemon 经 syncConfig
+            // 重新武装（detach 需持密钥经加密信道，是用户主动行为）
+            idle_deadline_sec.store(0);
+            {
+                lock_guard<mutex> lock(anchor_mutex);
+                double up = read_proc_uptime();
+                long long wall = static_cast<long long>(time(nullptr));
+                if (up >= 0 && wall > 0) anchor_save(0, wall, up);
+            }
+            // 看门狗继续运行（冻结/回拨/锚点篡改检测不因 detach 失效）
             while (true) sleep(5);
         } else if (command.rfind("renew:", 0) == 0) {
             // 超时续期：app 侧 touchIdle 捎带下发新的绝对死线（墙钟秒）。

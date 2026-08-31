@@ -85,7 +85,10 @@ object ApkBuilder {
 
                 for (entry in zip.entries().asSequence()) {
                     val name = entry.name
-                    if (name.startsWith("META-INF/")) continue // 丢弃旧签名
+                    // 只剔除旧签名文件：整目录丢弃会连带删掉 META-INF/services/**
+                    //（ServiceLoader 注册，如 kotlinx.coroutines 主调度器工厂），
+                    // 混淆不充分的克隆会因缺少 Main dispatcher 启动即崩溃
+                    if (isSignatureEntry(name)) continue
 
                     written.add(name)
                     val replacement = replacements[name]
@@ -141,6 +144,15 @@ object ApkBuilder {
                 out.flush()
             }
         }
+    }
+
+    /** v1 签名体系文件（重新用 v2/v3 签名，v1 清单与块必须剔除） */
+    private fun isSignatureEntry(name: String): Boolean {
+        if (!name.startsWith("META-INF/")) return false
+        if (name == "META-INF/MANIFEST.MF") return true
+        val lower = name.lowercase()
+        return lower.endsWith(".sf") || lower.endsWith(".rsa") ||
+                lower.endsWith(".dsa") || lower.endsWith(".ec")
     }
 
     private fun deflate(data: ByteArray): ByteArray {

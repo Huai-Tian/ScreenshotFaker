@@ -74,13 +74,6 @@ inline string replace_all(string str, const string &from, const string &to) {
     return str;
 }
 
-[[maybe_unused]] inline void log(const string &text) {
-    ofstream ofs("/data/local/tmp/log.txt", ios::app);
-    ofs << text << " errno=" << errno << " (" << strerror(errno) << ")" << endl;
-    ofs.flush();
-    ofs.close();
-}
-
 inline bool isRegexValid(const string &pattern) {
     if (pattern.empty()) return true;
     try {

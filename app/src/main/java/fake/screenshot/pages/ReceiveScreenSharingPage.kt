@@ -137,7 +137,13 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
             onDismiss = { addDialog = false },
             onConfirm = { config ->
                 scope.launch {
-                    ScreenShareReceiverManager.saveConfig(context, config)
+                    // DK 不可用时密文写入失败：静默不提示会造成"保存成功"
+                    // 的假象（刷新后配置消失）
+                    if (!ScreenShareReceiverManager.saveConfig(context, config)) {
+                        android.widget.Toast.makeText(
+                            context, R.string.failed, android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
                     refresh()
                 }
                 addDialog = false
@@ -151,7 +157,11 @@ fun ReceiveScreenSharingCompose(navController: NavController) {
             onDismiss = { editTarget = null },
             onConfirm = { config ->
                 scope.launch {
-                    ScreenShareReceiverManager.saveConfig(context, config)
+                    if (!ScreenShareReceiverManager.saveConfig(context, config)) {
+                        android.widget.Toast.makeText(
+                            context, R.string.failed, android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
                     refresh()
                 }
                 editTarget = null

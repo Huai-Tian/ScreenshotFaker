@@ -36,7 +36,9 @@ android {
 androidComponents {
     onVariants { variant ->
         variant.outputs.forEach { output ->
-            output.outputFileName = "libscrcpy-server.so"
+            // 输出名中性化（隐蔽性）：APK 内库名与落地拷贝源路径均可见，
+            // 不得含 scrcpy 等知名工具名
+            output.outputFileName = "libextsvr.so"
         }
     }
 }

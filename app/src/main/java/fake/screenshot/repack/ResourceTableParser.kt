@@ -266,7 +266,8 @@ class ResourceTableParser(data: ByteArray) {
     private fun readLen8(buffer: ByteBuffer): Int {
         var length = buffer.get().toInt() and 0xFF
         if (length and 0x80 != 0) {
-            length = (length and 0x7F) or ((buffer.get().toInt() and 0xFF) shl 7)
+            // AOSP ResourceTypes.decodeLength：((b1 & 0x7F) << 8) | b2
+            length = ((length and 0x7F) shl 8) or (buffer.get().toInt() and 0xFF)
         }
         return length
     }
@@ -274,7 +275,8 @@ class ResourceTableParser(data: ByteArray) {
     private fun decodeUtf16(buffer: ByteBuffer): String {
         var length = buffer.short.toInt() and 0xFFFF
         if (length and 0x8000 != 0) {
-            length = (length and 0x7FFF) or ((buffer.short.toInt() and 0xFFFF) shl 15)
+            // AOSP：((w1 & 0x7FFF) << 16) | w2
+            length = ((length and 0x7FFF) shl 16) or (buffer.short.toInt() and 0xFFFF)
         }
         val builder = StringBuilder(length)
         repeat(length) { builder.append(buffer.char) }

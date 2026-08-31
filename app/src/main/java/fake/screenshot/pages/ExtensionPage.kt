@@ -34,6 +34,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.core.net.toUri
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
+import fake.screenshot.defense.KeyVault
+import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.wrappers.EncryptManager
@@ -321,7 +323,8 @@ fun ExtensionCompose() {
     var screenShareConfigDialogEnableAudio by remember { mutableStateOf(screenShareAudio) }
     var screenShareConfigDialogAudioOutput by remember { mutableStateOf(screenShareAudioOutput) }
     var screenShareConfigDialogAudioMic by remember { mutableStateOf(screenShareAudioMic) }
-    val screenSharePassword by ConfigManager.rememberValue(context, "screenShare_password", "")
+    // 共享认证密码：DK 第二层加密存储（防 root-as-uid 读 DataStore 提取）
+    val screenSharePassword by SensitiveStore.rememberSensitiveValue(context, "screenShare_password", "")
     var screenShareConfigDialogPassword by remember { mutableStateOf(screenSharePassword) }
     val isScreenShareConfigValid by remember {
         derivedStateOf {
@@ -350,18 +353,19 @@ fun ExtensionCompose() {
     }
     //SSH Tunnel
     val sshTunnelEnabled by ConfigManager.rememberValue(context, "ssh_tunnel_enabled", false)
-    val sshTunnelServerAddress by ConfigManager.rememberValue(
+    // SSH 凭据三元组：DK 第二层加密存储（防 root-as-uid 读 DataStore 提取）
+    val sshTunnelServerAddress by SensitiveStore.rememberSensitiveValue(
         context,
         "ssh_tunnel_server_address",
         "127.0.0.1"
     )
     val sshTunnelServerPort by ConfigManager.rememberValue(context, "ssh_tunnel_server_port", 22)
-    val sshTunnelUserName by ConfigManager.rememberValue(
+    val sshTunnelUserName by SensitiveStore.rememberSensitiveValue(
         context,
         "ssh_tunnel_user_name",
         "ScreenshotFaker"
     )
-    val sshTunnelUserPassword by ConfigManager.rememberValue(
+    val sshTunnelUserPassword by SensitiveStore.rememberSensitiveValue(
         context,
         "ssh_tunnel_user_password",
         "ScreenshotFaker"
@@ -438,7 +442,7 @@ fun ExtensionCompose() {
                         return@forEach
                     }
                     val processedBytes = if (encrypt) {
-                        val (nonce, ciphertext) = EncryptManager.encryptByKeystore(originalBytes)
+                        val (nonce, ciphertext) = KeyVault.encryptByKeystore(originalBytes)
                         nonce + ciphertext
                     } else {
                         if (originalBytes.size < 12) {
@@ -447,7 +451,7 @@ fun ExtensionCompose() {
                         }
                         val nonce = originalBytes.copyOfRange(0, 12)
                         val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
-                        EncryptManager.decryptByKeystore(nonce, ciphertext)
+                        KeyVault.decryptByKeystore(nonce, ciphertext)
                     }
                     resolver.openOutputStream(uri, "rwt")?.use { outputStream ->
                         outputStream.write(processedBytes)
@@ -646,6 +650,10 @@ fun ExtensionCompose() {
                             screenShareConfigDialogEnableAudio = screenShareAudio
                             screenShareConfigDialogAudioOutput = screenShareAudioOutput
                             screenShareConfigDialogAudioMic = screenShareAudioMic
+                            // 密码必须回填：否则对话框显示空，确认时"旧值≠空"被判定
+                            // 为用户清除了密码，putSensitive("") 抹掉已存密码——
+                            // app 侧随后 fail-closed 拒绝共享、daemon 侧无鉴权裸奔
+                            screenShareConfigDialogPassword = screenSharePassword
                             screenShareConfigDialog = true
                         }
                     )
@@ -669,6 +677,9 @@ fun ExtensionCompose() {
                             sshTunnelConfigDialogServerPort = sshTunnelServerPort.toString()
                             sshTunnelConfigDialogUserName = sshTunnelUserName
                             sshTunnelConfigDialogUserPassword = sshTunnelUserPassword
+                            // 回填 remotePort：漏掉会保留上次未保存的编辑值
+                            sshTunnelConfigDialogRemotePort =
+                                if (sshTunnelRemotePort == 0) "" else sshTunnelRemotePort.toString()
                             sshTunnelConfigDialog = true
                         }
                     )
@@ -1602,7 +1613,7 @@ fun ExtensionCompose() {
                                 configChanged = true
                             }
                             if (screenSharePassword != screenShareConfigDialogPassword) {
-                                ConfigManager.saveData(
+                                SensitiveStore.putSensitive(
                                     context,
                                     "screenShare_password",
                                     screenShareConfigDialogPassword
@@ -1732,7 +1743,7 @@ fun ExtensionCompose() {
                                     configChanged = true
                                 }
                                 if (sshTunnelServerAddress != sshTunnelConfigDialogServerAddress) {
-                                    ConfigManager.saveData(
+                                    SensitiveStore.putSensitive(
                                         context,
                                         "ssh_tunnel_server_address",
                                         sshTunnelConfigDialogServerAddress
@@ -1748,7 +1759,7 @@ fun ExtensionCompose() {
                                     configChanged = true
                                 }
                                 if (sshTunnelUserName != sshTunnelConfigDialogUserName) {
-                                    ConfigManager.saveData(
+                                    SensitiveStore.putSensitive(
                                         context,
                                         "ssh_tunnel_user_name",
                                         sshTunnelConfigDialogUserName
@@ -1756,7 +1767,7 @@ fun ExtensionCompose() {
                                     configChanged = true
                                 }
                                 if (sshTunnelUserPassword != sshTunnelConfigDialogUserPassword) {
-                                    ConfigManager.saveData(
+                                    SensitiveStore.putSensitive(
                                         context,
                                         "ssh_tunnel_user_password",
                                         sshTunnelConfigDialogUserPassword

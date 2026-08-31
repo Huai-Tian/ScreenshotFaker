@@ -1,0 +1,412 @@
+package fake.screenshot.defense
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.SystemClock
+import android.provider.Settings
+import androidx.core.content.edit
+import fake.screenshot.wrappers.ConfigManager
+import fake.screenshot.wrappers.DaemonManager
+
+/**
+ * L2 未使用自动销毁（TG 账号超时销毁式，独立于门禁验证）。
+ *
+ * 状态存储：
+ * - armed 哨兵：明文 prefs "sync_preferences"（与验证器同文件，中性命名），
+ *   永不清除。由 [GateManager.setPasswords]（随验证器同一次 commit——
+ *   验证器存在而 armed 消失 = 定向篡改 = 自毁）与本类 [setIdleTimeout]
+ *   共写；键名 "armed" 是冻结不变量，两处定义必须一致
+ * - idle_limit / idle_ts：密文 DataStore（Tink 保护）
+ *
+ * 计时锚点（反回拨）：三段式 "boot,elapsedRealtime,currentTimeMillis"。
+ * boot 取 Settings.Global.BOOT_COUNT（system_server 维护，用户态不可
+ * 回拨）：同开机走 er 单调 + 双锚点交叉校验；跨开机走墙钟判定；
+ * boot 减小 = 篡改。旧版两段式锚点按旧规则评估一次后迁移。
+ *
+ * 销毁执行不在本类：判定命中后委托 [DefenseProtocol]（共享同一把
+ * 检查/销毁互斥锁，read-judge-destroy 整体串行）。
+ *
+ * 到期复查闹钟：每次检查通过（未到期）即按当前锚点剩余时间布防
+ * [AlarmReceiver]——封堵"重启后检查通过、app 永不再打开、不再重启"
+ * 场景下无第二个触发点的缺口。链条自续（闹钟到点复查→未到期再布防），
+ * 不跨重启（重启由 BootCompletedReceiver 接管）。
+ */
+object IdleWatchdog {
+    // prefs 文件名是隐蔽性设计（与验证器/KeyVault 同文件），冻结不变量
+    private const val PREFS_NAME = "sync_preferences"
+
+    // armed 哨兵：GateManager.setPasswords 与本类共写（见类注释），勿改键名
+    private const val KEY_ARMED = "armed"
+    private const val CONFIG_KEY_IDLE_LIMIT = "idle_limit"
+    private const val CONFIG_KEY_IDLE_TS = "idle_ts"
+
+    // 超时销毁默认档：6 个月（分钟）。首次启用/销毁后复位都用此值
+    private const val DEFAULT_IDLE_LIMIT_MINUTES = 259200L
+
+    // 双锚点自洽容差：同一开机内 (er-er0) 与 (wc-wc0) 偏差超过此值 = 非法
+    private const val ANCHOR_DRIFT_TOLERANCE_MS = 10 * 60 * 1000L
+
+    // 跨重启墙钟回拨容差（与 daemon.cpp ANCHOR_FREEZE_TOLERANCE_SEC=120s 对齐）：
+    // NTP 小幅向后校正（秒级）是正常设备行为，硬性 wc<wc0 即引爆会把
+    // "重启 + 时钟校正"的普通用户误杀（销毁不可逆，误报代价极高）。
+    // 容差内的回拨最多把死线推迟同等时长（一次性，锚点不随回拨刷新），
+    // 大幅回拨（>2min）仍按篡改引爆
+    private const val ROLLBACK_TOLERANCE_MS = 2 * 60 * 1000L
+
+    // wc0 合理性区间下限（2020-01-01），防垃圾值
+    private const val WC0_MIN = 1_577_836_800_000L
+
+    private lateinit var appContext: Context
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    private fun prefs() = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    /** 可选档位（分钟）：5分钟 ~ 12个月，无禁用项 */
+    val idleTimeoutOptions: List<Long> = listOf(
+        5L, 30L, 60L, 360L, 1440L, 10080L,
+        43200L, 129600L, 259200L, 525600L
+    )
+
+    fun isIdleArmed(): Boolean = prefs().getBoolean(KEY_ARMED, false)
+
+    /**
+     * idle 密文状态快照。
+     * readable=false 表示 DataStore/Tink 解密失败（密钥已死或密文损坏），
+     * 调用方按"已销毁/被篡改"处理——绝不能让异常直接逃逸导致启动崩溃循环。
+     */
+    private data class IdleState(val readable: Boolean, val limit: Long, val ts: String)
+
+    private suspend fun readIdleState(): IdleState = try {
+        IdleState(
+            true,
+            ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_LIMIT, 0L),
+            ConfigManager.getDataOnce(appContext, CONFIG_KEY_IDLE_TS, "")
+        )
+    } catch (_: Exception) {
+        IdleState(false, 0L, "")
+    }
+
+    /**
+     * 读当前开机次数（跨重启单调递增，由 system_server 维护，用户态不可回拨）。
+     * 读取失败返回 -1（个别设备不支持），调用方回退到双锚点启发式。
+     */
+    private fun readBootCount(): Int = runCatching {
+        Settings.Global.getInt(appContext.contentResolver, Settings.Global.BOOT_COUNT, -1)
+    }.getOrDefault(-1)
+
+    /**
+     * 写入三段式锚点：boot,elapsedRealtime,currentTimeMillis。
+     * boot 显式区分开机周期——er 跨开机比较无意义，禁止用 er 大小猜测是否重启。
+     */
+    private suspend fun writeAnchor() {
+        val ts = "${readBootCount()},${SystemClock.elapsedRealtime()},${System.currentTimeMillis()}"
+        runCatching { ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_TS, ts) }
+    }
+
+    /**
+     * 超时销毁是否真正启用过（区别于 armed-only 的门禁态）。
+     * 判定只看 limit：limit>0 即启用，ts 是否存在不参与
+     * （写入时序为 ts 先 limit 后，limit>0 而 ts 缺失 = 篡改，交给雷管处理）。
+     */
+    suspend fun isIdleActivated(): Boolean {
+        if (!isIdleArmed()) return false
+        return readIdleState().let { it.readable && it.limit > 0 }
+    }
+
+    /**
+     * 冷启动超时判定（在门禁验证与一切配置加载之前调用）。
+     * 读到任何不合法状态 → 雷管引爆（fail-destroy）。
+     *
+     * 并发语义：tryLock——已有检查在途时本次直接放行（在途检查读取的是
+     * 同一状态，其判定结果覆盖本次）；持有锁期间完成 read-judge-destroy
+     * 全序列。MainActivity 的 runBlocking 调用因此不会被在途销毁阻塞
+     * 主线程（销毁含 IO 等待，最长 ~5s）
+     *
+     * 状态判定规则：
+     * - limit<=0：一律视为未启用，忽略 ts 残留（部分写入态/垃圾值不引爆）
+     * - limit>0 且不在档位表：引爆
+     * - limit>0 且 ts 为空：引爆（正常写入时序为 ts 先写，此状态不可达，
+     *   出现即密文被定向篡改；旧版本启用过超时的用户本就会被旧代码引爆，
+     *   行为一致）
+     * - 锚点三段式 boot,er,wc：boot 相等走双锚点交叉校验；boot 增大（重启）
+     *   走墙钟判定；boot 减小（不可回拨却回拨）引爆
+     * - 墙钟倒退判定带容差（ROLLBACK_TOLERANCE_MS）：NTP 小幅向后校正是
+     *   正常设备行为，不误杀（销毁不可逆，误报代价极高）；大幅倒退仍按
+     *   回拨/篡改引爆。同开机到期判定只依赖 er（单调不可回拨）
+     * - 旧版两段式锚点 er,wc：按旧规则评估一次（不比旧代码更严），通过后
+     *   迁移写入新格式
+     *
+     * 通过（未到期）即按当前锚点剩余时间布防到期复查闹钟——保证
+     * "app 永不再打开且不再重启"时销毁仍有触发点（见 armDeadlineAlarm）。
+     *
+     * @return true = 已触发销毁（调用方无需额外处理，销毁含复位）
+     */
+    suspend fun checkIdleExpired(): Boolean {
+        val result = DefenseProtocol.tryWithDestroyLock { checkIdleExpiredLocked() }
+        return result ?: false
+    }
+
+    private suspend fun checkIdleExpiredLocked(): Boolean {
+        // 验证器存在而 armed 消失 = sync_preferences 被定向篡改 = 自毁
+        if (GateManager.isGateEnabled() && !isIdleArmed()) {
+            DefenseProtocol.destroyForCoercionLocked()
+            return true
+        }
+        // 未 armed 且未设门禁 = 从未启用（全新安装/存量未使用用户），正常流程
+        if (!isIdleArmed()) return false
+
+        val st = readIdleState()
+        // 密文不可读（Tink/Keystore 已死或密文损坏）：按已销毁处理，走销毁复位，
+        // 不让异常逃逸造成崩溃循环
+        if (!st.readable) {
+            DefenseProtocol.destroyForCoercionLocked()
+            return true
+        }
+        // limit<=0：未启用。ts 残留视为垃圾忽略（修复：旧版会把 (0, ts≠"") 引爆）
+        if (st.limit <= 0L) return false
+        if (st.limit !in idleTimeoutOptions) {
+            DefenseProtocol.destroyForCoercionLocked()
+            return true
+        }
+        // limit>0 而 ts 为空：写入时序上不可达（ts 先写），出现即篡改
+        if (st.ts.isEmpty()) {
+            DefenseProtocol.destroyForCoercionLocked()
+            return true
+        }
+
+        val limitMs = st.limit * 60_000L
+        val boot = readBootCount()
+        val er = SystemClock.elapsedRealtime()
+        val wc = System.currentTimeMillis()
+        val parts = st.ts.split(",")
+
+        // 通过路径的到期剩余毫秒（布防闹钟用；null = 不布防）
+        var armDelayMs: Long? = null
+
+        when (parts.size) {
+            3 -> {
+                val boot0 = parts[0].toIntOrNull()
+                val er0 = parts[1].toLongOrNull()
+                val wc0 = parts[2].toLongOrNull()
+                if (boot0 == null || er0 == null || wc0 == null ||
+                    er0 < 0 || wc0 < WC0_MIN
+                ) {
+                    DefenseProtocol.destroyForCoercionLocked()
+                    return true
+                }
+                if (boot < 0 || boot0 < 0) {
+                    // 设备不支持 BOOT_COUNT：退回双锚点启发式（与旧行为一致）。
+                    // 注意：评估完直接短路（不走下方 when）——否则 boot=-1 与
+                    // 合法 boot0 比较落入 else 分支误判"BOOT_COUNT 回退"误杀
+                    if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                        DefenseProtocol.destroyForCoercionLocked()
+                        return true
+                    }
+                    armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
+                } else when {
+                    boot == boot0 -> {
+                        // 同一开机：er 单调，er<er0 即非法
+                        if (er < er0) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        val erDiff = er - er0
+                        val wcDiff = wc - wc0
+                        // 双锚点交叉校验（抓"只改 er0/wc0 其一"的定向篡改）。
+                        // 同开机到期判定只依赖 er（单调不可回拨，改系统时间
+                        // 对它无效）——wc 倒退不单独引爆：NTP 向后校正是正常
+                        // 行为，小倒退由漂移容差吸收，大倒退(>漂移容差)在此引爆
+                        if (kotlin.math.abs(erDiff - wcDiff) > ANCHOR_DRIFT_TOLERANCE_MS) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        if (erDiff >= limitMs) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        armDelayMs = (er0 + limitMs) - er
+                    }
+
+                    boot > boot0 -> {
+                        // 重启过（可能多次）：er 跨开机比较无意义，墙钟判定。
+                        // 大幅倒退（超出容差）= 回拨 = 非法；容差内倒退容忍
+                        // （NTP 校正），死线至多顺延同等时长
+                        if (wc < wc0 - ROLLBACK_TOLERANCE_MS) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        if (wc - wc0 >= limitMs) {
+                            DefenseProtocol.destroyForCoercionLocked()
+                            return true
+                        }
+                        armDelayMs = (wc0 + limitMs) - wc
+                    }
+
+                    else -> {
+                        // BOOT_COUNT 单调递减：不可回拨却回拨 = 篡改
+                        DefenseProtocol.destroyForCoercionLocked()
+                        return true
+                    }
+                }
+            }
+
+            2 -> {
+                // 旧版两段式锚点（更早版本写入）：按旧规则评估一次，通过则迁移新格式。
+                // 评估逻辑与旧代码一致，不比旧版更严格（升级用户不引入新误炸）
+                val er0 = parts[0].toLongOrNull()
+                val wc0 = parts[1].toLongOrNull()
+                if (er0 == null || wc0 == null || er0 < 0 || wc0 < WC0_MIN) {
+                    DefenseProtocol.destroyForCoercionLocked()
+                    return true
+                }
+                if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                    DefenseProtocol.destroyForCoercionLocked()
+                    return true
+                }
+                writeAnchor()
+                armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
+            }
+
+            else -> {
+                DefenseProtocol.destroyForCoercionLocked()
+                return true
+            }
+        }
+        // 同开机：er 单调 → 到期点 = er0 + limit（不可回拨，精确）；
+        // 跨开机：只剩墙钟 → 到期点 = wc0 + limit（大幅时钟回拨由下次复查的
+        // wc < wc0-容差 判定捕获，闹钟至多被延迟，不会缺席）
+        armDelayMs?.let { armDeadlineAlarm(it) }
+        return false
+    }
+
+    /**
+     * 双锚点启发式（旧版规则，仅两处使用）：
+     * er>=er0 视为同一开机做交叉校验；er<er0 视为重启走墙钟判定。
+     * BOOT_COUNT 不可用设备的新锚点（boot=-1）也走此路径。
+     */
+    private fun checkLegacyAnchor(
+        er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long
+    ): Boolean {
+        if (er >= er0) {
+            // 同开机语义（与三段式分支一致）：到期只看 er；wc 倒退不单独
+            // 引爆（NTP 校正），小倒退由漂移容差吸收、大倒退在此引爆
+            val erDiff = er - er0
+            val wcDiff = wc - wc0
+            if (kotlin.math.abs(erDiff - wcDiff) > ANCHOR_DRIFT_TOLERANCE_MS) {
+                return true
+            }
+            return erDiff >= limitMs
+        }
+        // er 倒退：按重启处理，墙钟判定（回拨容差同三段式分支）
+        if (wc < wc0 - ROLLBACK_TOLERANCE_MS) return true
+        return wc - wc0 >= limitMs
+    }
+
+    /** 旧版锚点规则下的到期剩余毫秒（调用前提：checkLegacyAnchor 已通过，恒正） */
+    private fun legacyRemaining(
+        er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long
+    ): Long =
+        if (er >= er0) (er0 + limitMs) - er else (wc0 + limitMs) - wc
+
+    /**
+     * 布防到期复查闹钟（ELAPSED_REALTIME_WAKEUP：单调时钟 + 睡眠中唤醒）。
+     *
+     * 精确性由 manifest 权限组合保证（安装即授予，无需用户操作）：
+     * - API 30：精确闹钟无需权限（Android 12 前不受限）
+     * - API 31-32：SCHEDULE_EXACT_ALARM（normal 级，安装即授予）
+     * - API 33+：USE_EXACT_ALARM（安装即授予，用户/系统均不可撤销）
+     *
+     * 降级路径（仅 Android 12/12L 用户手动撤销权限的罕见情形）：
+     * setAndAllowWhileIdle——完全不可见（无任何状态栏图标），Doze 下可
+     * 延迟约 9-15 分钟，销毁被推迟但不缺席。曾评估 setAlarmClock（免权限
+     * 且精确）但已否决：它会登记为系统"下一个闹钟"，状态栏出现图标——
+     * 常态暴露不可接受；且 IAlarmManager 的精确性校验在 system_server 侧，
+     * 客户端 hidden API 反射无法绕过，不存在"零权限零图标精确"路径。
+     *
+     * FLAG_UPDATE_CURRENT：重复布防覆盖旧闹钟（幂等，最多一枚在途）。
+     */
+    private fun armDeadlineAlarm(delayMs: Long) {
+        if (delayMs <= 0L) return
+        runCatching {
+            val am = appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val pending = PendingIntent.getBroadcast(
+                appContext, 0,
+                Intent(appContext, AlarmReceiver::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val triggerElapsed = SystemClock.elapsedRealtime() + delayMs
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerElapsed, pending
+                )
+            } else {
+                am.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerElapsed, pending
+                )
+            }
+        }
+    }
+
+    /**
+     * 刷新计时锚点（写入三段式锚点）。只在"有效使用"时调用：
+     * 无门禁冷启动判定后 / 门禁验证通过后 / onStart 回前台 / RESUMED 心跳。
+     *
+     * 有门禁且本会话未验证通过时拒绝刷新——未验证的打开（含冷启动后的
+     * 首个 onStart）对计时器透明，防止胁迫者在门禁页停留/反复打开续命。
+     *
+     * 门禁判定只看 limit>0（旧版要求 ts 非空导致首写不可达，已修复）。
+     * 锚点写入后顺带向守护进程续期（daemon 不在线则静默跳过）。
+     */
+    suspend fun touchIdle() {
+        if (!isIdleArmed()) return
+        if (GateManager.isGateEnabled() && !GateManager.sessionUnlocked) return
+        val st = readIdleState()
+        if (!st.readable || st.limit <= 0) return
+        writeAnchor()
+        DaemonManager.renewIdleDeadline(st.limit)
+    }
+
+    /**
+     * 首次启用/修改档位。写入时序严格：
+     * ① armed 哨兵（明文，先立于不败）→ ② 锚点（无生效意义）→ ③ limit（提交标志）。
+     * 任意步骤间崩溃产生的部分状态均为合法态：
+     * (armed, 0, "") / (armed, 0, ts) → 未启用；(armed, limit>0, ts) → 完整启用。
+     * "limit>0 而 ts 空"不可达，出现即篡改（雷管覆盖）。
+     */
+    suspend fun setIdleTimeout(minutes: Long) {
+        prefs().edit { putBoolean(KEY_ARMED, true) }
+        writeAnchor()
+        ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_LIMIT, minutes)
+        DaemonManager.renewIdleDeadline(minutes)
+    }
+
+    /** 当前档位（未启用返回 null，用于设置页副标题） */
+    suspend fun getCurrentIdleTimeout(): Long? {
+        if (!isIdleArmed()) return null
+        val st = readIdleState()
+        if (!st.readable) return null
+        return if (st.limit > 0 && st.limit in idleTimeoutOptions) st.limit else null
+    }
+
+    /**
+     * 销毁后复位（由 [DefenseProtocol] 在销毁序列内调用）：防连环雷管
+     * 自毁循环（销毁清空 DataStore → 读默认 0 → 再引爆）。
+     * 激活态由调用方在 wipe 之前快照传入（wipe 后读取恒为未启用，
+     * 旧实现因此恒为 no-op）。仅"真正启用过"（limit>0）时写默认档 +
+     * 当前锚点，计时器自愈；armed-only（只设过门禁未启用超时）销毁后
+     * 回到未启用态 = 全新状态语义。armed 永不清除。
+     */
+    internal suspend fun resetIdleAfterDestroy(wasActivated: Boolean) {
+        if (!wasActivated) return
+        ConfigManager.saveData(
+            appContext, CONFIG_KEY_IDLE_LIMIT, DEFAULT_IDLE_LIMIT_MINUTES
+        )
+        writeAnchor()
+    }
+}

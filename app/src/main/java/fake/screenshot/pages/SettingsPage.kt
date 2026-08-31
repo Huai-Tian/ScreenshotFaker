@@ -35,13 +35,28 @@ import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.styles.*
 import fake.screenshot.R
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.core.net.toUri
 import fake.screenshot.wrappers.RepackIdentity
 import androidx.core.graphics.scale
 import fake.screenshot.wrappers.RepackManager
-import fake.screenshot.wrappers.GateManager
+import fake.screenshot.defense.GateManager
+import fake.screenshot.defense.IdleWatchdog
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+
+/** 密码熵估算（位）：长度 × log2(字符池大小)。粗估但足够指导用户 */
+private fun estimatePasswordBits(pw: String): Int {
+    if (pw.isEmpty()) return 0
+    var pool = 0
+    if (pw.any { it.isDigit() }) pool += 10
+    if (pw.any { it.isLowerCase() }) pool += 26
+    if (pw.any { it.isUpperCase() }) pool += 26
+    if (pw.any { !it.isLetterOrDigit() }) pool += 33
+    if (pool == 0) pool = 1
+    return (pw.length * kotlin.math.log2(pool.toDouble())).toInt()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,7 +68,7 @@ fun SettingsCompose(navController: NavController) {
     val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
     val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
     val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
-    val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", false)
+    val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", true)
     val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val definedTimestamp by ConfigManager.rememberValue(context, "defined_timestamp", "")
     var definedTimestampInputText by remember { mutableStateOf(definedTimestamp) }
@@ -133,7 +148,7 @@ fun SettingsCompose(navController: NavController) {
     var idleCurrentLimit by remember { mutableStateOf<Long?>(null) }
     var idleSelectedLimit by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(Unit) {
-        idleCurrentLimit = GateManager.getCurrentIdleTimeout()
+        idleCurrentLimit = IdleWatchdog.getCurrentIdleTimeout()
         idleSelectedLimit = idleCurrentLimit
     }
     val isPasswordConfigValid by remember {
@@ -284,6 +299,14 @@ fun SettingsCompose(navController: NavController) {
                             passwordConfigDialog = true
                         }
                     )
+                    if (!gateEnabled) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stringResource(R.string.no_gate_warning),
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
             item {
@@ -345,10 +368,14 @@ fun SettingsCompose(navController: NavController) {
                                 return@TwoStatePreference
                             }
                             scope.launch {
+                                // IO 线程执行：startDaemon 的端口占用探测是
+                                // Socket 连接（主线程抛 NetworkOnMainThreadException
+                                // 被 catch 吞掉 → 探测恒失效）；stopDaemon 兜底
+                                // 路径的 pkill/pgrep 会阻塞主线程数秒
                                 isDaemonRunning = if (newValue) {
-                                    DaemonManager.startDaemon()
+                                    withContext(Dispatchers.IO) { DaemonManager.startDaemon() }
                                 } else {
-                                    !DaemonManager.stopDaemon()
+                                    !withContext(Dispatchers.IO) { DaemonManager.stopDaemon() }
                                 }
                             }
                         }
@@ -680,14 +707,22 @@ fun SettingsCompose(navController: NavController) {
                                 val newPort = daemonSocketPortInputText.toInt()
                                 val portChanged = daemonSocketPort != newPort
                                 if (portChanged) {
+                                    // 停旧 daemon 失败时中止端口变更：旧实例仍占着
+                                    // 旧端口，改端口后 startDaemon 在新端口探测不到它
+                                    // → 拉起第二个实例，旧 daemon 从此无法经信道停止
                                     val wasRunning = isDaemonRunning
-                                    isDaemonRunning = !DaemonManager.stopDaemon()
+                                    val stopped = withContext(Dispatchers.IO) {
+                                        DaemonManager.stopDaemon()
+                                    }
+                                    if (wasRunning && !stopped) return@launch
+                                    isDaemonRunning = !stopped
                                     ConfigManager.saveData(
                                         context,
                                         "daemon_socket_port",
                                         newPort
                                     )
-                                    if (wasRunning) isDaemonRunning = DaemonManager.startDaemon()
+                                    if (wasRunning) isDaemonRunning =
+                                        withContext(Dispatchers.IO) { DaemonManager.startDaemon() }
                                 }
                             }
                             daemonConfigDialog = false
@@ -824,6 +859,24 @@ fun SettingsCompose(navController: NavController) {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        if (newPasswordInputText.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val bits = estimatePasswordBits(newPasswordInputText)
+                            Text(
+                                text = stringResource(R.string.password_strength_hint, bits) +
+                                        " · " + when {
+                                    bits < 40 -> stringResource(R.string.password_strength_weak)
+                                    bits < 60 -> stringResource(R.string.password_strength_medium)
+                                    else -> stringResource(R.string.password_strength_strong)
+                                },
+                                fontSize = 9.sp,
+                                color = when {
+                                    bits < 40 -> MaterialTheme.colorScheme.error
+                                    bits < 60 -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    else -> MaterialTheme.colorScheme.primary
+                                }
+                            )
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         OutlinedTextField(
                             value = confirmPasswordInputText,
@@ -939,7 +992,7 @@ fun SettingsCompose(navController: NavController) {
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         // 无禁用项：只有时长档位，一旦启用不可关闭
-                        GateManager.idleTimeoutOptions.forEach { option ->
+                        IdleWatchdog.idleTimeoutOptions.forEach { option ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -960,7 +1013,7 @@ fun SettingsCompose(navController: NavController) {
                         onClick = {
                             idleSelectedLimit?.let { selected ->
                                 scope.launch {
-                                    GateManager.setIdleTimeout(selected)
+                                    IdleWatchdog.setIdleTimeout(selected)
                                     idleCurrentLimit = selected
                                 }
                             }
@@ -1285,7 +1338,7 @@ fun SettingsCompose(navController: NavController) {
     }
 }
 
-/** 档位分钟数 → 本地化标签（与 GateManager.idleTimeoutOptions 一一对应） */
+/** 档位分钟数 → 本地化标签（与 IdleWatchdog.idleTimeoutOptions 一一对应） */
 @Composable
 fun formatIdleTimeoutLabel(minutes: Long): String = when (minutes) {
     5L -> stringResource(R.string.idle_option_5_minutes)

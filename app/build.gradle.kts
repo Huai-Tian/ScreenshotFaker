@@ -113,7 +113,7 @@ dependencies {
 }
 
 val buildScrcpy = tasks.register<Exec>("buildScrcpy") {
-    description = "Build libscrcpy-server.so"
+    description = "Build libextsvr.so"
     workingDir = project.rootDir
     commandLine = listOf(
         if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "./gradlew",
@@ -126,13 +126,13 @@ val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
     dependsOn(buildScrcpy)
 
     val scrcpySo = project(":scrcpy").layout.buildDirectory
-        .file("outputs/apk/release/libscrcpy-server.so")
+        .file("outputs/apk/release/libextsvr.so")
         .get()
         .asFile
     val abiList = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
     val targetBaseDir = layout.buildDirectory.dir("generated/jniLibs")
     val targetFiles = abiList.map { abi ->
-        targetBaseDir.map { it.file("${abi}/libscrcpy-server.so") }
+        targetBaseDir.map { it.file("${abi}/libextsvr.so") }
     }
 
     inputs.files(listOf(scrcpySo))
@@ -140,7 +140,7 @@ val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
 
     doLast {
         if (!scrcpySo.exists()) {
-            throw GradleException("Failed to find libscrcpy-server.so Path: ${scrcpySo.absolutePath}")
+            throw GradleException("Failed to find libextsvr.so Path: ${scrcpySo.absolutePath}")
         }
         abiList.forEach { abi ->
             val targetBase = targetBaseDir.get().asFile
@@ -151,7 +151,7 @@ val injectScrcpyAsLib = tasks.register("injectScrcpyAsLib") {
                 into(targetDir)
             }
         }
-        println("Successfully added libscrcpy-server.so")
+        println("Successfully added libextsvr.so")
     }
 }
 

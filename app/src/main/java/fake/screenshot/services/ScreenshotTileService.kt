@@ -5,8 +5,9 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.R
 import fake.screenshot.Auxiliary
+import fake.screenshot.defense.DefenseProtocol
+import fake.screenshot.defense.KeyVault
 import fake.screenshot.wrappers.ConfigManager
-import fake.screenshot.wrappers.EncryptManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -60,7 +61,7 @@ class ScreenshotTileService : TileService() {
                 )
                 // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
                 // 此时若继续，明文会先落 /data/local/tmp 再删——绝不给这个窗口
-                if (encryptOutputs && !EncryptManager.isDaemonKeyReady()) {
+                if (encryptOutputs && !KeyVault.isDaemonKeyReady()) {
                     withContext(Dispatchers.Main) {
                         android.widget.Toast.makeText(
                             this@ScreenshotTileService,
@@ -100,7 +101,7 @@ class ScreenshotTileService : TileService() {
                     try {
                         File(tempPath + tempName).apply {
                             val encrypted = File("$savePath/$fileName")
-                            EncryptManager.encryptFileByKeystore(this, encrypted)
+                            KeyVault.encryptFileByKeystore(this, encrypted)
                         }
                     } catch (_: Exception) {
                     } finally {
@@ -115,7 +116,7 @@ class ScreenshotTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         // 磁贴可能先于 MainActivity 运行（如重启后直接点磁贴），确保 DK 上下文就绪
-        EncryptManager.init(applicationContext)
+        DefenseProtocol.init(applicationContext)
         Auxiliary.refreshShellState()
         clicked = false
         showingNoPermission = false

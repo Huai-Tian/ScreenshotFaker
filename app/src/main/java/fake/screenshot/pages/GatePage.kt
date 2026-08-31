@@ -31,8 +31,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import fake.screenshot.R
-import fake.screenshot.wrappers.GateManager
-import fake.screenshot.wrappers.GateResult
+import fake.screenshot.defense.DefenseProtocol
+import fake.screenshot.defense.GateManager
+import fake.screenshot.defense.GateResult
 import kotlinx.coroutines.launch
 
 /**
@@ -95,7 +96,7 @@ fun GateCompose(onUnlocked: () -> Unit) {
                                 onUnlocked()
                             }
                             GateResult.COERCION -> {
-                                GateManager.destroyForCoercion()
+                                DefenseProtocol.destroyForCoercion()
                                 onUnlocked()
                             }
                             GateResult.INVALID -> {
