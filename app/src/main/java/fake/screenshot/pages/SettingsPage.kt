@@ -1488,10 +1488,14 @@ fun SettingsCompose(navController: NavController) {
                     TextButton(
                         onClick = {
                             // 密码暂存 → 文档选择器返回后加密写出（备份密码
-                            // 不落盘，仅存在于本次导出流程的内存态）
+                            // 不落盘，仅存在于本次导出流程的内存态）。
+                            // 建议文件名中性化：SAF 默认名落在用户可见的
+                            // 目录（Download 等），含 "screenshotfaker" 的
+                            // 名字在重打包克隆（中性身份）上直接暴露原始
+                            // 归属——与全项目随机化/中性化命名纪律一致
                             pendingBackupPassword = backupPasswordInputText
                             backupPasswordDialog = false
-                            backupFileSaver.launch("screenshotfaker-backup")
+                            backupFileSaver.launch("config-backup")
                         },
                         enabled = backupPasswordInputText.isNotEmpty() &&
                                 backupPasswordInputText == backupPasswordConfirmInputText
@@ -1538,9 +1542,30 @@ fun SettingsCompose(navController: NavController) {
                             scope.launch {
                                 val ok = withContext(Dispatchers.IO) {
                                     runCatching {
+                                        // 大小上限：合法备份为 KB 级（配置键值 +
+                                        // GCM 密文）；无界 readBytes 对恶意巨型
+                                        // "备份"是 OOM 面（Error 虽被 runCatching
+                                        // 的 Throwable 捕获，堆耗尽途中已可能
+                                        // 拖垮进程）。分块读入并在越过上限时
+                                        // 立即中止——堆占用封顶在 10MB+单块，
+                                        // 与文件实际大小无关（check-after-read
+                                        // 的旧形态仍会先把整个文件读进堆）
+                                        val maxBackupBytes = 10 * 1024 * 1024
                                         val blob =
                                             context.contentResolver.openInputStream(uri)
-                                                ?.use { it.readBytes() }
+                                                ?.use { input ->
+                                                    val out = java.io.ByteArrayOutputStream(64 * 1024)
+                                                    val buf = ByteArray(64 * 1024)
+                                                    while (true) {
+                                                        val n = input.read(buf)
+                                                        if (n < 0) break
+                                                        out.write(buf, 0, n)
+                                                        if (out.size() > maxBackupBytes) {
+                                                            throw java.io.IOException("backup file too large")
+                                                        }
+                                                    }
+                                                    out.toByteArray()
+                                                }
                                                 ?: throw java.io.IOException("open input failed")
                                         // v2 布局（与备份侧同构）：magic1 + salt16 + nonce12 + ct
                                         check(blob.size > 1 + EncryptManager.V2_SALT_LENGTH + 12) {

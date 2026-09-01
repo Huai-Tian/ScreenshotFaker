@@ -22,7 +22,6 @@
     <string name="restore_config_description">从备份文件导入设置，需要备份时设置的密码。由设备密钥加密的凭据仅能在本机读回。超时销毁的计时状态不在备份范围内。</string>
     <string name="backup_password">备份密码</string>
     <string name="backup_password_confirm">确认密码</string>
-    <string name="password_mismatch">两次输入不一致</string>
     <string name="detach_description">这项操作将会让守护进程关闭通信端口，无法通过端口是否开放判断进程的存活。这可能有助于隐藏性，但是您再也无法与它通信并查看其状态。</string>
     <string name="part_success">部分成功</string>
     <string name="failed">失败</string>

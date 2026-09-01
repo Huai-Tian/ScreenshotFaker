@@ -296,15 +296,23 @@ object DaemonManager {
             return false
         }
         val separator = ConfigManager.getDataOnce(appContext, "daemon_config_separator", "#")
+        // 消费点校验（SettingsPage 保存时已校验，此处复核）：触发配置经
+        // \u001F 分段下发、daemon 侧原样拼接进 sh -c 并明言信任本侧
+        // isConfigValid——绕过 UI 写入 DataStore 的路径（备份恢复导入等）
+        // 必须在此拦下。非法整体按未配置处理（fail-closed：daemon 保留
+        // 旧配置；合法存量数据不受影响——UI 保存的门禁与本校验同规则）
         val screenshot =
-            ConfigManager.getDataOnce(appContext, "daemon_screenshot_config", "").split(separator)
-                .joinToString("\u001F")
+            sanitizeDaemonTriggerConfig(
+                ConfigManager.getDataOnce(appContext, "daemon_screenshot_config", ""), separator
+            )?.split(separator)?.joinToString("\u001F") ?: ""
         val screenRecord =
-            ConfigManager.getDataOnce(appContext, "daemon_screenRecord_config", "").split(separator)
-                .joinToString("\u001F")
+            sanitizeDaemonTriggerConfig(
+                ConfigManager.getDataOnce(appContext, "daemon_screenRecord_config", ""), separator
+            )?.split(separator)?.joinToString("\u001F") ?: ""
         val screenShare =
-            ConfigManager.getDataOnce(appContext, "daemon_screenshare_config", "").split(separator)
-                .joinToString("\u001F")
+            sanitizeDaemonTriggerConfig(
+                ConfigManager.getDataOnce(appContext, "daemon_screenshare_config", ""), separator
+            )?.split(separator)?.joinToString("\u001F") ?: ""
         val screenshotCommand = suspend {
             val savePath = ConfigManager.getDataOnce(
                 context = appContext,
@@ -554,6 +562,25 @@ object DaemonManager {
         val command =
             "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"
         return sendCommand(command) == "fine"
+    }
+
+    /**
+     * daemon 触发配置（daemon_*_config）的消费点校验，规则与 SettingsPage
+     * 保存校验一致：separator 三分段 [优先级字母|空] [tag] [regex]，tag 经
+     * isConfigValid、regex 经 isRegexValid（daemon 侧 sh -c 拼接明言信任
+     * 本侧校验，绕过 UI 写入 DataStore 的路径——如备份恢复导入——在此
+     * 闭环）。非法（含 separator 不可用）返回 null = 按未配置处理
+     */
+    private fun sanitizeDaemonTriggerConfig(raw: String, separator: String): String? {
+        if (raw.isEmpty() || separator.isEmpty()) return null
+        val parts = raw.split(separator)
+        val validPriority = setOf('V', 'D', 'I', 'W', 'E', 'F')
+        val ok = parts.size == 3 &&
+                (parts[0].isEmpty() ||
+                        (parts[0].length == 1 && parts[0][0] in validPriority)) &&
+                parts[1].isNotEmpty() && Auxiliary.isConfigValid(parts[1]) &&
+                parts[2].isNotEmpty() && Auxiliary.isRegexValid(parts[2])
+        return if (ok) raw else null
     }
 
     /**

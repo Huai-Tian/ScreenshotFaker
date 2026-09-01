@@ -461,17 +461,15 @@ class ScreenShareReceiver(
         val hostKeyStoreKey = SensitiveStore.sshHostKeyStoreKey(config.address, config.sshPort)
         // fail-closed（与发送端 ScreenShareManager 同语义）："DK 恒可用"的旧
         // 假设不成立——查看器的重试循环跨锁定窗口存活（息屏/后台 30s 即
-        // lockSession 清 DK，页面与 DisposableEffect 不销毁），重连时
-        // getSensitive 因 DK 不可用返回空串。若放行：空指纹命中
-        // "首次连接"分支 → check() 对任意主机密钥返回 OK → MITM 伪装
-        // 服务器截获 sshPassword 并窃听流经隧道的屏幕流。密文存在而本会话
-        // 不可解 = 指纹已固定但读不出 → 必须拒绝连接（抛出由 runLoop
-        // 按普通失败重试/终止，连接从未建立，无泄露窗口）
-        if (SensitiveStore.isSensitiveConfigured(appContext, hostKeyStoreKey)) {
-            val stored = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
-            if (stored.isEmpty()) {
-                throw IOException("locked_no_credentials")
-            }
+        // lockSession 清 DK，页面与 DisposableEffect 不销毁），重连时进入
+        // 本函数。拆分锁定态下 getSensitive 退化为空串：已固定指纹读不出
+        // → 空指纹命中"首次连接"分支；从未固定 → TOFU 首次采纳——两种
+        // 形态 check() 都对任意主机密钥放行，MITM 伪装服务器截获内存
+        // config 中的真实 sshPassword 并窃听流经隧道的屏幕流。DK 未就绪
+        //（拆分锁定/文件不可解）一律拒绝建立会话（抛出由 runLoop 按普通
+        // 失败重试/终止，连接从未建立，无泄露窗口；解锁后重试即恢复）
+        if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
+            throw IOException("locked_no_credentials")
         }
         val storedFingerprint = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
         // check() 在 JSch 连接线程上同步回调（非挂起上下文）：预读固定指纹，

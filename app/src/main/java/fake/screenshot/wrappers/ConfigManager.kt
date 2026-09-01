@@ -241,26 +241,41 @@ object ConfigManager {
 
     /**
      * DataStore 全量快照（备份用）：键名 -> 值（String/Int/Boolean/Long/Float）。
-     * 排除超时看门狗键（idle_limit/idle_ts）：它们是设备安全态而非用户偏好，
-     * 从旧备份恢复会以陈旧锚点重置死线——距备份超过档位时长的恢复操作
-     * 直接触发销毁（不可逆，误毁方向）。armed 在明文 prefs，本就不在
-     * DataStore 快照内
+     * 排除两类键：
+     * - 超时看门狗（idle_limit/idle_ts）：设备安全态而非用户偏好，从旧备份
+     *   恢复会以陈旧锚点重置死线——距备份超过档位时长的恢复操作直接
+     *   触发销毁（不可逆，误毁方向）。armed 在明文 prefs，本就不在快照内
+     * - SSH 主机密钥纪元（ssh_hostkey_epoch）：daemon 侧据此丢弃本地缓存的
+     *   旧纪元指纹——恢复回退纪元可能令 daemon 重新采纳已被用户显式重置
+     *   的旧指纹（TOFU 弱化面）。纪元是 app↔daemon 同步态而非用户偏好，
+     *   不入备份；_sec 指纹本身为 DK 密文（GCM 认证），无法被备份伪造
      */
     suspend fun snapshotAll(context: Context): Map<String, Any> =
         getEncryptedDataStore(context).data.first().asMap().entries
-            .filter { it.key.name != "idle_limit" && it.key.name != "idle_ts" }
+            .filter { it.key.name !in BACKUP_EXCLUDED_KEYS }
             .associate { it.key.name to it.value }
+
+    private val BACKUP_EXCLUDED_KEYS = setOf("idle_limit", "idle_ts", "ssh_hostkey_epoch")
 
     /**
      * 恢复快照（合并覆盖：快照中的键覆盖现值，快照外的键保持现状——
      * DataStore 无单键删除 API，无法做到"先清空再恢复"）。类型不明的
-     * 键跳过；看门狗键同样拒收（见 snapshotAll，双向封堵）
+     * 键跳过；看门狗/纪元键拒收（见 snapshotAll，双向封堵）。
+     * 字符串值含协议控制字符（\u001C..\u001F，app↔daemon 配置信道的
+     * 字段/记录分隔符）一律拒收——注入会让 daemon 侧 split 错位（字段
+     * 移位可把内容送到无校验的命令位）。UI 键盘无法输入控制字符，
+     * 唯一现实来源是恶意构造的备份文件（本恢复是绕过 UI 校验直写
+     * DataStore 的新路径，必须在此闭环）
      */
     suspend fun restoreAll(context: Context, data: Map<String, Any>) {
         for ((key, value) in data) {
-            if (key == "idle_limit" || key == "idle_ts") continue
+            if (key in BACKUP_EXCLUDED_KEYS) continue
             when (value) {
-                is String -> saveData(context, key, value)
+                is String -> {
+                    if (value.none { it in '\u001C'..'\u001F' }) {
+                        saveData(context, key, value)
+                    }
+                }
                 is Int -> saveData(context, key, value)
                 is Boolean -> saveData(context, key, value)
                 is Long -> saveData(context, key, value)
