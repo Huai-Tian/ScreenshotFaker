@@ -32,27 +32,29 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
 
 ## 威胁 → 防线 → 代码位置
 
-| #  | 威胁                                                                                                     | 防线                                                                                                                    | 代码位置                                                                              |
-|----|--------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| 1  | root 拷走 prefs 离线爆破门禁密码                                                                                 | Keystore pepper 掺盐（脱离设备验证在数学上不可行）                                                                                     | KeyVault.getOrCreatePepper；GateManager v2/v3 验证器                                  |
-| 2  | 硬件断点内核外挂 hook 比较函数恒真，一行绕过门禁                                                                            | v3 解密式验证（无比较点可 hook，GCM tag 在密码学层）                                                                                    | GateManager.verifyV3Blob                                                          |
-| 3  | 同上——hook 常量时间比较                                                                                        | 双实现交叉验证（断点资源耗尽）+ native canary 哨兵语义自检                                                                                 | GuardManager.constantTimeEquals；guard.cpp ct\_eq\_byte/ct\_eq\_word/canary\_check |
-| 4  | root 冒充 app uid 解包 hw\_key.bin 静态取 DK                                                                  | DK 拆分 DK=A⊕B，B 仅存在于用户记忆                                                                                               | KeyVault（拆分生命周期/迁移事务）                                                             |
-| 5  | root-as-uid 解密 DataStore 读 SSH/共享凭据全文                                                                  | 敏感字段 DK 第二层加密（`<key>_sec`）                                                                                            | SensitiveStore                                                                    |
-| 6  | Frida/LSPosed/Substrate 注入；GG 修改器类 ptrace 扫描                                                           | maps 黑名单 + TracerPid 1s 快轮询 + PR\_SET\_DUMPABLE=0；检测与兜底引爆全在 native（Java 层被接管仍工作，引爆=覆写密文+SIGKILL）                      | guard.cpp（watchdog 自主线程）；GuardManager.checkNow→DefenseProtocol 完整销毁               |
-| 7  | inline patch 改已有代码（POKE 掉比较常量）                                                                         | 自完整性校验：.text 与磁盘基准逐字节比对                                                                                               | guard.cpp check\_self\_integrity                                                  |
-| 8  | 胁迫场景（被逼交出密码）                                                                                           | 双密码门禁：胁迫密码命中走完整销毁序列，界面无任何区分                                                                                           | GateManager（两级验证器）；DefenseProtocol.destroyForCoercion；GatePage                    |
-| 9  | 设备被扣后长期不使用；重启后 app 永不被打开                                                                               | 未使用自动销毁：三段式锚点（BOOT\_COUNT+er+wc）反回拨（墙钟倒退带 2min 容差，NTP 小幅校正不误杀，与 daemon 侧 120s 容差对齐），档位 5min\~12mo；检查通过即布防到期复查闹钟（链条自续） | IdleWatchdog；BootCompletedReceiver（重启缺口）；AlarmReceiver（到期复查）                      |
-| 10 | SIGSTOP 先手 dump 内存抓 DK                                                                                 | 会话自动锁定收窄 DK 驻留（息屏/后台30s/前台5min）                                                                                       | GateManager.lockSession；MainActivity 心跳                                           |
-| 11 | 激活/改密/解除拆分时崩溃致密钥孤儿化                                                                                    | DK 迁移事务协议（pending+rename 备份+原子 commit+恢复）                                                                             | KeyVault（beginDkMigration 等）                                                      |
-| 12 | 定向篡改 sync\_preferences（删 armed 哨兵）                                                                     | 验证器存在而 armed 消失 = 自毁                                                                                                  | GateManager.setPasswords（同 commit 写 armed）；IdleWatchdog.checkIdleExpiredLocked 首判 |
-| 13 | 恶意悬浮窗盖密码框 tapjacking/偷窥                                                                                | 通知栏遮盖防护（HIDE\_OVERLAY\_WINDOWS：31+ 公开 API；API 30 hidden flag 经 HiddenApiBypass 反射）                                    | MainActivity.applyOverlayProtection                                               |
-| 14 | 胁迫者翻最近任务归因"app 刚被用过"                                                                                   | 最近任务排除（默认开启；运行时 setExcludeFromRecents）                                                                                | MainActivity.applyWindowSecurityConfig（hide\_from\_recent）                        |
-| 15 | 无头销毁路径（Boot/AlarmReceiver goAsync \~10s 预算）被挂起拖垮：root 设备 exec 卡 su 授权弹窗数十秒 → 进程在删 Keystore 前被广播 ANR 杀掉 | 销毁步骤 1-2（停共享/停 daemon）有界执行（3s/3.5s），超时后台继续、序列推进到 Keystore 删除（密码学销毁优先于进程清理）                                            | DefenseProtocol.runBounded                                                        |
-| 16 | 磁贴冷启动进程（未开过 app 即点共享磁贴）                                                                                | 全入口 defense 组件初始化（KeyVault 等 context 为 lateinit，漏初始化即崩溃）                                                              | ScreenShareManager.toggleScreenShare（与 Screenshot/Record 磁贴一致）                    |
-| 17 | 本地恶意进程 connect daemon 固定端口后不发数据，阻塞单线程命令循环（stop/purge/renew 不可达）                                        | 控制信道 accept 后设 5s 读超时（SO\_RCVTIMEO），超时按坏连接关闭；信道本就有 pkill-by-discovery 兜底，此为消除排队延迟                                     | daemon.cpp accept 循环                                                              |
-| 18 | 共享配置对话框回填遗漏密码字段 → 确认时旧密码被静默抹除（daemon 侧 auth\_password 消失 = 无鉴权共享裸奔）                                    | 对话框打开时回填密码；putSensitive 空值写空串（清空=未配置语义，app/daemon 两侧一致判定）；接收配置保存检查写入返回值并提示失败                                          | ExtensionPage 对话框回填；SensitiveStore.putSensitive；ScreenShareReceiverManager        |
-| 19 | 悬浮窗服务先于 MainActivity 运行 → 通知渠道以默认名 "Display"/"Control" 创建，系统设置永久残留（取证指纹）                               | 渠道随机化前移至 Application.onCreate（早于一切组件），MainActivity 侧调用保留为幂等兜底                                                         | randomizeOverlayChannelNames；LSPosedServiceManager.onCreate                       |
+| #  | 威胁                                                                                                     | 防线                                                                                                                                                  | 代码位置                                                                                         |
+| -- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 1  | root 拷走 prefs 离线爆破门禁密码                                                                                 | Keystore pepper 掺盐（脱离设备验证在数学上不可行）                                                                                                                   | KeyVault.getOrCreatePepper；GateManager v2/v3 验证器                                             |
+| 2  | 硬件断点内核外挂 hook 比较函数恒真，一行绕过门禁                                                                            | v3 解密式验证（无比较点可 hook，GCM tag 在密码学层）                                                                                                                  | GateManager.verifyV3Blob                                                                     |
+| 3  | 同上——hook 常量时间比较                                                                                        | 双实现交叉验证（断点资源耗尽）+ native canary 哨兵语义自检                                                                                                               | GuardManager.constantTimeEquals；guard.cpp ct\_eq\_byte/ct\_eq\_word/canary\_check            |
+| 4  | root 冒充 app uid 解包 hw\_key.bin 静态取 DK                                                                  | DK 拆分 DK=A⊕B，B 仅存在于用户记忆                                                                                                                             | KeyVault（拆分生命周期/迁移事务）                                                                        |
+| 5  | root-as-uid 解密 DataStore 读 SSH/共享凭据全文                                                                  | 敏感字段 DK 第二层加密（`<key>_sec`）                                                                                                                          | SensitiveStore                                                                               |
+| 6  | Frida/LSPosed/Substrate 注入；GG 修改器类 ptrace 扫描                                                           | maps 黑名单 + TracerPid 1s 快轮询 + PR\_SET\_DUMPABLE=0；检测与兜底引爆全在 native（Java 层被接管仍工作，引爆=覆写密文+SIGKILL）                                                    | guard.cpp（watchdog 自主线程）；GuardManager.checkNow→DefenseProtocol 完整销毁                          |
+| 7  | inline patch 改已有代码（POKE 掉比较常量）                                                                         | 自完整性校验：.text 与磁盘基准逐字节比对                                                                                                                             | guard.cpp check\_self\_integrity                                                             |
+| 8  | 胁迫场景（被逼交出密码）                                                                                           | 双密码门禁：胁迫密码命中走完整销毁序列，界面无任何区分                                                                                                                         | GateManager（两级验证器）；DefenseProtocol.destroyForCoercion；GatePage                               |
+| 9  | 设备被扣后长期不使用；重启后 app 永不被打开                                                                               | 未使用自动销毁：三段式锚点（BOOT\_COUNT+er+wc）反回拨（墙钟倒退/漂移带 10min 容差，NTP 校正与 RTC 纽扣电池老化不误杀，与 daemon 侧 600s 对齐），档位 5min\~12mo；检查通过即布防到期复查闹钟（链条自续）                   | IdleWatchdog；BootCompletedReceiver（重启缺口）；AlarmReceiver（到期复查）                                 |
+| 10 | SIGSTOP 先手 dump 内存抓 DK                                                                                 | 会话自动锁定收窄 DK 驻留（息屏/后台30s/前台5min）                                                                                                                     | GateManager.lockSession；MainActivity 心跳                                                      |
+| 11 | 激活/改密/解除拆分时崩溃致密钥孤儿化                                                                                    | DK 迁移事务协议（pending+rename 备份+原子 commit+恢复）                                                                                                           | KeyVault（beginDkMigration 等）                                                                 |
+| 12 | 定向篡改 sync\_preferences（删 armed 哨兵）                                                                     | 验证器存在而 armed 消失 = 自毁                                                                                                                                | GateManager.setPasswords（同 commit 写 armed）；IdleWatchdog.checkIdleExpiredLocked 首判            |
+| 13 | 恶意悬浮窗盖密码框 tapjacking/偷窥                                                                                | 通知栏遮盖防护（HIDE\_OVERLAY\_WINDOWS：31+ 公开 API；API 30 hidden flag 经 HiddenApiBypass 反射）                                                                  | MainActivity.applyOverlayProtection                                                          |
+| 14 | 胁迫者翻最近任务归因"app 刚被用过"                                                                                   | 最近任务排除（默认开启；运行时 setExcludeFromRecents）                                                                                                              | MainActivity.applyWindowSecurityConfig（hide\_from\_recent）                                   |
+| 15 | 无头销毁路径（Boot/AlarmReceiver goAsync \~10s 预算）被挂起拖垮：root 设备 exec 卡 su 授权弹窗数十秒 → 进程在删 Keystore 前被广播 ANR 杀掉 | 销毁步骤 1-2（停共享/停 daemon）有界执行（3s/3.5s），超时后台继续、序列推进到 Keystore 删除（密码学销毁优先于进程清理）                                                                          | DefenseProtocol.runBounded                                                                   |
+| 16 | 磁贴冷启动进程（未开过 app 即点共享磁贴）                                                                                | 全入口 defense 组件初始化（KeyVault 等 context 为 lateinit，漏初始化即崩溃）                                                                                            | ScreenShareManager.toggleScreenShare（与 Screenshot/Record 磁贴一致）                               |
+| 17 | 本地恶意进程 connect daemon 固定端口后不发数据，阻塞单线程命令循环（stop/purge/renew 不可达）                                        | 控制信道 accept 后设 5s 读超时（SO\_RCVTIMEO），超时按坏连接关闭；信道本就有 pkill-by-discovery 兜底，此为消除排队延迟                                                                   | daemon.cpp accept 循环                                                                         |
+| 18 | 共享配置对话框回填遗漏密码字段 → 确认时旧密码被静默抹除（daemon 侧 auth\_password 消失 = 无鉴权共享裸奔）                                    | 对话框打开时回填密码；putSensitive 空值写空串（清空=未配置语义，app/daemon 两侧一致判定）；接收配置保存检查写入返回值并提示失败                                                                        | ExtensionPage 对话框回填；SensitiveStore.putSensitive；ScreenShareReceiverManager                   |
+| 19 | 悬浮窗服务先于 MainActivity 运行 → 通知渠道以默认名 "Display"/"Control" 创建，系统设置永久残留（取证指纹）                               | 渠道随机化前移至 Application.onCreate（早于一切组件），MainActivity 侧调用保留为幂等兜底                                                                                       | randomizeOverlayChannelNames；LSPosedServiceManager.onCreate                                  |
+| 20 | 冻结墙钟至 <2020 令看门狗整体失明（销毁被无限推迟；RTC 掉电用户也会落入同态）                                                           | 错钟期切换 uptime 数轴判定：daemon 侧 /proc/uptime 单调死线（同开机换算剩余量 / 跨开机 limit×60 重基线 / 恢复期逆换算回墙钟 + WC0 垃圾死线守卫）；app 侧错钟守卫推迟墙钟判定但时钟无关篡改判定照常 + 24h 复查闹钟（单调时钟，链条自续） | daemon.cpp watchdog\_main 错钟分支；IdleWatchdog（wallOk 守卫 + armRecheckAlarm）                     |
+| 21 | 错钟/IO 期间锚点无法续期 → 持续活跃用户被陈旧 er0/wc0 误判到期（误毁）                                                            | 单调活性凭证（明文键 sync\_cycle，"boot,er"）：同开机推进到期基线 max(er0,e)；跨开机锚点同轴换算（最后活跃真实墙钟 ≈ wc0+e−er0，仅 est>wc0 时生效，永不提前引爆）；当前开机窗口豁免；豁免路径以有效基线布防闹钟（剩余恒正，链条不死）       | IdleWatchdog（KEY\_TOUCH；touchIdle 写入端 / checkIdleExpiredLocked 消费端 / evalLegacyAnchor 旧格式对齐） |
 
 ## 组件职责一句话
 
@@ -60,7 +62,7 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
 
 * **GateManager**：门禁验证器（v1/v2/v3 + 自动迁移）+ 会话状态 + DK 拆分编排
 
-* **IdleWatchdog**：超时销毁状态机（锚点/档位/复位/到期闹钟布防）
+* **IdleWatchdog**：超时销毁状态机（锚点/档位/复位/到期闹钟布防/单调活性凭证豁免与跨开机换算）
 
 * **AlarmReceiver**：到期复查闹钟入口（未到期重排链条自续；不跨重启，由 BootCompletedReceiver 接管）
 
@@ -78,7 +80,7 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
 
 * prefs 文件 `sync_preferences` 及其键名：`token_hash(_v2/_v3)`、`token_seed`、
   `backup_hash(_v2/_v3)`、`backup_seed`、`armed`、`dk_split`、`dk_seed`、
-  `dk_check`、`dk_migration`、`gate_pepper`（中性命名是隐蔽性设计）
+  `dk_check`、`dk_migration`、`gate_pepper`、`sync_cycle`（中性命名是隐蔽性设计）
 
 * 文件 `filesDir/hw_key.bin`（+`.bak`/`.tmp` 事务临时态）
 
@@ -96,6 +98,65 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
   Windows，逻辑变更极易导致其构建失败。隐蔽性改名只动：CMake
   OUTPUT\_NAME、Kotlin/C++ 中的库名与类名引用、gradle 中成对出现的
   输出文件名与读取路径（二者必须同步，否则构建找不到产物）
+
+## 用户高风险操作导致的自毁（面向使用者的诚实告知）
+
+销毁不可逆（删 Keystore 条目 + 全部密文）。以下行为会触发它——
+其中一类是**用户主动设计用途**，另一类是**无意高风险操作被防线
+正确判定**。使用者必须知情：
+
+**主动触发（功能设计本身）：**
+
+* **输入胁迫密码**：门禁页输入胁迫密码 = 立即执行完整销毁序列
+  （界面无任何区分，这是防胁迫的核心设计）。忘记自己设过胁迫
+  密码而误输入 = 误毁，无法撤销。
+
+* **启用短档位超时**：5 分钟档启用后，app 退后台且不解锁设备
+  超过档位时长（计时基于锚点，重启/闹钟都无法绕过）即自毁。
+  档位选择即销毁承诺。
+
+**高风险操作被防线判定（多为无意触发）：**
+
+* **忘记安全密码（DK 拆分已激活）**：DK 的 B 段仅由安全密码派生、
+  只存在于用户记忆。忘记密码后：
+
+  * 无任何恢复途径（无密码提示、无安全问题、无云端备份——
+    这是防拷贝取证的设计前提）；
+
+  * 改密自救不可用：任意错误密码在门禁验证层即被拒（INVALID，
+    无害），但**误用胁迫密码改密/移除门禁**会被验证层放行
+    （胁迫密码也是合法验证器）→ 以其重组 DK 失败 → DK 孤儿化
+    \= 历史加密产物软销毁（KeyVault.assembleDaemonKey 校验失败
+    路径）。
+
+* **大幅回拨系统时钟**（root 或恢复模式改时间）：墙钟倒退/
+  漂移超过 10min 容差，或冻结墙钟（倒退至 <2020 更会被错钟
+  分支以 uptime 数轴判定）= 按防回拨/防冻结引爆。正常 NTP
+  校正、RTC 纽扣电池老化（10min 容差内）不会触发。
+
+* **篡改本 app 私有存储**（root 备份/恢复、钛备份、手动改
+  prefs/DataStore 文件）：
+
+  * 删 `armed` 哨兵（验证器仍在）→ 判定向篡改 → 自毁；
+
+  * 损坏 idle 密文锚点（GCM 解密失败）→ 按已销毁处理；
+
+  * 整体备份恢复到新设备 → Keystore 条目不存在 → 密文全部
+    不可解（等效销毁，此为防移植取证的设计边界）。
+
+**已被防线排除的误毁（正常使用无需担心）：**
+
+* 暂时性 IO 故障 / DataStore 基础设施异常：按"本轮无法判定"
+  放行，不引爆（retryable 路径）；
+
+* RTC 掉电期间持续使用：错钟期活跃由单调活性凭证豁免，
+  时钟恢复后按换算基线判定（不因陈旧锚点误毁）；
+
+* 错钟期启用超时：writeAnchor 拒绝落盘 → 启用中止（本次
+  设置不生效），不制造引爆态；
+
+* 正常重启、force-stop、闹钟被 Doze 延迟：销毁被推迟但
+  不缺席（重启缺口由 BootCompletedReceiver 接管）。
 
 ## 已知边界（诚实声明，勿试图"修复"）
 
