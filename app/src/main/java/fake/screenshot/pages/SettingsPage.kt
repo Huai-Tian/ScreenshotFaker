@@ -1150,6 +1150,9 @@ fun SettingsCompose(navController: NavController) {
             val cannotInstall = stringResource(R.string.cannot_install)
             val packagingFailed = stringResource(R.string.packaging_failed)
             val packagingSuccess = stringResource(R.string.packaging_success)
+            val installSuccessMsg = stringResource(R.string.install_success)
+            val installFailedMsg = stringResource(R.string.install_failed)
+            val installTimeoutMsg = stringResource(R.string.install_timeout)
             // 按系统语言排序输入框：简体中文环境中文字段在前，
             // 其他语言英文字段在前（用户最可能填写的放最显眼位置）
             val zhFirst = remember { RepackIdentity.detectSimplifiedChinese() }
@@ -1311,7 +1314,19 @@ fun SettingsCompose(navController: NavController) {
                                                 context,
                                                 apk,
                                                 identity.packageName
-                                            )
+                                            ) { result, detail ->
+                                                // commit 后的异步终态（主线程回调）：
+                                                // 用户取消/安装失败/确认超时都要
+                                                // 覆盖"请在系统弹窗中确认安装"
+                                                repackMessage = when (result) {
+                                                    RepackManager.InstallResult.SUCCESS ->
+                                                        installSuccessMsg
+                                                    RepackManager.InstallResult.FAILURE ->
+                                                        "$installFailedMsg${detail ?: ""}"
+                                                    RepackManager.InstallResult.TIMEOUT ->
+                                                        installTimeoutMsg
+                                                }
+                                            }
                                         }.onFailure {
                                             repackMessage =
                                                 "$cannotInstall${it.message ?: it.javaClass.simpleName}"

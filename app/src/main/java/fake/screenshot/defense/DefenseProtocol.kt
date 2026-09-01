@@ -126,6 +126,13 @@ object DefenseProtocol {
      * 避免锁内重入死锁）。调用方必须已持有 [checkMutex]。
      */
     internal suspend fun destroyForCoercionLocked() = withContext(Dispatchers.IO) {
+        // -1. 置共享销毁闩锁（必须先于一切步骤）：磁贴触发的共享启动协程
+        //     与本序列并发时，其已快照的旧凭据可能在步骤 1 的 pkill/rm
+        //     因特权断连失效后仍拉起 server（"已销毁"后旧密码继续推流）。
+        //     闩锁使该协程在拉起前复查点强制放弃（见 ScreenShareManager
+        //     coercionDestroyed 注释）
+        runCatching { ScreenShareManager.markCoercionDestroyed() }
+
         // 0. wipe 前快照（修复：旧实现在 wipe 后判定，恒为 no-op）
         val wasIdleActivated = runCatching { IdleWatchdog.isIdleActivated() }.getOrDefault(false)
 

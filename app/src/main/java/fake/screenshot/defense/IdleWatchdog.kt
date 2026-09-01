@@ -386,9 +386,32 @@ object IdleWatchdog {
                             //    豁免要求 b == 当前 boot，本分支恒不可用
                             //    ——错钟期持续活跃 + 重启 + 时钟恢复的
                             //    首次检查（先于任何 touchIdle 续期）必误毁
+                            // ③ boot0 < b < boot（中间开机）：见下方分支
                             val cur = touch?.takeIf { it.boot == boot && er >= it.er }
                             if (cur != null && er - cur.er < limitMs) {
                                 armDelayMs = (cur.er + limitMs) - er
+                            } else if (touch != null && touch.boot > boot0 && touch.boot < boot) {
+                                // 形态③：中间开机凭证（错钟期跨多次重启 +
+                                // 中间开机活跃）。该活跃时刻的真实墙钟不可
+                                // 恢复——错钟期无任何可信墙钟读数，er 跨开机
+                                // 无数轴可换算——wc - wc0 >= limit 不构成
+                                // "距最后活跃已超时"的证明，按误毁零容忍
+                                // 不引爆。处置 = 重基线（与 daemon 侧错钟跨
+                                // 开机的重基线语义一致）：以当前健康时钟写新
+                                // 锚点，一次性重计档位窗口；写成功则清除
+                                // 凭证（新锚点 boot == 当前 boot，旧凭证两种
+                                // 形态均不再匹配，清除仅为卫生）。写失败（IO）
+                                // 不清凭证、本轮放行重布防，下轮复查重走本
+                                // 分支。无滥用面：伪造凭证需 root 写私有
+                                // prefs（root 本可直改锚点/删 armed，此路径
+                                // 不新增攻击能力）；重基线一次性生效，不构成
+                                // 反复续命
+                                if (writeAnchor()) {
+                                    runCatching {
+                                        prefs().edit { remove(KEY_TOUCH) }
+                                    }
+                                }
+                                armDelayMs = limitMs
                             } else {
                                 var base = wc0
                                 if (touch != null && touch.boot == boot0 &&

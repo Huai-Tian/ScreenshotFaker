@@ -195,6 +195,9 @@
     <string name="icon_selected">已选择图标（点击重选）</string>
     <string name="cannot_install">无法安装：</string>
     <string name="packaging_success">打包完成，请在系统弹窗中确认安装</string>
+    <string name="install_success">安装成功</string>
+    <string name="install_failed">安装失败：</string>
+    <string name="install_timeout">安装确认超时，未完成安装</string>
     <string name="initialize_failed">初始化失败</string>
     <string name="crop_icon">裁剪图标</string>
     <string name="delete">删除</string>

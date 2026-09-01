@@ -12,7 +12,7 @@ string record_command;
 string share_gesture;
 string share_command;
 // 共享密码值（config 下发，config_mutex 保护）：share_command 内只含
-// auth_password_env=SF_SHARE_PWD 变量名引用，spawn 时经 env 注入——
+// auth_password_ env=SF_SHARE_PWD 变量名引用，spawn 时经 env 注入——
 // 不进 argv/cmdline，命令快照（日志触发启动时重组）亦不含明文
 string share_password;
 string ssh_options;
@@ -1344,6 +1344,32 @@ static void watchdog_main() {
             }
             // 首启/锚点被清理：以当前 config 的 deadline 初始化基线
             anchor_save(idle_deadline_sec.load(), wall, up);
+            continue;
+        }
+        // 守护对象存在性前置（与 app 侧 IdleWatchdog "limit<=0 先行
+        // return false" 对齐）：未启用定时销毁（armed-only：仅设门禁/
+        // 胁迫密码，后台守护进程与定时销毁是独立开关）时，冻结/回拨/
+        // 锚点篡改检测没有保护对象——其唯一意义是防止篡改时钟推迟
+        // 定时销毁死线，此刻引爆 = 对合法用户纯误毁（用户手动大幅
+        // 调整时间/跨重启时钟重建即触发，且 shell 模式下 detonate 已
+        // 清扫 tmp 产物）。app/daemon 两侧语义曾不对称：app 侧 armed-only
+        // 直接放行，daemon 侧照爆。武装判定三处来源任一非零即成立：
+        // 本实例 config/renew 下发的 limit/deadline、锚点持久死线
+        // （跨实例历史痕迹——定时销毁一旦启用不可关闭，见设置页）。
+        // 未武装时锚点若损坏（无密钥者改写）直接重基线（无守护对象 =
+        // 篡改无意义，引爆是纯误毁），基线照常推进供日后启用时 config
+        // 重置语义完整。root 攻击者无新增能力：置零三处来源需持 DK
+        // 经加密信道（本就可行的事：直接 stop/篡改锚点在 root 边界内）
+        bool wd_armed = idle_limit_min.load() > 0 || idle_deadline_sec.load() > 0 ||
+                        (st.valid && st.deadline > 0);
+        if (!wd_armed) {
+            if (!st.valid) {
+                // 损坏锚点重基线（篡改无守护对象，不引爆）
+                anchor_save(0, wall, up);
+            } else if (wall > st.lastwall && up >= st.lastuptime) {
+                // 基线推进（错钟/回拨期间不动，与武装态推进语义一致）
+                anchor_save(0, wall, up);
+            }
             continue;
         }
         if (!st.valid) {

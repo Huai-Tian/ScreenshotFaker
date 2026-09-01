@@ -27,7 +27,12 @@ import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.enableScreenshotExclusion
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.OverlayServiceManager
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
 class DisplayOverlayService : Service() {
@@ -134,6 +139,7 @@ class DisplayOverlayService : Service() {
         fun setDisplayAlpha(alpha: Float) {
             instanceRef?.get()?.let { service ->
                 val clamped = alpha.coerceIn(0.0f, 1.0f)
+                service.paramsTouched = true
                 service.currentAlpha = clamped
                 service.floatingView.alpha = clamped
             }
@@ -158,8 +164,17 @@ class DisplayOverlayService : Service() {
             instanceRef?.get()?.let { service ->
                 service.isMuted = muted
                 service.applyMuteState()
-                runBlocking {
-                    ConfigManager.saveData(service.applicationContext, "overlay_video_muted", muted)
+                // 异步持久化（与 OverlayServiceManager.configScope 同模式）：
+                // 本方法经 UI 主线程调用，runBlocking 阻塞写加密 DataStore
+                // 是主线程 ANR 面（且与销毁序列的 DataStore 操作同锁竞争），
+                // 持久化语义不变（下次启动仍读到该值）
+                service.paramsTouched = true
+                service.serviceScope.launch {
+                    runCatching {
+                        ConfigManager.saveData(
+                            service.applicationContext, "overlay_video_muted", muted
+                        )
+                    }
                 }
             }
         }
@@ -191,10 +206,19 @@ class DisplayOverlayService : Service() {
     private var mediaWidth = 0
     private var mediaHeight = 0
 
-    //透明度
+    // 透明度
     private var currentAlpha = 1.0f
 
     private var isMuted = false
+
+    // 外观参数异步校正的丢弃开关：onCreate 的异步读取完成前用户已手动
+    // 调整过 alpha/静音（static 入口置位）→ 迟到的读值丢弃，不覆盖
+    // 用户选择（与 OverlayServiceManager.paramsTouched 同语义）
+    @Volatile
+    private var paramsTouched = false
+
+    // 配置异步读写作用域（主线程禁止阻塞 IO，见 setMuted/onCreate 注释）
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var cornerHandleView: CornerHandleView? = null
 
@@ -254,16 +278,30 @@ class DisplayOverlayService : Service() {
 
         windowManager.addView(floatingView, params)
 
-        val savedAlpha = runBlocking {
-            ConfigManager.getDataOnce(applicationContext, "overlay_display_alpha", 1.0f)
+        // 外观参数初值同步取 manager 缓存（start() 的异步读取可能尚未
+        // 完成，届时为默认值——正确性由下方异步校正兜底），不再主线程
+        // runBlocking 读加密 DataStore（ANR 面 + 与销毁序列同锁竞争）
+        paramsTouched = false
+        currentAlpha = OverlayServiceManager.getDisplayAlpha()
+        floatingView.alpha = currentAlpha
+        isMuted = OverlayServiceManager.isMuted()
+        // 异步校正：manager 缓存若还是默认值（异步读取晚于本 onCreate），
+        // 读到真值后补投。paramsTouched 已置位（用户先手动调整）则丢弃
+        serviceScope.launch {
+            val alpha = runCatching {
+                ConfigManager.getDataOnce(applicationContext, "overlay_display_alpha", 1.0f)
+            }.getOrDefault(1.0f)
+            val muted = runCatching {
+                ConfigManager.getDataOnce(applicationContext, "overlay_video_muted", false)
+            }.getOrDefault(false)
+            withContext(Dispatchers.Main) {
+                if (paramsTouched) return@withContext
+                currentAlpha = alpha
+                floatingView.alpha = alpha
+                isMuted = muted
+                applyMuteState()
+            }
         }
-        currentAlpha = savedAlpha
-        floatingView.alpha = savedAlpha
-
-        val savedMuted = runBlocking {
-            ConfigManager.getDataOnce(applicationContext, "overlay_video_muted", false)
-        }
-        isMuted = savedMuted
 
 
         floatingView.post {
@@ -297,6 +335,7 @@ class DisplayOverlayService : Service() {
         OverlayServiceManager.setDisplayRunning(false)
         instanceRef?.clear()
         instanceRef = null
+        serviceScope.cancel()
         releasePlayer()
         clearMedia()
         // isInitialized 守卫：部分 ROM 上 startForeground 抛异常后仍回调

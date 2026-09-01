@@ -160,6 +160,14 @@ object OverlayServiceManager {
         appContext = ctx
         paramsTouched = false
         stealthToastShown = false
+        // 回落过渡守卫：root 失败回落普通路线的窗口内（运行标志复位 →
+        // 普通服务 onCreate 之间），不加守卫的用户开关会重走 root 路线
+        // ——回落本身刚因 root 失败触发，立即重试只会再弹一次 root 授权
+        // 框/再等一轮 8s 超时。过渡期内直接续走普通路线（与回落目标一致）
+        if (fallbackTransition) {
+            startNormalRoute(context, withControl = true)
+            return
+        }
         // 外观参数与普通路线 DisplayOverlayService.onCreate 同源（DataStore）。
         // 异步读取（IO 作用域，见 configScope 文档）：root 路线的首个消费者
         // onRootConnected 经连接回调异步到达，读取完成晚于连接时补投；
@@ -187,6 +195,9 @@ object OverlayServiceManager {
     }
 
     fun stop(context: Context) {
+        // 回落过渡解除：用户主动停止 = 过程终结（再开启是全新意图，
+        // 允许重试 root 路线）
+        fallbackTransition = false
         if (rootRoute) {
             stopRootRoute()
         } else {
@@ -217,6 +228,8 @@ object OverlayServiceManager {
 
     fun setDisplayRunning(running: Boolean) {
         _isDisplayRunning.value = running
+        // 普通路线服务就绪 = 回落过渡完成（见 fallbackTransition 注释）
+        if (running) fallbackTransition = false
     }
 
     fun setControlRunning(running: Boolean) {
@@ -341,15 +354,28 @@ object OverlayServiceManager {
         val uri = list[rootMediaIndex]
         runCatching {
             val mime = ctx.contentResolver.getType(uri)
+            // pfd 生命周期由本侧独占（try/finally 关闭）：转发目标（Shizuku
+            // binder transact / su socket SCM_RIGHTS）在同步调用返回时内核
+            // 已完成 dup，本地关闭不影响对端；后端死亡（api 为 null）或
+            // 转发抛异常时 pfd 不再泄漏（fd 属稀缺资源，长期泄漏耗尽后
+            // 媒体/网络/存储全部失效）
             when {
                 mime?.startsWith("image/") == true ->
                     ctx.contentResolver.openFileDescriptor(uri, "r")?.let { pfd ->
-                        RootOverlayService.showImage(pfd)
+                        try {
+                            RootOverlayService.showImage(pfd)
+                        } finally {
+                            runCatching { pfd.close() }
+                        }
                     }
 
                 mime?.startsWith("video/") == true ->
                     ctx.contentResolver.openFileDescriptor(uri, "r")?.let { pfd ->
-                        RootOverlayService.showVideo(pfd)
+                        try {
+                            RootOverlayService.showVideo(pfd)
+                        } finally {
+                            runCatching { pfd.close() }
+                        }
                     }
             }
         }
@@ -385,6 +411,9 @@ object OverlayServiceManager {
         RootOverlayService.unbind()
         _isDisplayRunning.value = false
         _isControlRunning.value = false
+        // 过渡窗口开启（普通服务 onCreate 上报运行态时解除；窗口内
+        // start() 续走普通路线，不重试 root——见 start() 守卫注释）
+        fallbackTransition = true
         startNormalRoute(ctx, withControl = controlDesired)
         notifyStealthDegraded(ctx, reason)
     }
@@ -412,4 +441,15 @@ object OverlayServiceManager {
     /** [notifyStealthDegraded] 的会话级去重（悬浮窗停止时复位）。 */
     @Volatile
     private var stealthToastShown = false
+
+    /**
+     * root→普通路线回落过渡标志：true = 过渡窗口内（运行标志已复位、
+     * 普通服务尚未 onCreate）。窗口内 start() 续走普通路线而非重试
+     * root（回落刚因 root 失败触发，立即重试 = 再弹一次授权框）；
+     * 普通服务上报运行态或用户主动 stop 时解除。若回落时 FGS 启动
+     * 失败（后台限制），标志保持——用户下次开关仍走普通路线重试
+     * （与 startNormalRoute 的"下次前台操作再拉起"语义一致）
+     */
+    @Volatile
+    private var fallbackTransition = false
 }

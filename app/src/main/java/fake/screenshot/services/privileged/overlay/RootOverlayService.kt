@@ -122,6 +122,10 @@ class RootOverlayService : Binder() {
 
         private const val APPLICATION_ID = "fake.screenshot"
 
+        // Shizuku bindUserService 超时（毫秒）：与 su 路线的建连上限对齐，
+        // 覆盖服务进程拉起 + binder 建立的正常时长
+        private const val SHIZUKU_BIND_TIMEOUT_MS = 8000L
+
         /**
          * 最近一次 root 路线失败原因（app 进程侧记录）：
          * - su 建连各环节失败（spawn/握手/连接/认证/就绪 + stderr 摘录）；
@@ -223,8 +227,10 @@ class RootOverlayService : Binder() {
          *   （Magisk/KernelSU 等）对本应用的授权即可拉起 root 宿主进程。
          *
          * 返回 false 表示立即判定不可行（无 root 且无 su），调用方应同步走
-         * 普通路线；返回 true 表示已绑定或正在建立（su 异步路径，上限 8 秒，
-         * 覆盖 root 管理器授权弹窗），结果经 [Listener] 通知。
+         * 普通路线；返回 true 表示已绑定或正在建立（su 异步路径上限 8 秒；
+         * Shizuku 路径同样 8 秒超时复查——bindUserService 无失败回调，
+         * 服务进程拉起失败时 onServiceConnected 永不到达，不复查则 UI
+         * 永显"运行中"、悬浮窗不出现也不回落），结果经 [Listener] 通知。
          */
         fun bind(context: Context): Boolean {
             if (isActive || pendingSu) return true
@@ -233,13 +239,30 @@ class RootOverlayService : Binder() {
             if (isShizukuRoot()) {
                 try {
                     Shizuku.bindUserService(args, connection)
+                    // 超时复查（与 su 路线的 8s 上限对齐）：期间已连接/
+                    // 已被 unbind（generation 变更）则无事；仍无回调 = 服务
+                    // 拉起失败 → 解除绑定并回落 su 后端（generation 快照
+                    // 防作废请求的迟到超时误触发回落）
+                    val gen = generation.get()
+                    mainHandler.postDelayed({
+                        if (gen != generation.get() || isActive || pendingSu) {
+                            return@postDelayed
+                        }
+                        lastFailureReason = "shizuku: 服务连接超时"
+                        runCatching { Shizuku.unbindUserService(args, connection, true) }
+                        bindSu(context)
+                    }, SHIZUKU_BIND_TIMEOUT_MS)
                     return true
                 } catch (_: Throwable) {
                     // binder 竞态/未授权/版本不支持：落到 su 兜底
                 }
             }
 
-            // 后端 2：root 管理器直接授权（su），无需 Shizuku/Sui 存在
+            return bindSu(context)
+        }
+
+        /** 后端 2（su 直连）绑定；返回 false = 无可用 su 二进制。 */
+        private fun bindSu(context: Context): Boolean {
             if (suBackend != null) return true
             val gen = generation.incrementAndGet()
             val pending = SuOverlayConnection.connectAsync(context) { conn, reason ->
@@ -291,7 +314,9 @@ class RootOverlayService : Binder() {
         private val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 if (suBackend != null) {
-                    // 当前实际走 su 后端（Shizuku 晚到的回调）：忽略，防止覆盖
+                    // 当前实际走 su 后端（Shizuku 晚到的回调——超时回落后才
+                    // 建立成功）：忽略并解除绑定，防服务进程驻留泄漏
+                    runCatching { Shizuku.unbindUserService(args, connection, true) }
                     return
                 }
                 val proxy = ShizukuBinderProxy(binder)
@@ -848,15 +873,15 @@ private class ShizukuBinderProxy(private val binder: IBinder) : Api {
 
     override fun showImage(fd: ParcelFileDescriptor?) {
         if (fd == null) return
+        // 关闭责任在调用方（OverlayServiceManager.try/finally 独占持有）：
+        // binder 事务返回时内核已 dup；此处关闭会造成与调用方 finally 的
+        // 双重 close（部分 ROM 的 ParcelFileDescriptor 非幂等，EBADF 崩溃）
         call(5) { it.writeParcelable(fd, 0) }
-        // binder 事务发出时内核已 dup，本地副本即可关闭
-        runCatching { fd.close() }
     }
 
     override fun showVideo(fd: ParcelFileDescriptor?) {
         if (fd == null) return
         call(6) { it.writeParcelable(fd, 0) }
-        runCatching { fd.close() }
     }
 
     override fun clearMedia() = call(7)
@@ -1667,14 +1692,15 @@ private class SuOverlayProxy(private val transport: SuTransport) : Api {
 
     override fun showImage(fd: ParcelFileDescriptor?) {
         if (fd == null) return
+        // 关闭责任在调用方（OverlayServiceManager.try/finally 独占持有）：
+        // SCM_RIGHTS 发送返回时内核已 dup；此处关闭会造成与调用方
+        // finally 的双重 close（部分 ROM 非幂等，EBADF 崩溃）
         transport.sendParcelFrame(5, arrayOf(fd.fileDescriptor))
-        runCatching { fd.close() }
     }
 
     override fun showVideo(fd: ParcelFileDescriptor?) {
         if (fd == null) return
         transport.sendParcelFrame(6, arrayOf(fd.fileDescriptor))
-        runCatching { fd.close() }
     }
 
     override fun clearMedia() = transport.sendParcelFrame(7)

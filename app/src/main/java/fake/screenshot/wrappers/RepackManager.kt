@@ -9,6 +9,8 @@ import android.content.IntentFilter
 import android.content.pm.PackageInstaller
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
@@ -106,6 +108,9 @@ object RepackManager {
     // 同一进程内 repack 严格串行
     private val repackMutex = kotlinx.coroutines.sync.Mutex()
 
+    /** install 等待系统安装器最终状态的兜底超时（毫秒），见 [installSession] */
+    private const val INSTALL_RESULT_TIMEOUT_MS = 10 * 60 * 1000L
+
 
     suspend fun repack(
         context: Context,
@@ -165,11 +170,25 @@ object RepackManager {
         }
     }
 
+    /**
+     * install 的异步最终结果（commit 只代表"已提交系统安装器"，
+     * 用户确认/取消与安装成败在之后的系统回调里才见分晓）。
+     * - [SUCCESS]/[FAILURE]：系统安装器给出的终态（主线程回调）
+     * - [TIMEOUT]：确认窗口超时（用户一直未在系统弹窗操作，接收器
+     *   兜底注销，防泄漏；会话仍在，用户可回系统安装器继续）
+     */
+    enum class InstallResult { SUCCESS, FAILURE, TIMEOUT }
+
     @SuppressLint("RequestInstallPackagesPolicy")
-    fun install(context: Context, apk: File, newPackageName: String) {
+    fun install(
+        context: Context,
+        apk: File,
+        newPackageName: String,
+        onInstallResult: ((InstallResult, String?) -> Unit)? = null
+    ) {
         val appContext = context.applicationContext
         try {
-            installSession(appContext, apk, newPackageName)
+            installSession(appContext, apk, newPackageName, onInstallResult)
             // commit 前 APK 已完整拷入安装会话（openWrite + fsync），commit 后
             // 系统不再引用源文件，此刻删除数据安全。不保留到"安装成功"：
             // 已签名的伪装克隆 APK 残留 cacheDir 本身是暴露面（root 取证可
@@ -186,7 +205,12 @@ object RepackManager {
         }
     }
 
-    private fun installSession(appContext: Context, apk: File, newPackageName: String) {
+    private fun installSession(
+        appContext: Context,
+        apk: File,
+        newPackageName: String,
+        onInstallResult: ((InstallResult, String?) -> Unit)?
+    ) {
         val pm = appContext.packageManager
 
         if (runCatching { pm.getPackageInfo(newPackageName, 0) }.isSuccess) {
@@ -204,28 +228,72 @@ object RepackManager {
         }
 
         val statusAction = "fake.screenshot.repack.INSTALL_STATUS"
+        val mainHandler = Handler(Looper.getMainLooper())
+
+        // 终态（成功/失败/超时）到达后一次性收尾；PENDING_USER_ACTION 不是
+        // 终态——注销后系统不会再发最终状态广播，旧实现首广播即注销 =
+        // 用户取消/安装失败时 UI 永远停留在"请在系统弹窗中确认安装"
+        var finished = false
+        var receiverRef: BroadcastReceiver? = null
+        var timeoutAction: Runnable? = null
+        var sessionId = -1
+
+        fun finishReceiver() {
+            if (finished) return
+            finished = true
+            timeoutAction?.let { mainHandler.removeCallbacks(it) }
+            receiverRef?.let { runCatching { appContext.unregisterReceiver(it) } }
+        }
 
         val statusReceiver = object : BroadcastReceiver() {
             @SuppressLint("UnsafeIntentLaunch")
             override fun onReceive(ctx: Context, intent: Intent) {
-                runCatching { appContext.unregisterReceiver(this) }
-                if (intent.getIntExtra(
-                        PackageInstaller.EXTRA_STATUS,
-                        PackageInstaller.STATUS_FAILURE
-                    ) == PackageInstaller.STATUS_PENDING_USER_ACTION
+                // 并发两次 repack（第一次还在等系统确认弹窗）共用同一 action：
+                // 按会话 ID 过滤，各接收器只消费自己会话的回调
+                if (sessionId != -1 &&
+                    intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1) != sessionId
                 ) {
-                    val confirmIntent = IntentCompat.getParcelableExtra(
-                        intent, Intent.EXTRA_INTENT, Intent::class.java
-                    ) ?: return
-                    confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    runCatching { appContext.startActivity(confirmIntent) }
+                    return
+                }
+                when (intent.getIntExtra(
+                    PackageInstaller.EXTRA_STATUS,
+                    PackageInstaller.STATUS_FAILURE
+                )) {
+                    PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                        val confirmIntent = IntentCompat.getParcelableExtra(
+                            intent, Intent.EXTRA_INTENT, Intent::class.java
+                        ) ?: return
+                        confirmIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { appContext.startActivity(confirmIntent) }
+                    }
+
+                    PackageInstaller.STATUS_SUCCESS -> {
+                        finishReceiver()
+                        onInstallResult?.invoke(InstallResult.SUCCESS, null)
+                    }
+
+                    else -> {
+                        finishReceiver()
+                        onInstallResult?.invoke(InstallResult.FAILURE, statusReason(intent))
+                    }
                 }
             }
         }
+        receiverRef = statusReceiver
         ContextCompat.registerReceiver(
             appContext, statusReceiver, IntentFilter(statusAction),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+
+        // 确认窗口兜底超时：系统弹窗无自动超时，用户搁置则接收器与回调
+        // 永久悬挂（泄漏 + UI 无反馈）。10 分钟覆盖正常确认时长；超时只
+        // 注销接收器并回报 TIMEOUT，会话由系统按自身策略回收
+        val timeout = Runnable {
+            finishReceiver()
+            onInstallResult?.invoke(InstallResult.TIMEOUT, null)
+        }
+        timeoutAction = timeout
+        mainHandler.postDelayed(timeout, INSTALL_RESULT_TIMEOUT_MS)
 
         val receiverSender = PendingIntent.getBroadcast(
             appContext,
@@ -238,7 +306,13 @@ object RepackManager {
         val params =
             PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
                 .apply { setAppPackageName(newPackageName) }
-        val sessionId = installer.createSession(params)
+        sessionId = try {
+            installer.createSession(params)
+        } catch (t: Throwable) {
+            // 注册/超时已挂载，createSession 失败必须同样收尾（防接收器泄漏）
+            finishReceiver()
+            throw t
+        }
         try {
             installer.openSession(sessionId).use { session ->
                 session.openWrite("base", 0, apk.length()).use { output ->
@@ -248,10 +322,27 @@ object RepackManager {
                 session.commit(receiverSender)
             }
         } catch (t: Throwable) {
+            finishReceiver()
             runCatching { installer.abandonSession(sessionId) }
-            runCatching { appContext.unregisterReceiver(statusReceiver) }
             throw t
         }
+    }
+
+    /** 终态失败的可读原因：状态类别 + 系统附加消息（均非敏感信息） */
+    private fun statusReason(intent: Intent): String {
+        val name = when (intent.getIntExtra(
+            PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE
+        )) {
+            PackageInstaller.STATUS_FAILURE_ABORTED -> "aborted"
+            PackageInstaller.STATUS_FAILURE_BLOCKED -> "blocked"
+            PackageInstaller.STATUS_FAILURE_CONFLICT -> "conflict"
+            PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "incompatible"
+            PackageInstaller.STATUS_FAILURE_INVALID -> "invalid"
+            PackageInstaller.STATUS_FAILURE_STORAGE -> "storage"
+            else -> "failure"
+        }
+        return intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+            ?.let { "$name: $it" } ?: name
     }
 
 

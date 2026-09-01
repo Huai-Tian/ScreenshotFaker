@@ -101,6 +101,9 @@
     <string name="cannot_install">Cannot install: </string>
     <string name="packaging_success">Packaging complete. Please confirm installation in the system dialog.</string>
     <string name="packaging_failed">Packaging failed: </string>
+    <string name="install_success">Installed successfully</string>
+    <string name="install_failed">Installation failed: </string>
+    <string name="install_timeout">Installation confirmation timed out. The installation was not completed.</string>
     <string name="package_and_install">Package and install</string>
     <string name="backup_config">Backup Config</string>
     <string name="restore_config">Restore Config</string>

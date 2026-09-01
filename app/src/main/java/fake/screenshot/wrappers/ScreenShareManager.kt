@@ -44,6 +44,23 @@ object ScreenShareManager {
     // 再清理文件"的顺序保证与本协程 setup 段的交错安全（见拉起前复查）
     private val toggleMutex = Mutex()
 
+    // 胁迫销毁闩锁（进程生命周期内不复位）：销毁序列开始（任何步骤之前）
+    // 置位。封堵销毁↔磁贴启动 TOCTOU：relay 协程在挂起点间已快照完
+    // 旧凭据/配置，销毁若落在"拉起前复查已通过→exec 拉起"之后或
+    // stopScreenShare 的 pkill/rm 因 Shizuku 断连失效时，协程会以
+    // 销毁前的密码拉起 server 继续推流（隐私在"已销毁"后持续泄露）。
+    // 闩锁在 relay 协程的拉起前复查点强制短路（先于闩锁置位通过复查、
+    // 其后 exec 与销毁并发的微小残余窗口由销毁步骤 1/2 的清理兜底）。
+    // 不复位是刻意语义：销毁已清空全部凭据与配置，此后本进程内的共享
+    // 启动一律 fail-closed（重启 app 后自然恢复）
+    @Volatile
+    private var coercionDestroyed = false
+
+    /** DefenseProtocol 销毁序列第一动作：置闩锁（先于停共享/擦密钥） */
+    fun markCoercionDestroyed() {
+        coercionDestroyed = true
+    }
+
     @Volatile
     var lastError: String? = null
         private set
@@ -182,6 +199,8 @@ object ScreenShareManager {
     }
 
     private fun startScreenShareInternal(): Boolean {
+        // 闩锁双保险（toggle 入口已拦，防未来新增直调路径绕过）
+        if (coercionDestroyed) return false
         if (!(initialized && (Auxiliary.isShellActivated || Auxiliary.isRootActivated))) return false
         if (relayRunning) return true
         // 先立标志再启动协程：协程体拉起前的 relayRunning 复查依赖标志
@@ -371,8 +390,11 @@ object ScreenShareManager {
             // 本协程的写脚本→拉起是非挂起 exec 段，取消点只能落在其后的
             // 挂起点上——若停止恰好落在该段内，此处复查可见 false，放弃
             // 拉起并清除刚写入的脚本。不复查则守护循环在 STOP 标记已被
-            // 删除的状态下执行 while 循环，无限续命（"停止"后推流复活）
-            if (!relayRunning) {
+            // 删除的状态下执行 while 循环，无限续命（"停止"后推流复活）。
+            // coercionDestroyed：销毁序列已启动（哪怕步骤 1 的 pkill 因
+            // 特权断连失效）——本协程持的是销毁前快照的旧凭据，拉起 =
+            // "已销毁"后旧密码继续推流，必须放弃
+            if (!relayRunning || coercionDestroyed) {
                 Auxiliary.exec("rm -f $watchPath")
                 return@launch
             }
@@ -425,7 +447,11 @@ object ScreenShareManager {
                     notifyStateChanged()
                     return@launch
                 }
-                lastError = if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
+                // 销毁闩锁：本进程已执行过胁迫销毁（凭据/配置已全部擦除）
+                // → 拒绝新会话（fail-closed，见闩锁注释；重启 app 后恢复）
+                lastError = if (coercionDestroyed) {
+                    "destroyed"
+                } else if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
                     context.getString(R.string.no_permission)
                 } else {
                     when (val result = initializeInternal()) {

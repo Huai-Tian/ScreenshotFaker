@@ -129,10 +129,12 @@ IdleWatchdog.isIdleActivated/resetIdleAfterDestroy。
     \= 历史加密产物软销毁（KeyVault.assembleDaemonKey 校验失败
     路径）。
 
-* **大幅回拨系统时钟**（root 或恢复模式改时间）：墙钟倒退/
-  漂移超过 10min 容差，或冻结墙钟（倒退至 <2020 更会被错钟
-  分支以 uptime 数轴判定）= 按防回拨/防冻结引爆。正常 NTP
-  校正、RTC 纽扣电池老化（10min 容差内）不会触发。
+* **大幅回拨系统时钟**（root 或恢复模式改时间）：**仅当已启用
+  定时销毁时**，墙钟倒退/漂移超过 10min 容差，或冻结墙钟（倒退至
+  <2020 更会被错钟分支以 uptime 数轴判定）= 按防回拨/防冻结引爆
+  （daemon 侧看门狗以"limit/deadline/锚点死线任一非零"为武装前提，
+  与 app 侧 `limit<=0` 先行放行对齐——armed-only 用户手动调时间
+  不引爆）。正常 NTP 校正、RTC 纽扣电池老化（10min 容差内）不会触发。
 
 * **篡改本 app 私有存储**（root 备份/恢复、钛备份、手动改
   prefs/DataStore 文件）：
