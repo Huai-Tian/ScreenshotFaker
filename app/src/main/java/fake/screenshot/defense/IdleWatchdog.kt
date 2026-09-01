@@ -44,6 +44,22 @@ object IdleWatchdog {
     private const val CONFIG_KEY_IDLE_LIMIT = "idle_limit"
     private const val CONFIG_KEY_IDLE_TS = "idle_ts"
 
+    // 单调活性凭证（明文 prefs，中性键名）："boot,er" 对。
+    // 动机：错钟（wc < WC0_MIN）或 IO 故障期间 writeAnchor 拒绝落盘，
+    // 锚点 er0 停在最后一次成功写入——错钟期持续活跃的用户在时钟恢复
+    // 后的首次检查中 erDiff ≥ limit 即被误判到期（er 单调走表整段
+    // 错钟期，检查无法区分"用户活跃但锚点写不进"与"用户真闲置"）。
+    // er 冻结无效且单调：以 (boot,er) 记录 touchIdle 在锚点写失败时的
+    // 到达时刻，同开机 er 差 < limit = 单调时钟证明的近期活跃 →
+    // 豁免到期引爆（锚点由时钟恢复后的下一次 touchIdle 正常刷新；
+    // 闲置超限后 er 差自然超限，豁免失效，契约保持）。
+    // 键含 boot：跨开机 er 归零重计，旧值与新 er 不可比——不加区分
+    // 会让重启后的陈旧大值令 er - e 为负、恒命中豁免，闲置用户的
+    // 到期判定被静默抑制
+    // 伪造面（root 写 prefs 伪造近期活跃）：能写本文件的攻击者本可
+    // 直接删除 idle 密钥整体解除 app 侧看门狗（已声明边界），无增量
+    private const val KEY_TOUCH = "sync_cycle"
+
     // 超时销毁默认档：6 个月（分钟）。首次启用/销毁后复位都用此值
     private const val DEFAULT_IDLE_LIMIT_MINUTES = 259200L
 
@@ -246,6 +262,16 @@ object IdleWatchdog {
         // BOOT_COUNT 回退/同开机 er 回退——四者均为精确不变量，与当前
         // 墙钟无关，错钟期间执行零误毁风险
         val wallOk = wc >= WC0_MIN
+        // 单调活性凭证（见 KEY_TOUCH 注释）：同开机 er 差 < limit =
+        // 错钟/IO 期间持续活跃的单调时钟证明，豁免到期引爆
+        val activeRecently = run {
+            val rec = prefs().getString(KEY_TOUCH, null) ?: return@run false
+            val idx = rec.indexOf(',')
+            if (idx <= 0) return@run false
+            val b = rec.substring(0, idx).toIntOrNull() ?: return@run false
+            val e = rec.substring(idx + 1).toLongOrNull() ?: return@run false
+            b == boot && er >= e && er - e < limitMs
+        }
         val parts = st.ts.split(",")
 
         // 通过路径的到期剩余毫秒（布防闹钟用；null = 不布防）
@@ -298,7 +324,9 @@ object IdleWatchdog {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
-                            if (erDiff >= limitMs) {
+                            // 到期引爆带单调活性豁免（activeRecently）：
+                            // 错钟期锚点写不进导致 er0 陈旧（见 KEY_TOUCH）
+                            if (erDiff >= limitMs && !activeRecently) {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
@@ -316,7 +344,8 @@ object IdleWatchdog {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
-                            if (wc - wc0 >= limitMs) {
+                            // 到期引爆带单调活性豁免（同上，见 KEY_TOUCH）
+                            if (wc - wc0 >= limitMs && !activeRecently) {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
@@ -490,7 +519,14 @@ object IdleWatchdog {
         if (GateManager.isGateEnabled() && !GateManager.sessionUnlocked) return
         val st = readIdleState()
         if (!st.readable || st.limit <= 0) return
-        writeAnchor()
+        if (!writeAnchor()) {
+            // 锚点未落盘（错钟/IO 故障）：记单调活性凭证（见 KEY_TOUCH
+            // 注释）——apply 异步足够（凭证是恢复后判定的建议性证据，
+            // 崩溃丢失至多退回无豁免状态，方向安全）
+            prefs().edit {
+                putString(KEY_TOUCH, "${readBootCount()},${SystemClock.elapsedRealtime()}")
+            }
+        }
         DaemonManager.renewIdleDeadline(st.limit)
     }
 

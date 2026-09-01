@@ -1182,8 +1182,26 @@ static void watchdog_main() {
         // uptime 死线期间正常续期（renew 换算），零误伤
         if (wall < WC0_MIN_SEC) {
             long long dl_up = st.deadline_uptime;
-            if (dl_up == 0 && st.deadline > 0 && st.lastwall >= WC0_MIN_SEC) {
-                // 首个错钟 tick：从最后一个好时钟时刻无损换算剩余预算。
+            bool wrote = false;
+            if (up < st.lastuptime) {
+                // 跨开机（daemon 于错钟期间被重启）：uptime 数轴已更换，
+                // 旧 deadline_uptime 在新轴上恒大于当前 up（旧轴累计了
+                // 前次开机全部时长）→ 死线被无限推迟。config_synced =
+                // 本实例收到过 config/renew = 用户刚打开过 app（有效
+                // 使用，startDaemon 是唯一拉起入口）：以 limit×60 重新
+                // 基线化；未同步则清零等待（引爆判定本就被 config_synced
+                // 前置拦截）。lastuptime 一并迁到本 tick，防每 30s 重复
+                // 重基线化（写后下一 tick 起回到同开机分支）
+                dl_up = 0;
+                long long limit = idle_limit_min.load();
+                if (config_synced.load() && limit > 0) {
+                    dl_up = static_cast<long long>(up) + limit * 60;
+                }
+                anchor_save(st.deadline, st.lastwall, up, dl_up);
+                wrote = true;
+            } else if (dl_up == 0 && st.deadline >= WC0_MIN_SEC &&
+                       st.lastwall >= WC0_MIN_SEC) {
+                // 同开机首个错钟 tick：从最后一个好时钟时刻无损换算剩余预算。
                 // lastwall 在旧锚点里是可信基线（WC0_MIN 以上写锚点由
                 // 本守卫保证）；换算 = 把 "deadline - lastwall" 的墙钟
                 // 剩余量平移到 uptime 数轴（两时钟同速含 suspend）。
@@ -1192,28 +1210,48 @@ static void watchdog_main() {
                 // ——renew 刚更新内存尚未写盘的窗口下，掺入会把换算
                 // 基线抬到"锚点 lastwall + 新死线"，dl_up 偏小 → 提前
                 // 引爆（新误炸面）。内存新死线由 renew 的错钟分支随后
-                // 以精确换算覆盖写盘，本分支的保守旧值至多存活 30s
+                // 以精确换算覆盖写盘，本分支的保守旧值至多存活 30s。
+                // deadline 的 WC0 下限（与到期判定同一不变量）：低于
+                // 2020 的死线是错钟期以冻结墙钟算出的垃圾值，参与换算
+                // 会得出深度负的"剩余量"被钳到 1 → 即刻误爆——跳过
+                // 换算推迟判定（安全方向），等待 renew 重基线化或时钟
+                // 恢复。跨开机时不可换算（轴已换，旧 lastuptime 与新
+                // up 不可比——由上方重基线化分支先行拦截）
                 dl_up = static_cast<long long>(st.lastuptime) + (st.deadline - st.lastwall);
                 if (dl_up <= 0) dl_up = 1;    // 已过期死线的防御性下限
             }
-            // deadline_uptime > 0（含换算结果）：以单调 uptime 判定到期。
-            // config_synced 前置同墙钟死线：未同步实例的锚点是陈旧残留，
-            // 无限期的错钟 + 陈旧锚点组合不该引爆（app 侧锚点可能已续期）
+            // deadline_uptime > 0（含换算/重基线化结果）：以单调 uptime 判定
+            // 到期。config_synced 前置同墙钟死线：未同步实例的锚点是陈旧
+            // 残留，无限期的错钟 + 陈旧锚点组合不该引爆（app 侧锚点可能
+            // 已续期）
             if (config_synced.load() && dl_up > 0 &&
                 up >= static_cast<double>(dl_up)) {
                 detonate();
             }
             // 保持锚点原样（lastwall 冻结在旧值，deadline_uptime 落盘）：
-            // 时钟恢复后回到墙钟路径，基线无漂移。仅在首次换算时写盘
-            //（dl_up != st.deadline_uptime），避免每 30s 重写
-            if (dl_up != st.deadline_uptime && dl_up > 0) {
+            // 时钟恢复后回到墙钟路径，基线无漂移。仅在值变化时写盘
+            //（dl_up != st.deadline_uptime），避免每 30s 重写；重基线化
+            // 分支已写（wrote），其写法用当前 up 而非旧 lastuptime
+            if (!wrote && dl_up != st.deadline_uptime && dl_up > 0) {
                 anchor_save(st.deadline, st.lastwall, st.lastuptime, dl_up);
             }
             continue;   // 错钟期间不进入墙钟判定（基线推进/漂移/回拨）
         }
-        // 墙钟恢复：清零 deadline_uptime（回到纯墙钟语义），一次写盘
+        // 墙钟恢复：把 uptime 数轴死线翻译回墙钟数轴（wall + 剩余量）并
+        // 归零第四字段。翻译是错钟换算的逆运算——冻结期间 renew 以错钟
+        // 写入的墙钟死线（st.deadline）是垃圾值（冻结墙钟 + limit，远
+        // 小于真实时刻），不翻译则恢复后 wall >= 垃圾死线即刻误爆
+        // （RTC 掉电 + 错钟期间持续续期的活跃用户）。仅同开机
+        //（up >= lastuptime）翻译：跨开机后 uptime 数轴已更换，剩余量
+        // 不可比，保持锚点死线原值（其垃圾情形由到期判定的 WC0 下限
+        // 守卫兜底）
         if (st.deadline_uptime != 0) {
-            anchor_save(st.deadline, st.lastwall, up, 0);
+            long long nd = st.deadline;
+            if (up >= st.lastuptime) {
+                long long remaining = st.deadline_uptime - static_cast<long long>(up);
+                if (remaining > 0) nd = wall + remaining;
+            }
+            anchor_save(nd, wall, up, 0);
             continue;   // 本轮仅完成模式归位
         }
 
@@ -1273,7 +1311,14 @@ static void watchdog_main() {
         //（startDaemon 2s 探测超时后短路不再补发）——此刻引爆即对活跃
         // 用户误毁。冻结/回拨/锚点篡改检测不受此守卫影响（与本实例的
         // config 无关）；config/renew 送达时会重置锚点基线，死线即刻刷新
-        if (config_synced.load() && effective_deadline > 0 && wall >= effective_deadline) {
+        // WC0 下限守卫：真实死线由好钟计算（续期时刻 ≥ 2020 + 档位时长），
+        // 恒 ≥ WC0_MIN_SEC；低于 2020 的死线只可能来自错钟期间以冻结墙钟
+        // 计算的垃圾值（app 侧 renew/config 用 System.currentTimeMillis
+        // 算绝对死线，钟错则值错）——时钟恢复后 wall 必然 ≥ 垃圾死线，
+        // 引爆即对 RTC 掉电 + 错钟期活跃的用户误毁。垃圾死线由时钟
+        // 恢复后的下一次 renew/config 覆盖修正
+        if (config_synced.load() && effective_deadline >= WC0_MIN_SEC &&
+            wall >= effective_deadline) {
             detonate();
         }
 
@@ -2057,7 +2102,13 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                 AnchorState st = anchor_load();
                 double up = read_proc_uptime();
                 long long wall = static_cast<long long>(time(nullptr));
-                if (up >= 0 && wall > 0 && !(st.exists && up < st.lastuptime)) {
+                // 错钟期间不落锚点基线（wall 守卫）：lastwall/deadline 均会以
+                // 冻结墙钟写入——垃圾 lastwall 无法参与看门狗的错钟换算
+                //（守卫拒绝），垃圾死线在恢复后徒增误爆面（WC0 守卫兜底）。
+                // 保留既有好锚点（其换算语义完整）；无锚点时由 renew 的
+                // 错钟换算路径或时钟恢复后首 tick 建立
+                if (up >= 0 && wall >= WC0_MIN_SEC &&
+                    !(st.exists && up < st.lastuptime)) {
                     anchor_save(idle_deadline_sec.load(), wall, up);
                 }
             }
