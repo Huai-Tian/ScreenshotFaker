@@ -65,6 +65,14 @@ data class RepackIdentity(
     fun validate(): String? {
         if (!PACKAGE_NAME_REGEX.matches(packageName)) return "包名不合法"
         if (packageName == "fake.screenshot") return "包名必须与当前包名不同"
+        // 包名长度上限：包名与 label 一样进 AXML 字符串池，但 UTF-8 池的
+        // 长度编码 AOSP 只有两段式（上限 0x7FFF）——writeLen8 的三段递归
+        // 产物系统侧会解出错误长度（池整体错位），必须在入口封死；
+        // 上限同时约束 replaceAttributeValuePrefix 改写 permission/
+        // authorities 时对池体积的放大
+        if (packageName.length > MAX_LABEL_LENGTH) {
+            return "包名过长（≤${MAX_LABEL_LENGTH} 字符）"
+        }
         // 应用名/描述长度上限：AXML 字符串池对超长值本身可编码（>0x7FFF
         // 双字扩展），但 launcher 显示与安装器解析对极端长度无合理用途，
         // 上界同时封死"用户粘贴整段文本"造成的池体积失控
@@ -157,12 +165,20 @@ object RepackManager {
         }
     }
 
-    /** 清扫 cacheDir 下的 repack 孤儿工作目录（20..35 位随机名，见 repack） */
+    /**
+     * 清扫 cacheDir 下的 repack 孤儿工作目录（见 repack）。
+     * 匹配 getRandomStringEx 的真实形状：20..35 位、首字符字母数字、
+     * 其余可含 '-'/'_'——只认字母数字会漏掉约半数孤儿目录（生成名字
+     * 第 2 字符起字符表为 64 字符，P(含 -/_ ) ≈ 46%~66%），内含已签名
+     * 克隆 APK 的目录将无限期残留（root 取证面）
+     */
     private fun sweepOrphanWorkDirs(appContext: Context) {
         runCatching {
             appContext.cacheDir.listFiles()?.forEach { dir ->
-                if (dir.isDirectory && dir.name.length in 20..35 &&
-                    dir.name.all { it.isLetterOrDigit() }
+                val name = dir.name
+                if (dir.isDirectory && name.length in 20..35 &&
+                    name[0].isLetterOrDigit() &&
+                    name.drop(1).all { it.isLetterOrDigit() || it == '-' || it == '_' }
                 ) {
                     dir.deleteRecursively()
                 }

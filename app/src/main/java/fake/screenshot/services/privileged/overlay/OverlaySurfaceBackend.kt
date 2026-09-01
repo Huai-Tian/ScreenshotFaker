@@ -363,6 +363,10 @@ internal class OverlaySurfaceBackend(
     // 新手势的松手会重新排程。
     private var secondBeat: Runnable? = null
 
+    // 第二拍执行标记：第二拍自身以旧快照调 setGeometry(live=false) 是
+    // 合法路径，须与"外部精确几何设置"区分（见 setGeometry 精确路径）
+    private var inSecondBeat = false
+
     private fun scheduleSecondBeat(x: Int, y: Int, w: Int, h: Int) {
         secondBeat?.let { handler.removeCallbacks(it) }
         val r = Runnable {
@@ -372,7 +376,12 @@ internal class OverlaySurfaceBackend(
             // 绘制只上 buffer、matrix 保持第一拍补偿——旧 buffer 显示恒
             // 正确，无闪变窗口。
             holdMatrix = true
-            setGeometry(x, y, w, h, live = false)
+            inSecondBeat = true
+            try {
+                setGeometry(x, y, w, h, live = false)
+            } finally {
+                inSecondBeat = false
+            }
             // 释放任务（实测"首个新尺寸提交可能不被 latch，后续同尺寸
             // 提交必 latch"）：post 一次同尺寸重绘，post 完成后立即放开
             // 冻结——syncMatrixFor 在 unlockCanvasAndPost 之后归一，
@@ -488,6 +497,14 @@ internal class OverlaySurfaceBackend(
         }
 
         // ---- 精确路径（外部设置 / settle / 第二拍）----
+        // 外部精确几何（app 侧命令 / 旋转 clamp）：取消挂起的第二拍——
+        // 其持有松手时刻的旧快照，照常执行会把本次新几何静默回退为
+        // 旧值且无任何自愈（直到下一次手势/命令）。第二拍自身进入时
+        // inSecondBeat 已置位，不受影响
+        if (!inSecondBeat) {
+            secondBeat?.let { handler.removeCallbacks(it) }
+            secondBeat = null
+        }
         // live 结束：matrix 不在此归一——buffer 可能仍是冻结尺寸（Android 11
         // 的 setBufferSize 传导竞态，见 companion 文档），立即归一会得到
         // "旧尺寸内容 + identity"的错误帧。归一交由 syncMatrixFor 在绘制时
@@ -591,6 +608,10 @@ internal class OverlaySurfaceBackend(
     fun showImage(bm: Bitmap?) {
         resetLiveScale()
         releasePlayer()
+        // 视频→图片切换：释放上一视频持有的 fd（与 clearMedia/showVideo 失败
+        // 路径同责任链——root 宿主进程长期存活，裸置 null 会随每次切换泄漏
+        // 一个 fd，耗尽后媒体/网络/存储全部失效）
+        videoFd?.let { runCatching { it.close() } }
         videoFd = null
         isVideo = false
         bitmap = bm

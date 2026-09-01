@@ -1,6 +1,7 @@
 package fake.screenshot.services
 
 import android.os.Environment
+import android.os.SystemClock
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.Auxiliary
@@ -9,6 +10,8 @@ import fake.screenshot.defense.KeyVault
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.R
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -30,22 +33,59 @@ class ScreenRecordTileService : TileService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // 回调串行化 + exec 离开主线程（与 ScreenshotTileService 同语义）：
+    // refreshShellState / isProcessAlive 含同步 exec，Shizuku binder 假死
+    // 时无超时——主线程直接执行是 ANR 面。串行锁保持快速连击的处理顺序
+    private val handlerMutex = Mutex()
+
+    companion object {
+        /** 收起面板→开始录制的意图时效窗（理由见 ScreenshotTileService） */
+        private const val COLLAPSE_INTENT_FRESH_MS = 2000L
+    }
+
     override fun onStartListening() {
         super.onStartListening()
         // 磁贴可能先于 MainActivity 运行（如重启后直接点磁贴），确保 DK 上下文就绪
         DefenseProtocol.init(applicationContext)
-        checkAndResetIfProcessDead()
-        updateTileUI()
+        serviceScope.launch {
+            handlerMutex.withLock {
+                withContext(Dispatchers.Main) {
+                    checkAndResetIfProcessDead()
+                    updateTileUI()
+                }
+            }
+        }
     }
 
     override fun onClick() {
         super.onClick()
-        Auxiliary.refreshShellState()
+        // clicked 同步翻转（非录制时；截图磁贴同理由——onStopListening 的
+        // 意图快照依赖此刻已写入，异步翻转会丢“点击后立即收起”的意图）。
+        // 与原实现的已知差异：原实现先跑 checkAndResetIfProcessDead（含
+        // 同步 exec，ANR 面）再判定录制态，“录制已自行结束 + 点击”会武装
+        // 新录制；本实现同步读到 isRecording=true 不翻转，异步复核后不
+        // 武装——差异方向是“绝不误启动录制”（fail-safe），接受
+        if (!isRecording) {
+            clicked = !clicked
+        }
+        updateTileUI()
+        // 仅慢速部分（同步 exec / kill 复核）离主线程
+        serviceScope.launch {
+            handlerMutex.withLock {
+                Auxiliary.refreshShellState()
+                withContext(Dispatchers.Main) {
+                    handleClicked()
+                }
+            }
+        }
+    }
 
+    /** onClick 慢速收尾（主线程、串行锁内执行；见 handlerMutex 注释） */
+    private suspend fun handleClicked() {
         if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
+            clicked = false
             showingNoPermission = !showingNoPermission
             if (showingNoPermission) {
-                clicked = false
                 if (isRecording) {
                     showingNoPermission = false
                     return
@@ -62,31 +102,37 @@ class ScreenRecordTileService : TileService() {
             stopRecording()
             return
         }
-
-        if (clicked) {
-            clicked = false
-            updateTileUI()
-        } else {
-            clicked = true
-            updateTileUI()
-        }
+        // clicked 已在 onClick 同步翻转，此处仅刷新显示
+        updateTileUI()
     }
 
     override fun onStopListening() {
         super.onStopListening()
-        Auxiliary.refreshShellState()
+        // 决策输入同步快照 + 意图时效窗（理由见 ScreenshotTileService 的
+        // onStopListening 注释：延迟块读字段会被重开面板的回调改写；
+        // 被拖延后开始的录制会录到任意时刻起的屏幕）
+        val wasClicked = clicked
+        val atEr = SystemClock.elapsedRealtime()
         showingNoPermission = false
-        checkAndResetIfProcessDead()
-
-        if (clicked && (Auxiliary.isShellActivated || Auxiliary.isRootActivated)) {
-            clicked = false
-            serviceScope.launch {
-                startRecording()
+        serviceScope.launch {
+            handlerMutex.withLock {
+                Auxiliary.refreshShellState()
+                withContext(Dispatchers.Main) {
+                    checkAndResetIfProcessDead()
+                    val fresh =
+                        SystemClock.elapsedRealtime() - atEr <= COLLAPSE_INTENT_FRESH_MS
+                    if (wasClicked && fresh &&
+                        (Auxiliary.isShellActivated || Auxiliary.isRootActivated)
+                    ) {
+                        serviceScope.launch {
+                            startRecording()
+                        }
+                    }
+                    clicked = false
+                    updateTileUI()
+                }
             }
-            return
         }
-        clicked = false
-        updateTileUI()
     }
 
     override fun onDestroy() {
@@ -228,15 +274,18 @@ class ScreenRecordTileService : TileService() {
         }
     }
 
-    private fun stopRecording() {
+    private suspend fun stopRecording() {
         if (!isRecording) {
             return
         }
         val pid = recordPid
         if (pid != null) {
             // 身份复核：screenrecord 早期崩溃后 PID 被复用时，裸 kill -2
-            // 会误杀无关进程（与 daemon 侧 PID 复用防护同一语义）
-            Auxiliary.killProcessIfCmdlineMatches(pid, "screenrecord")
+            // 会误杀无关进程（与 daemon 侧 PID 复用防护同一语义）。
+            // exec 挪 IO（调用方在主线程上下文，见 handlerMutex 注释）
+            withContext(Dispatchers.IO) {
+                Auxiliary.killProcessIfCmdlineMatches(pid, "screenrecord")
+            }
         }
         isRecording = false
         recordPid = null
@@ -296,7 +345,7 @@ class ScreenRecordTileService : TileService() {
         Auxiliary.applyDefinedTimestamp(definedTimestamp, path)
     }
 
-    private fun checkAndResetIfProcessDead() {
+    private suspend fun checkAndResetIfProcessDead() {
         val pid = recordPid
         if (isRecording && pid != null && !isProcessAlive(pid)) {
             isRecording = false
@@ -334,10 +383,11 @@ class ScreenRecordTileService : TileService() {
         }
     }
 
-    private fun isProcessAlive(pid: Int): Boolean {
-        val (exitCode, _) = Auxiliary.exec("kill -0 $pid 2>/dev/null")
-        return exitCode == 0
-    }
+    private suspend fun isProcessAlive(pid: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            val (exitCode, _) = Auxiliary.exec("kill -0 $pid 2>/dev/null")
+            exitCode == 0
+        }
 
     private fun updateTileUI() {
         qsTile?.apply {

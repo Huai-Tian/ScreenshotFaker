@@ -74,8 +74,11 @@ object Auxiliary {
                 .run {
                     ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
                         .use { it.write(cmd.toByteArray()) }
-                    drainAndAwait(inputText = { inputStream.text.ifBlank { errorStream.text } },
-                        destroyAfter = { destroy() })
+                    drainAndAwait(
+                        inputText = { inputStream.text.ifBlank { errorStream.text } },
+                        waitAction = { waitFor() },
+                        destroyAfter = { destroy() }
+                    )
                 }
         } else if (isRootActivated) {
             ProcessBuilder("su")
@@ -83,8 +86,11 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
-                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
-                        destroyAfter = { destroy() })
+                    drainAndAwait(
+                        inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        waitAction = { waitFor() },
+                        destroyAfter = { destroy() }
+                    )
                 }
         } else {
             ProcessBuilder("sh")
@@ -92,8 +98,11 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
-                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
-                        destroyAfter = null)
+                    drainAndAwait(
+                        inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        waitAction = { waitFor() },
+                        destroyAfter = null
+                    )
                 }
         }
     }.getOrElse {
@@ -108,8 +117,11 @@ object Auxiliary {
                 .run {
                     ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
                         .use { it.write(stdinData) }
-                    drainAndAwait(inputText = { inputStream.text.ifBlank { errorStream.text } },
-                        destroyAfter = { destroy() })
+                    drainAndAwait(
+                        inputText = { inputStream.text.ifBlank { errorStream.text } },
+                        waitAction = { waitFor() },
+                        destroyAfter = { destroy() }
+                    )
                 }
         } else if (isRootActivated) {
             ProcessBuilder("su", "-c", cmd)
@@ -117,8 +129,11 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(stdinData) }
-                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
-                        destroyAfter = { destroy() })
+                    drainAndAwait(
+                        inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        waitAction = { waitFor() },
+                        destroyAfter = { destroy() }
+                    )
                 }
         } else {
             ProcessBuilder("sh", "-c", cmd)
@@ -126,8 +141,11 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(stdinData) }
-                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
-                        destroyAfter = null)
+                    drainAndAwait(
+                        inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        waitAction = { waitFor() },
+                        destroyAfter = null
+                    )
                 }
         }
     }.getOrElse {
@@ -146,9 +164,15 @@ object Auxiliary {
      * 读取放到独立线程与 waitFor 并行，先到者胜：正常路径读取完成 +
      *    进程退出即返回；输出未完但超时到达则放弃等待（退出码按失败
      *    处理），destroyAfter 兜底终止子进程/回收 Shizuku 进程对象
+     *
+     * [waitAction] 显式传入等待逻辑（Process.waitFor / ShizukuProcess
+     * .waitFor）：旧实现依赖调用方以 .run{} 包裹、waitFor 经外层
+     * lambda 接收者隐式解析——跨函数边界的接收者约定极脆弱（K2 对
+     * runCatching{ waitFor() } 的类型参数 R 无法推断），显式化断开耦合
      */
     private fun drainAndAwait(
         inputText: () -> String,
+        waitAction: () -> Int,
         destroyAfter: (() -> Unit)?
     ): Pair<Int, String> {
         val output = StringBuilder()
@@ -163,7 +187,7 @@ object Auxiliary {
             reader.isAlive.not()
         }.getOrDefault(false)
         return if (finished) {
-            val code = runCatching { waitFor() }.getOrDefault(1)
+            val code = runCatching { waitAction() }.getOrDefault(1)
             destroyAfter?.invoke()
             code to output.toString()
         } else {

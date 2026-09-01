@@ -450,7 +450,10 @@ object IdleWatchdog {
                 }
                 if (wallOk) {
                     val ev = evalLegacyAnchor(
-                        er0, wc0, er, wc, limitMs, boot, -1, touch
+                        er0, wc0, er, wc, limitMs, boot, -1, touch,
+                        // 形态③近似豁免：本调用点通过后必 writeAnchor()
+                        // 重基线（迁移三段式），豁免一次性收敛
+                        middleBootExempt = true
                     )
                     if (ev.destroy) {
                         DefenseProtocol.destroyForCoercionLocked()
@@ -495,17 +498,20 @@ object IdleWatchdog {
      * - 同开机（er >= er0）：e >= er0（凭证不早于锚点——同数轴）时
      *   到期基线推进到 max(er0, e)（锚点成功写入本身也是活跃时刻）
      * - 重启（er < er0）：b == boot（当前开机）er 差 < limit 直接豁免；
-     *   b == anchorBoot 且 e >= er0 时以 wc0 + (e - er0) 为到期基线
-     *  （2 段式锚点传 anchorBoot=-1：BOOT_COUNT 设备的凭证 b >= 0
-     *   恒不匹配 → 正确拒绝跨轴换算；BOOT_COUNT 不可用设备 b == -1
-     *   匹配，轴判定退化为该路径既有的 er 启发式精度边界——其重启
-     *   检测本身即 er 启发式，豁免不弱于其判定精度）
+     *   BOOT_COUNT 可用且 b != boot（更早开机的凭证）= 形态③近似，
+     *   豁免 + 重基线（两段式无 boot0，中间开机不可精确判定，见分支
+     *   注释）；b == anchorBoot 且 e >= er0 时以 wc0 + (e - er0) 为
+     *   到期基线（2 段式锚点传 anchorBoot=-1：BOOT_COUNT 设备的凭证
+     *   b >= 0 恒不匹配 → 正确拒绝跨轴换算；BOOT_COUNT 不可用设备
+     *   b == -1 匹配，轴判定退化为该路径既有的 er 启发式精度边界——
+     *   其重启检测本身即 er 启发式，豁免不弱于其判定精度）
      *
      * @return destroy 判定 + 通过时的到期剩余毫秒（恒正，闹钟布防用）
      */
     private fun evalLegacyAnchor(
         er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long,
-        boot: Int, anchorBoot: Int, touch: Touch?
+        boot: Int, anchorBoot: Int, touch: Touch?,
+        middleBootExempt: Boolean = false
     ): LegacyEval {
         if (er >= er0) {
             // 同开机语义（与三段式分支一致）：到期只看 er；漂移仅 wc 落后
@@ -528,6 +534,22 @@ object IdleWatchdog {
             er - touch.er < limitMs
         ) {
             return LegacyEval(false, (touch.er + limitMs) - er)
+        }
+        // 形态③近似（两段式无 boot0 字段，中间开机凭证无法精确判定）：
+        // BOOT_COUNT 可用且凭证来自更早的开机（b < boot）——凭证写于
+        // 两段式锚点之后（KEY_TOUCH 与新锚点同期引入，锚点更旧），b 只能
+        // 是锚点开机或中间开机。中间开机的最后活跃真实墙钟不可恢复
+        // （跨开机 er 无数轴可换算），wc - wc0 不构成"距最后活跃已超时"
+        // 的证明；锚点开机本可走下方换算（两段式无 boot0 无法识别），
+        // 一并豁免。按误毁零容忍不引爆：返回整档位窗口，调用方
+        // writeAnchor() 重基线迁移三段式（成功后旧凭证不再匹配任何
+        // 形态=死数据；失败则下轮复查重走本分支，收敛重试）。与三段式
+        // 形态③语义对齐；滥用面同其注释（伪造凭证需 root 写私有 prefs）。
+        // 仅两段式调用点启用（middleBootExempt）：其通过后必 writeAnchor
+        // 重基线，豁免一次性收敛；启发式调用点（BOOT_COUNT 不可用路径）
+        // 不重基线，启用会造成豁免无限循环（销毁被无限推迟）
+        if (middleBootExempt && touch != null && touch.boot >= 0 && touch.boot != boot) {
+            return LegacyEval(false, limitMs)
         }
         // 锚点同轴凭证换算：b == anchorBoot 且 e >= er0 时，最后活跃
         // 真实墙钟 ≈ wc0 + (e - er0)（推理同三段式跨开机分支注释）

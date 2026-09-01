@@ -411,10 +411,12 @@ object ScreenShareManager {
                 // （会话仍活着），磁贴维持激活态。若误置 false + 报错：
                 // 磁贴熄灭显示"server_exited_repeatedly"，用户合理推断
                 // 共享已停止而屏幕流实际仍在传输——恰是本项目全链路
-                // 贯彻的"杜绝虚假安全感"要消灭的状态。状态在下一次
-                // toggle 时由 isServerActuallyRunning() 收敛（在跑 → 停止
-                // 分支；已死 → 启动分支）；胁迫销毁路径不受影响（闩锁 +
-                // stopScreenShare 的 pkill/rm 与本协程是否在等待无关）
+                // 贯彻的"杜绝虚假安全感"要消灭的状态。收敛路径：下一次
+                // toggle 时 relayRunning=true 恒走停止分支（无论 server
+                // 实际死活，先停后启、绝不误启）——server 已自然死亡的
+                // 场景需再点一次才重新启动，fail-safe 方向的可接受代价。
+                // 胁迫销毁路径不受影响（闩锁 + stopScreenShare 的
+                // pkill/rm 与本协程是否在等待无关）
                 notifyStateChanged()
                 return@launch
             }

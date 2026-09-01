@@ -53,8 +53,17 @@ object ConfigManager {
                 // 旧版本升级迁移：默认名文件存在则复制到新随机名（避免升级丢配置）
                 val def = dataStoreFile(appContext, DATA_REF_DEFAULT)
                 if (def.exists()) {
-                    runCatching {
+                    val copied = runCatching {
                         def.copyTo(dataStoreFile(appContext, ref), overwrite = true)
+                    }.isSuccess
+                    if (!copied) {
+                        // 复制失败（瞬时 IO：磁盘满/短时不可写）：沿用默认名文件，
+                        // 不删源、不持久化 ref——本次会话仍读旧配置，下次启动重试
+                        // 迁移。旧实现无条件 delete：复制失败 + 删源 = 全部配置
+                        // 静默清零回出厂态（误毁方向，违反"绝不误毁"红线）
+                        dataStoreFile(appContext, ref).delete() // 清理半截副本
+                        dataStoreRef = DATA_REF_DEFAULT
+                        return DATA_REF_DEFAULT
                     }
                     def.delete()
                     File(def.path + ".tmp").delete()
