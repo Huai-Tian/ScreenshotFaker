@@ -707,7 +707,18 @@ fun SettingsCompose(navController: NavController) {
                                     val stopped = withContext(Dispatchers.IO) {
                                         DaemonManager.stopDaemon()
                                     }
-                                    if (wasRunning && !stopped) return@launch
+                                    if (wasRunning && !stopped) {
+                                        // 中止保存必须告知用户：静默放弃会让用户
+                                        // 以为新端口已生效（对话框已关闭），实际
+                                        // 仍在旧端口通信——防"虚假生效"与本项目
+                                        // fail-closed 的 UI 纪律一致
+                                        Toast.makeText(
+                                            context,
+                                            R.string.daemon_port_change_aborted,
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        return@launch
+                                    }
                                     isDaemonRunning = !stopped
                                     ConfigManager.saveData(
                                         context,

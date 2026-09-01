@@ -111,6 +111,7 @@
     <string name="refresh">Refresh</string>
     <string name="detach">Detach</string>
     <string name="daemon_connect_failed">Daemon not running or can not connect</string>
+    <string name="daemon_port_change_aborted">Port change aborted: daemon stop failed, retry later</string>
     <!--ExtensionPage-->
     <!--Screenshot-->
     <string name="stealth_screenshot">Stealth Screenshot</string>

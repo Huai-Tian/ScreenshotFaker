@@ -404,7 +404,21 @@ object ScreenShareManager {
             // 时传递给 app_process（cmdline 只含变量名，env 不进 cmdline）
             val runCmd = if (passwordValue.isEmpty()) "sh $watchPath"
             else "SF_SHARE_PWD=${shellQuote(passwordValue)} sh $watchPath"
-            Auxiliary.exec(runCmd)
+            val (execExitCode, _) = Auxiliary.exec(runCmd)
+            if (execExitCode == -1) {
+                // exec 超时放弃等待（守护脚本孤儿化独立存活是刻意设计）：
+                // 共享实际仍在进行。保持 relayRunning 与 initialized 不变
+                // （会话仍活着），磁贴维持激活态。若误置 false + 报错：
+                // 磁贴熄灭显示"server_exited_repeatedly"，用户合理推断
+                // 共享已停止而屏幕流实际仍在传输——恰是本项目全链路
+                // 贯彻的"杜绝虚假安全感"要消灭的状态。状态在下一次
+                // toggle 时由 isServerActuallyRunning() 收敛（在跑 → 停止
+                // 分支；已死 → 启动分支）；胁迫销毁路径不受影响（闩锁 +
+                // stopScreenShare 的 pkill/rm 与本协程是否在等待无关）
+                notifyStateChanged()
+                return@launch
+            }
+            // 守护脚本正常退出（STOP 标记 / 连续 3 次快速退出）
             if (relayRunning) {
                 lastError = "server_exited_repeatedly"
             }

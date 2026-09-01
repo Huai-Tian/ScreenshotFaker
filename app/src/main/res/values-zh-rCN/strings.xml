@@ -73,6 +73,7 @@
     <string name="about">关于</string>
     <string name="detach">脱离</string>
     <string name="daemon_connect_failed">守护进程未运行或无法连接</string>
+    <string name="daemon_port_change_aborted">端口变更已中止：守护进程停止失败，请稍后重试</string>
     <string name="custom_file_prefix">自定义文件名前缀</string>
     <string name="full_random_file_name">文件名全随机</string>
     <string name="operation_selection">操作选择</string>

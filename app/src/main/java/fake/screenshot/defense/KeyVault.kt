@@ -565,7 +565,11 @@ object KeyVault {
      */
     private fun readStoredPart(): ByteArray? {
         val file = File(appContext.filesDir, DK_FILE_NAME)
-        val wrapper = getOrCreateHardwareKey()
+        // Keystore 服务异常（getInstance/load/getKey 均可抛 KeyStoreException/
+        // ProviderException）不得沿 isDaemonKeyReady → 磁贴路径逃逸导致进程
+        // 崩溃——与 wrapPepper/unwrapPepper 的 runCatching 防护对齐
+        // （fail-closed：异常 = 不可用，调用方按未就绪处理）
+        val wrapper = runCatching { getOrCreateHardwareKey() }.getOrNull() ?: return null
         val data = runCatching { file.readBytes() }.getOrNull() ?: return null
         if (data.size <= NONCE_LENGTH) return null
         return runCatching {

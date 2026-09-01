@@ -311,7 +311,10 @@ class RootOverlayService : Binder() {
             }
         }
 
-        private val connection = object : ServiceConnection {
+        // 显式类型标注：object 表达式体内引用了 connection 自身
+        // （onServiceConnected 的 unbindUserService），类型推断成环
+        // （"recursive problem"）；显式 ServiceConnection 断开循环
+        private val connection: ServiceConnection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, binder: IBinder) {
                 if (suBackend != null) {
                     // 当前实际走 su 后端（Shizuku 晚到的回调——超时回落后才
@@ -417,6 +420,10 @@ class RootOverlayService : Binder() {
     private var monitor: GestureInputMonitor? = null
     private var controller: OverlayGestureController? = null
 
+    // 显示变更监听（旋转/分辨率切换时重解析屏幕尺寸并 clamp 窗口几何）
+    private var displayManager: android.hardware.display.DisplayManager? = null
+    private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
+
     // 应用进程反向回调（binder：切换媒体 / 窗口失败上报）
     private var callback: IBinder? = null
 
@@ -519,6 +526,7 @@ class RootOverlayService : Binder() {
             // 移动/缩放全部失效（图片平移不经 clamp 故正常，正是该症状）。
             // 多路径解析。
             resolveScreenSize(context)
+            registerDisplayListener(context)
 
             controller?.syncGeometry(x, y, width, height)
             backend.attach(x, y, width, height)
@@ -536,6 +544,7 @@ class RootOverlayService : Binder() {
 
     private fun detachInternal() {
         removeControlInternal()
+        unregisterDisplayListener()
         backend.detach()
         callback = null
     }
@@ -608,6 +617,67 @@ class RootOverlayService : Binder() {
             it.screenWidth = w
             it.screenHeight = h
         }
+    }
+
+    /**
+     * 注册显示变更监听（公开 API，无隐蔽数据面）：旋转/分辨率切换时
+     * DisplayManager 派发 onDisplayChanged（回调投递到 handler 线程，
+     * 与 attach/setGeometry 同线程串行——无并发窗口）。
+     * 回调中重解析屏幕尺寸 + clamp 窗口几何到新边界。亮度等无关变更
+     * 时 clamp 自然 no-op（尺寸未变 → 无几何调整）。
+     */
+    private fun registerDisplayListener(context: Context) {
+        unregisterDisplayListener()
+        runCatching {
+            val dm = context.getSystemService("display")
+                    as android.hardware.display.DisplayManager
+            val listener = object : android.hardware.display.DisplayManager.DisplayListener {
+                override fun onDisplayAdded(displayId: Int) {}
+                override fun onDisplayRemoved(displayId: Int) {}
+                override fun onDisplayChanged(displayId: Int) {
+                    if (displayId != android.view.Display.DEFAULT_DISPLAY) return
+                    resolveScreenSize(context)
+                    clampToScreenBounds()
+                }
+            }
+            dm.registerDisplayListener(listener, handler)
+            displayManager = dm
+            displayListener = listener
+        }
+    }
+
+    private fun unregisterDisplayListener() {
+        displayListener?.let { listener ->
+            runCatching { displayManager?.unregisterDisplayListener(listener) }
+        }
+        displayListener = null
+        displayManager = null
+    }
+
+    /**
+     * 旋转/分辨率切换后把窗口几何 clamp 到新屏幕边界并下发。
+     * live=false（精确路径——backend 非手势上下文的重设走 setBufferSize +
+     * 重绘，不走合成器 matrix 补偿），与 setGeometryInternal 同语义。
+     * 全部值未越界时 no-op（无几何调整、无多余 transaction）。
+     */
+    private fun clampToScreenBounds() {
+        if (screenWidth <= 0 || screenHeight <= 0) return
+        if (lastW <= 0 || lastH <= 0) return
+        val clampedW = lastW.coerceAtMost(screenWidth)
+        val clampedH = lastH.coerceAtMost(screenHeight)
+        val maxX = (screenWidth - clampedW).coerceAtLeast(0)
+        val maxY = (screenHeight - clampedH).coerceAtLeast(0)
+        val clampedX = lastX.coerceIn(0, maxX)
+        val clampedY = lastY.coerceIn(0, maxY)
+        if (clampedX == lastX && clampedY == lastY &&
+            clampedW == lastW && clampedH == lastH
+        ) return
+        lastX = clampedX
+        lastY = clampedY
+        lastW = clampedW
+        lastH = clampedH
+        controller?.syncGeometry(clampedX, clampedY, clampedW, clampedH)
+        backend.setGeometry(clampedX, clampedY, clampedW, clampedH)
     }
 
     // ==================== 控制通道（root 托管手势） ====================
