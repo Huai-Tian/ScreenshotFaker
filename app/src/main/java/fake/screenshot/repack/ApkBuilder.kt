@@ -167,16 +167,21 @@ object ApkBuilder {
 
     private fun deflate(data: ByteArray): ByteArray {
         val deflater = Deflater(Deflater.DEFAULT_COMPRESSION, true)
-        deflater.setInput(data)
-        deflater.finish()
-        val out = ByteArrayOutputStream(data.size / 2)
-        val buffer = ByteArray(1 shl 16)
-        while (!deflater.finished()) {
-            val count = deflater.deflate(buffer)
-            if (count > 0) out.write(buffer, 0, count)
+        try {
+            deflater.setInput(data)
+            deflater.finish()
+            val out = ByteArrayOutputStream(data.size / 2)
+            val buffer = ByteArray(1 shl 16)
+            while (!deflater.finished()) {
+                val count = deflater.deflate(buffer)
+                if (count > 0) out.write(buffer, 0, count)
+            }
+            return out.toByteArray()
+        } finally {
+            // end 不在 finally 时，中途抛异常（如内存压力下缓冲扩容失败）
+            // 的 native 压缩器句柄要等 GC finalizer 才回收——显式释放
+            deflater.end()
         }
-        deflater.end()
-        return out.toByteArray()
     }
 
     private class EntryMeta(

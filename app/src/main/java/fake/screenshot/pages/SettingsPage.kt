@@ -45,6 +45,7 @@ import androidx.core.graphics.scale
 import fake.screenshot.wrappers.RepackManager
 import fake.screenshot.defense.GateManager
 import fake.screenshot.defense.IdleWatchdog
+import fake.screenshot.wrappers.EncryptManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 
 /** 密码熵估算（位）：长度 × log2(字符池大小)。粗估但足够指导用户 */
@@ -151,6 +152,64 @@ fun SettingsCompose(navController: NavController) {
     LaunchedEffect(Unit) {
         idleCurrentLimit = IdleWatchdog.getCurrentIdleTimeout()
         idleSelectedLimit = idleCurrentLimit
+    }
+    //Backup / Restore（配置备份：DataStore 全量快照 JSON 经备份密码
+    // AES-GCM 加密导出 SAF 文件，格式与扩展页文件加密的 v2 布局同构：
+    // [0x02][salt16][nonce12][ct]；恢复侧反向解出）
+    var backupPasswordDialog by remember { mutableStateOf(false) }
+    var backupPasswordInputText by remember { mutableStateOf("") }
+    var backupPasswordConfirmInputText by remember { mutableStateOf("") }
+    var pendingBackupPassword by remember { mutableStateOf<String?>(null) }
+    var restorePasswordDialog by remember { mutableStateOf(false) }
+    var restorePasswordInputText by remember { mutableStateOf("") }
+    var restoreUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    val backupFileSaver = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        val pwd = pendingBackupPassword
+        pendingBackupPassword = null
+        if (uri == null || pwd == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                runCatching {
+                    val json = org.json.JSONArray().apply {
+                        ConfigManager.snapshotAll(context).forEach { (k, v) ->
+                            val type = when (v) {
+                                is String -> "s"
+                                is Int -> "i"
+                                is Boolean -> "b"
+                                is Long -> "l"
+                                is Float -> "f"
+                                else -> return@forEach
+                            }
+                            put(org.json.JSONObject().put("k", k).put("t", type).put("v", v))
+                        }
+                    }.toString().toByteArray(Charsets.UTF_8)
+                    val salt = EncryptManager.generateSalt()
+                    val (nonce, ct) = EncryptManager.encryptBytesByPassword(
+                        EncryptManager.deriveKey(pwd, salt), json
+                    )
+                    val blob =
+                        byteArrayOf(EncryptManager.V2_MAGIC.toByte()) + salt + nonce + ct
+                    // "wt"：SAF 惯例的截断写（目标文档为新建，防同名残留）
+                    context.contentResolver.openOutputStream(uri, "wt")?.use {
+                        it.write(blob)
+                    } ?: throw java.io.IOException("open output failed")
+                }.isSuccess
+            }
+            Toast.makeText(
+                context, if (ok) R.string.success else R.string.failed, Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+    val restoreFilePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            restoreUri = uri
+            restorePasswordInputText = ""
+            restorePasswordDialog = true
+        }
     }
     val isPasswordConfigValid by remember {
         derivedStateOf {
@@ -545,7 +604,11 @@ fun SettingsCompose(navController: NavController) {
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = {
+                            backupPasswordInputText = ""
+                            backupPasswordConfirmInputText = ""
+                            backupPasswordDialog = true
+                        }
                     )
                 }
             }
@@ -560,7 +623,7 @@ fun SettingsCompose(navController: NavController) {
                                 contentDescription = null
                             )
                         },
-                        onClick = { /*TODO*/ }
+                        onClick = { restoreFilePicker.launch(arrayOf("*/*")) }
                     )
                 }
             }
@@ -1376,6 +1439,165 @@ fun SettingsCompose(navController: NavController) {
                     repackIconCropSource = null
                 },
                 onDismiss = { repackIconCropSource = null }
+            )
+        }
+        if (backupPasswordDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { backupPasswordDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.backup_config))
+                },
+                text = {
+                    Column {
+                        Text(text = stringResource(R.string.backup_config_description))
+                        OutlinedTextField(
+                            value = backupPasswordInputText,
+                            onValueChange = { backupPasswordInputText = it },
+                            label = { Text(stringResource(R.string.backup_password)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = backupPasswordConfirmInputText,
+                            onValueChange = { backupPasswordConfirmInputText = it },
+                            label = { Text(stringResource(R.string.backup_password_confirm)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            singleLine = true
+                        )
+                        if (backupPasswordConfirmInputText.isNotEmpty() &&
+                            backupPasswordInputText != backupPasswordConfirmInputText
+                        ) {
+                            Text(
+                                text = stringResource(R.string.password_mismatch),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            // 密码暂存 → 文档选择器返回后加密写出（备份密码
+                            // 不落盘，仅存在于本次导出流程的内存态）
+                            pendingBackupPassword = backupPasswordInputText
+                            backupPasswordDialog = false
+                            backupFileSaver.launch("screenshotfaker-backup")
+                        },
+                        enabled = backupPasswordInputText.isNotEmpty() &&
+                                backupPasswordInputText == backupPasswordConfirmInputText
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { backupPasswordDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
+            )
+        }
+        if (restorePasswordDialog) {
+            CenteredAlertDialog(
+                onDismissRequest = { restorePasswordDialog = false },
+                title = {
+                    Text(text = stringResource(R.string.restore_config))
+                },
+                text = {
+                    Column {
+                        Text(text = stringResource(R.string.restore_config_description))
+                        OutlinedTextField(
+                            value = restorePasswordInputText,
+                            onValueChange = { restorePasswordInputText = it },
+                            label = { Text(stringResource(R.string.backup_password)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val pwd = restorePasswordInputText
+                            val uri = restoreUri
+                            restorePasswordDialog = false
+                            if (uri == null) return@TextButton
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        val blob =
+                                            context.contentResolver.openInputStream(uri)
+                                                ?.use { it.readBytes() }
+                                                ?: throw java.io.IOException("open input failed")
+                                        // v2 布局（与备份侧同构）：magic1 + salt16 + nonce12 + ct
+                                        check(blob.size > 1 + EncryptManager.V2_SALT_LENGTH + 12) {
+                                            "bad backup file"
+                                        }
+                                        check(blob[0].toInt() == EncryptManager.V2_MAGIC) {
+                                            "bad magic"
+                                        }
+                                        var off = 1
+                                        val salt = blob.copyOfRange(
+                                            off, off + EncryptManager.V2_SALT_LENGTH
+                                        )
+                                        off += EncryptManager.V2_SALT_LENGTH
+                                        val nonce = blob.copyOfRange(off, off + 12)
+                                        off += 12
+                                        val ct = blob.copyOfRange(off, blob.size)
+                                        // 错误密码 → GCM tag 校验失败 → 异常 → failed
+                                        val plain = EncryptManager.decryptBytesByPassword(
+                                            EncryptManager.deriveKey(pwd, salt), nonce, ct
+                                        )
+                                        val arr = org.json.JSONArray(String(plain, Charsets.UTF_8))
+                                        val map = HashMap<String, Any>()
+                                        for (i in 0 until arr.length()) {
+                                            val o = arr.getJSONObject(i)
+                                            val value: Any = when (o.getString("t")) {
+                                                "s" -> o.getString("v")
+                                                "b" -> o.getBoolean("v")
+                                                "i" -> o.getInt("v")
+                                                "l" -> o.getLong("v")
+                                                "f" -> o.getDouble("v").toFloat()
+                                                else -> continue
+                                            }
+                                            map[o.getString("k")] = value
+                                        }
+                                        ConfigManager.restoreAll(context, map)
+                                        // 配置大面积变更：尽力同步在运行的 daemon
+                                        //（不在线秒级失败，静默跳过）
+                                        runCatching { DaemonManager.syncConfig() }
+                                    }.isSuccess
+                                }
+                                Toast.makeText(
+                                    context,
+                                    if (ok) R.string.success else R.string.failed,
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        },
+                        enabled = restorePasswordInputText.isNotEmpty()
+                    ) {
+                        Text(stringResource(R.string.Confirm))
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { restorePasswordDialog = false }) {
+                        Text(stringResource(R.string.Cancel))
+                    }
+                }
             )
         }
     }

@@ -238,4 +238,34 @@ object ConfigManager {
             }
         }.first()
     }
+
+    /**
+     * DataStore 全量快照（备份用）：键名 -> 值（String/Int/Boolean/Long/Float）。
+     * 排除超时看门狗键（idle_limit/idle_ts）：它们是设备安全态而非用户偏好，
+     * 从旧备份恢复会以陈旧锚点重置死线——距备份超过档位时长的恢复操作
+     * 直接触发销毁（不可逆，误毁方向）。armed 在明文 prefs，本就不在
+     * DataStore 快照内
+     */
+    suspend fun snapshotAll(context: Context): Map<String, Any> =
+        getEncryptedDataStore(context).data.first().asMap().entries
+            .filter { it.key.name != "idle_limit" && it.key.name != "idle_ts" }
+            .associate { it.key.name to it.value }
+
+    /**
+     * 恢复快照（合并覆盖：快照中的键覆盖现值，快照外的键保持现状——
+     * DataStore 无单键删除 API，无法做到"先清空再恢复"）。类型不明的
+     * 键跳过；看门狗键同样拒收（见 snapshotAll，双向封堵）
+     */
+    suspend fun restoreAll(context: Context, data: Map<String, Any>) {
+        for ((key, value) in data) {
+            if (key == "idle_limit" || key == "idle_ts") continue
+            when (value) {
+                is String -> saveData(context, key, value)
+                is Int -> saveData(context, key, value)
+                is Boolean -> saveData(context, key, value)
+                is Long -> saveData(context, key, value)
+                is Float -> saveData(context, key, value)
+            }
+        }
+    }
 }

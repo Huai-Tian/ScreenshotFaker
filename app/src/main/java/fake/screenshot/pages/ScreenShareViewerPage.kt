@@ -89,9 +89,15 @@ fun ScreenShareViewerCompose(configId: Int) {
     // 滚动模式：视频区单指拖动转为滚动事件（默认触摸模式直接注入触摸）
     var scrollMode by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
+    // 加载失败态：loadConfig 返回 null（id 不存在 / 密文损坏 / DK 锁定态
+    // 解不出）时无此标记则页面永久停留"加载中"——区分两态给用户可感知
+    // 的失败反馈（返回重试），杜绝无解的假加载
+    var loadFailed by remember { mutableStateOf(false) }
 
     LaunchedEffect(configId) {
+        loadFailed = false
         config = ScreenShareReceiverManager.loadConfig(context, configId)
+        loadFailed = config == null
     }
 
     config?.let { cfg ->
@@ -277,7 +283,11 @@ fun ScreenShareViewerCompose(configId: Int) {
                     .padding(padding),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = stringResource(R.string.loading))
+                Text(
+                    text = stringResource(
+                        if (loadFailed) R.string.load_failed else R.string.loading
+                    )
+                )
             }
         }
     }

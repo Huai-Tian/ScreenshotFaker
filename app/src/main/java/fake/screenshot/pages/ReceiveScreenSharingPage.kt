@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import fake.screenshot.R
@@ -319,6 +320,9 @@ private fun ReceiverConfigDialog(
                         onValueChange = { sshPasswordInput = it },
                         label = { Text(stringResource(R.string.ssh_server_user_password)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        // 遮蔽显示：keyboardType 仅影响软键盘布局不影响渲染，
+                        // 缺遮蔽时已保存的 SSH 密码打开对话框即明文上屏（肩窥）
+                        visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
@@ -357,14 +361,24 @@ private fun ReceiverConfigDialog(
                         TextButton(
                             onClick = {
                                 scope.launch {
-                                    SensitiveStore.putSensitive(
-                                        context,
-                                        SensitiveStore.sshHostKeyStoreKey(
-                                            addressInput,
-                                            sshPortInput.toIntOrNull() ?: 22
-                                        ),
-                                        ""
-                                    )
+                                    // 返回值检查（与本页 save/delete 路径及发送端
+                                    // ExtensionPage 的同款按钮对齐）：DK 不可用
+                                    // （锁定态）时密文清空失败——静默忽略会让用户
+                                    // 以为已重置，重连仍报 ssh_hostkey_changed 且无解
+                                    if (!SensitiveStore.putSensitive(
+                                            context,
+                                            SensitiveStore.sshHostKeyStoreKey(
+                                                addressInput,
+                                                sshPortInput.toIntOrNull() ?: 22
+                                            ),
+                                            ""
+                                        )
+                                    ) {
+                                        android.widget.Toast.makeText(
+                                            context, R.string.failed,
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                 }
                             },
                             enabled = pinnedHostKey.isNotEmpty()
@@ -380,6 +394,9 @@ private fun ReceiverConfigDialog(
                     label = { Text(stringResource(R.string.receiver_shared_password)) },
                     placeholder = { Text(stringResource(R.string.receiver_shared_password_hint)) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    // 遮蔽显示（同 SSH 密码框注释）：已保存的共享密码
+                    // 回填时不得明文上屏
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )

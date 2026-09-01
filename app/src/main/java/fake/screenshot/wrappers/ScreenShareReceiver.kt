@@ -56,7 +56,16 @@ data class ScreenShareReceiverConfig(
     val sshPassword: String = "",
     /** 共享密码：与发送端 auth_password 一致，留空表示发送端未启用认证 */
     val password: String = ""
-)
+) {
+    // data class 自动生成的 toString 含两个密码明文——当前全库无日志输出点，
+    // 但任何未来代码一旦 log(config) 即泄漏（纵深防御：日志/崩溃报告等
+    // 任何意外 toString 路径均只见掩码）
+    override fun toString(): String =
+        "ScreenShareReceiverConfig(id=$id, name=$name, address=$address, port=$port, " +
+                "useSsh=$useSsh, sshPort=$sshPort, sshUserName=$sshUserName, " +
+                "sshPassword=${if (sshPassword.isEmpty()) "" else "***"}, " +
+                "password=${if (password.isEmpty()) "" else "***"})"
+}
 
 /**
  * 屏幕共享接收端。设计为普通类而非单例：每个实例接收一路共享，
@@ -328,8 +337,16 @@ class ScreenShareReceiver(
         if (!config.useSsh) {
             val socket = Socket()
             socket.tcpNoDelay = true
-            socket.connect(InetSocketAddress(config.address, config.port), CONNECT_TIMEOUT_MS)
-            authenticate(socket)
+            try {
+                socket.connect(InetSocketAddress(config.address, config.port), CONNECT_TIMEOUT_MS)
+                // authenticate 写密码时对端 RST（proxy 恰好重启/认证拒绝即断）
+                // 会抛 IOException——socket 尚未登记进 sockets，不在此关闭
+                // 即泄漏（每轮重试 ≤1 个，RETRY_COUNT 封顶）
+                authenticate(socket)
+            } catch (t: Throwable) {
+                runCatching { socket.close() }
+                throw t
+            }
             sockets.add(socket)
             return socket
         }
@@ -340,8 +357,13 @@ class ScreenShareReceiver(
         localForwardPorts.add(localPort)
         val socket = Socket()
         socket.tcpNoDelay = true
-        socket.connect(InetSocketAddress("127.0.0.1", localPort), CONNECT_TIMEOUT_MS)
-        authenticate(socket)
+        try {
+            socket.connect(InetSocketAddress("127.0.0.1", localPort), CONNECT_TIMEOUT_MS)
+            authenticate(socket)
+        } catch (t: Throwable) {
+            runCatching { socket.close() }
+            throw t
+        }
         sockets.add(socket)
         return socket
     }
@@ -437,8 +459,20 @@ class ScreenShareReceiver(
         // 首次连接记录主机密钥指纹（SHA-256，SensitiveStore DK 加密，按
         // host:port 隔离），此后指纹变化即拒绝；换钥在接收配置里显式重置
         val hostKeyStoreKey = SensitiveStore.sshHostKeyStoreKey(config.address, config.sshPort)
-        // 接收页面在门禁之后，DK 恒可用（配置本身即 DK 加密存储），
-        // getSensitive 不会因锁定态退化为空串
+        // fail-closed（与发送端 ScreenShareManager 同语义）："DK 恒可用"的旧
+        // 假设不成立——查看器的重试循环跨锁定窗口存活（息屏/后台 30s 即
+        // lockSession 清 DK，页面与 DisposableEffect 不销毁），重连时
+        // getSensitive 因 DK 不可用返回空串。若放行：空指纹命中
+        // "首次连接"分支 → check() 对任意主机密钥返回 OK → MITM 伪装
+        // 服务器截获 sshPassword 并窃听流经隧道的屏幕流。密文存在而本会话
+        // 不可解 = 指纹已固定但读不出 → 必须拒绝连接（抛出由 runLoop
+        // 按普通失败重试/终止，连接从未建立，无泄露窗口）
+        if (SensitiveStore.isSensitiveConfigured(appContext, hostKeyStoreKey)) {
+            val stored = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
+            if (stored.isEmpty()) {
+                throw IOException("locked_no_credentials")
+            }
+        }
         val storedFingerprint = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
         // check() 在 JSch 连接线程上同步回调（非挂起上下文）：预读固定指纹，
         // 连接成功后回写采纳（putSensitive 是挂起函数）

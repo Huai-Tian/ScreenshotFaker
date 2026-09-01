@@ -119,6 +119,9 @@ object RepackManager {
     /** install 等待系统安装器最终状态的兜底超时（毫秒），见 [installSession] */
     private const val INSTALL_RESULT_TIMEOUT_MS = 10 * 60 * 1000L
 
+    /** 孤儿清扫的 mtime 宽限窗（毫秒），见 [sweepOrphanWorkDirs] */
+    private const val SWEEP_GRACE_MS = 5 * 60 * 1000L
+
 
     suspend fun repack(
         context: Context,
@@ -171,14 +174,23 @@ object RepackManager {
      * 其余可含 '-'/'_'——只认字母数字会漏掉约半数孤儿目录（生成名字
      * 第 2 字符起字符表为 64 字符，P(含 -/_ ) ≈ 46%~66%），内含已签名
      * 克隆 APK 的目录将无限期残留（root 取证面）
+     *
+     * mtime 宽限：install() 在 repackMutex 之外执行（大 APK 拷入安装会话
+     * 需数秒），期间用户再次触发 repack 会令本清扫删掉 install 正在读取的
+     * 工作目录（FileNotFoundException → "无法安装"）。工作目录 mtime 在
+     * 签名产物落盘时刷新——宽限期内（含 install 拷贝窗口）的目录视为
+     * 在途，跳过留给下一次清扫；孤儿目录按定义为历史残留（分钟级以前），
+     * 一次宽限至多推迟一轮清扫
      */
     private fun sweepOrphanWorkDirs(appContext: Context) {
         runCatching {
+            val now = System.currentTimeMillis()
             appContext.cacheDir.listFiles()?.forEach { dir ->
                 val name = dir.name
                 if (dir.isDirectory && name.length in 20..35 &&
                     name[0].isLetterOrDigit() &&
-                    name.drop(1).all { it.isLetterOrDigit() || it == '-' || it == '_' }
+                    name.drop(1).all { it.isLetterOrDigit() || it == '-' || it == '_' } &&
+                    now - dir.lastModified() > SWEEP_GRACE_MS
                 ) {
                     dir.deleteRecursively()
                 }

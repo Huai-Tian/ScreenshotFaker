@@ -88,6 +88,13 @@ class AxmlEditor(private val data: ByteArray) {
         utf8 = (originalFlags and UTF8_FLAG) != 0
         val stringsStart = pool.int
         val stylesStart = pool.int
+        // stringCount 校验前置（先于 IntArray 分配与逐项 pool.int 读取——
+        // 与 ResourceTableParser.parsePool 同族缺陷：校验在后时负值令
+        // IntArray 构造抛异常、大值无界分配 OOM/越界读下溢先行发生；
+        // Long 运算防 stringCount*4 整型溢出绕过）
+        require(stringCount >= 0 && 28L + stringCount * 4L <= fileSize - XML_HEADER_SIZE) {
+            "axml string count out of range: $stringCount"
+        }
         val offsets = IntArray(stringCount) { pool.int }
 
         require(poolChunkSize in 0..data.size - XML_HEADER_SIZE) {
@@ -99,7 +106,9 @@ class AxmlEditor(private val data: ByteArray) {
         val stringDataStart = XML_HEADER_SIZE + stringsStart
         strings = ArrayList(stringCount)
         for (offset in offsets) {
-            require(offset >= 0 && stringDataStart + offset <= data.size) {
+            // Long 比较：stringDataStart+offset 接近 Int 上限时溢出为负
+            // 可绕过 <= data.size 检查，ByteBuffer.wrap 随即抛越界
+            require(offset >= 0 && stringDataStart.toLong() + offset <= data.size) {
                 "axml string offset out of range: $offset"
             }
             val sb = ByteBuffer.wrap(data, stringDataStart + offset, data.size - stringDataStart - offset)
@@ -417,15 +426,22 @@ class AxmlEditor(private val data: ByteArray) {
     private fun decodeUtf8(buffer: ByteBuffer): String {
         readLen8(buffer) // UTF-16 单元数，跳过
         val byteLength = readLen8(buffer)
-        val bytes = ByteArray(byteLength)
+        // 声明长度对剩余字节核对（损坏长度字段防 BufferUnderflow/OOM，
+        // 与 ResourceTableParser.decodeUtf8 同族修复）：超限截断到可读
+        // 范围——截断串不匹配任何替换目标，等效于该串不可用
+        val readable = minOf(byteLength, buffer.remaining())
+        if (readable <= 0) return ""
+        val bytes = ByteArray(readable)
         buffer.get(bytes)
         return String(bytes, Charsets.UTF_8)
     }
 
     private fun readLen8(buffer: ByteBuffer): Int {
+        if (buffer.remaining() < 1) return 0
         var length = buffer.get().toInt() and 0xFF
         if (length and 0x80 != 0) {
             // AOSP ResourceTypes.decodeLength：((b1 & 0x7F) << 8) | b2
+            if (buffer.remaining() < 1) return 0
             length = ((length and 0x7F) shl 8) or (buffer.get().toInt() and 0xFF)
         }
         return length
@@ -459,13 +475,20 @@ class AxmlEditor(private val data: ByteArray) {
     }
 
     private fun decodeUtf16(buffer: ByteBuffer): String {
+        if (buffer.remaining() < 2) return ""
         var length = buffer.short.toInt() and 0xFFFF
         if (length and 0x8000 != 0) {
             // AOSP：((w1 & 0x7FFF) << 16) | w2
+            if (buffer.remaining() < 2) return ""
             length = ((length and 0x7FFF) shl 16) or (buffer.short.toInt() and 0xFFFF)
         }
-        val builder = StringBuilder(length)
-        repeat(length) { builder.append(buffer.char) }
+        // 声明长度（双字扩展后可达 0x7FFFFFFF）对剩余字节核对：超限时
+        // StringBuilder(length) 直接 OOM、逐字读取抛下溢——截断到可读
+        // 范围（截断串不匹配任何替换目标，等效于该串不可用）
+        val readable = minOf(length, buffer.remaining() / 2)
+        if (readable <= 0) return ""
+        val builder = StringBuilder(readable)
+        repeat(readable) { builder.append(buffer.char) }
         return builder.toString()
     }
 

@@ -18,6 +18,12 @@
     <string name="system_version">SystemVersion</string>
     <string name="daemon">Daemon</string>
     <string name="loading">Loading</string>
+    <string name="load_failed">Failed to load configuration</string>
+    <string name="backup_config_description">Export all settings (including credentials stored in the config, such as SSH) to a file encrypted with the password you set. Keep the backup file safe: without the password it cannot be restored.</string>
+    <string name="restore_config_description">Import settings from a backup file. The backup password is required. Restored credentials encrypted by the device key can only be read back on this device. Timeout watchdog state is not included.</string>
+    <string name="backup_password">Backup password</string>
+    <string name="backup_password_confirm">Confirm password</string>
+    <string name="password_mismatch">Passwords do not match</string>
     <string name="detach_description">This operation will cause the daemon to close its communication port, making it impossible to determine whether the process is alive by checking if the port is open. This may aid in hiding the process, but you will no longer be able to communicate with it or view its status.</string>
     <!--SettingPage-->
     <string name="check_update">Check for update</string>

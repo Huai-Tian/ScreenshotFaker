@@ -35,6 +35,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.core.net.toUri
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
@@ -189,10 +190,20 @@ fun ExtensionCompose() {
     var screenRecordConfigDialogEnableBugreport by remember { mutableStateOf(screenRecordBugreport) }
     val isScreenRecordConfigValid by remember {
         derivedStateOf {
-            screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
-                    && screenRecordConfigDialogDurationInputText.let { it.isNotEmpty() && it.isDigitsOnly() }
+            // duration 范围门（0..86400，screenrecord 0=无限）：无上限时
+            // 超长数字（如 12 位）合法保存，磁贴侧 toIntOrNull 溢出静默
+            // 回退 180 而 daemon 侧原样透传——同一配置两种行为。范围门
+            // 保证两消费者都在 Int 解析域内，行为一致
+            screenRecordConfigDialogDurationInputText.toLongOrNull()
+                ?.let { it in 0..86400L } == true
+                    && screenRecordConfigDialogDisplayIDInputText.isDigitsOnly()
                     && screenRecordConfigDialogSavePathInputText.isNotEmpty()
-                    && screenRecordConfigDialogBitRateInputText.isDigitsOnly()
+                    // bitrate 同理：非空时限制 1..500_000_000（500Mbps 覆盖
+                    // 全部现实档位，screenrecord 上限 u32）
+                    && screenRecordConfigDialogBitRateInputText.let {
+                it.isEmpty() || (it.toLongOrNull()
+                    ?.let { b -> b in 1..500_000_000L } == true)
+            }
                     && Auxiliary.isConfigValid(
                 screenRecordConfigDialogSavePathInputText,
                 screenRecordConfigDialogPrefixInputText,
@@ -1387,6 +1398,11 @@ fun ExtensionCompose() {
                             label = { Text(stringResource(R.string.screenShare_password)) },
                             placeholder = { Text(stringResource(R.string.screenShare_password_hint)) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            // 遮蔽显示：keyboardType 仅影响软键盘布局不影响渲染，
+                            // 缺遮蔽时已保存的共享密码打开对话框即明文上屏（肩窥）。
+                            // 复制到接收端走上方剪贴板按钮（复制的是状态值，
+                            // 与显示遮蔽无关）
+                            visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -1792,6 +1808,9 @@ fun ExtensionCompose() {
                             onValueChange = { sshTunnelConfigDialogUserPassword = it },
                             label = { Text(stringResource(R.string.ssh_server_user_password)) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            // 遮蔽显示（同共享密码框注释）：已保存的 SSH 密码
+                            // 回填时不得明文上屏
+                            visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )

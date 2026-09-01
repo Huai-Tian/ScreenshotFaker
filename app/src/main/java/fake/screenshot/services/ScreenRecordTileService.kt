@@ -295,7 +295,16 @@ class ScreenRecordTileService : TileService() {
             outputPath
         ).filter { it.isNotEmpty() }
 
-        val cmd = args.joinToString(" ") + " & echo $!"
+        // stdout/stderr 重定向 /dev/null（与 ScreenShareManager 拉起 server 的
+        // 既有约定同源）：POSIX 后台任务继承 sh 的 stdout 管道写端，screenrecord
+        // 全程持有该 fd（AOSP 源码不 close/dup2），读端 readText() 要等 EOF
+        // 即等录制结束——默认 180s > exec 120s 超时：execGetPid 恒 null，
+        // isRecording 永不置位，磁贴状态机全灭且明文临时文件无人收尾
+        // （加密模式：明文录制文件永久残留 /data/local/tmp，shell/adb 可读）。
+        // 重定向后 sh 写完 pid 即退出，EOF 毫秒级到达；screenrecord 本就
+        // 只写文件不依赖 stdout，行为不变。cmdline 可见性与原先相同（命令
+        // 体在 sh -c / stdin 中，ps 所见仍是 screenrecord 及其参数）
+        val cmd = args.joinToString(" ") + " >/dev/null 2>&1 & echo $!"
 
         val pid = Auxiliary.execGetPid(cmd)
         if (pid == null) {

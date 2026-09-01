@@ -181,11 +181,15 @@ class ResourceTableParser(data: ByteArray) {
 
         // 偏移表与条目区均在 chunk 范围内是 record() 全部读取的前提：
         // entryCount/entriesStart/offset 来自文件，越界值静默采用会把
-        // 无关字节解析成 ResTable_entry（错误补丁槽位 → 写坏其他字段）
-        val indicesBytes = if (flags and TYPE_FLAG_SPARSE != 0) entryCount * 4
-        else entryCount * (if (flags and TYPE_FLAG_OFFSET16 != 0) 2 else 4)
+        // 无关字节解析成 ResTable_entry（错误补丁槽位 → 写坏其他字段）。
+        // 偏移表规模用 Long 运算：entryCount 取大值（如 0x40000000）时
+        // entryCount*4 整型溢出为 0/负值 → 校验形同虚设 → 循环以越界
+        // 下标调 u16/u32 抛 AIOOBE；entriesAbs 同理用 Long 比较
+        val indicesBytesLong = if (flags and TYPE_FLAG_SPARSE != 0) entryCount * 4L
+        else entryCount * (if (flags and TYPE_FLAG_OFFSET16 != 0) 2L else 4L)
         if (entryCount < 0 || entriesStart < 0 ||
-            indicesStart + indicesBytes > chunkEnd || entriesAbs > chunkEnd
+            indicesStart.toLong() + indicesBytesLong > chunkEnd ||
+            entriesAbs.toLong() > chunkEnd
         ) return
 
         // ResTable_type 固定字段（header(8)+id/flags/reserved(4)+entryCount(4)+entriesStart(4)）
@@ -258,23 +262,34 @@ class ResourceTableParser(data: ByteArray) {
     private class Pool(val strings: List<String>, val chunkSize: Int)
 
     private fun parsePool(start: Int): Pool {
+        // 边界校验前置（先于任何字段读取/分配）：池头固定 28 字节
+        //（chunk 头 8 + stringCount/styleCount/flags/stringsStart/stylesStart
+        // 各 4）不足即空池。校验放在读取之后是失效的——IntArray(stringCount)
+        // 的无界分配（OOM）与 u32 越界读（AIOOBE）会先于校验发生；
+        // 偏移表规模用 Long 运算，防 stringCount*4 整型溢出绕过
+        if (start < 0 || start + 28 > d.size) return Pool(emptyList(), 0)
         val chunkSize = u32(start + 4)
         val stringCount = u32(start + 8)
         val flags = u32(start + 16)
         val stringsStart = u32(start + 20)
         val utf8 = (flags and UTF8_FLAG) != 0
-        val offsets = IntArray(stringCount) { u32(start + 28 + it * 4) }
-        val dataStart = start + stringsStart
-        // 边界校验：chunk/偏移表/字符串数据起点越界时按空池处理（损坏
-        // 输入的受控降级——调用方按"资源无路径"处理，不再产出错误解析）
-        if (chunkSize <= 0 || start + chunkSize > d.size || dataStart > d.size ||
-            start + 28 + stringCount * 4 > d.size
+        // chunk 越界 / stringCount 非法 / 偏移表越界 / 字符串数据起点越界
+        //（stringsStart 高位置位时 u32 读成负 Int，start+stringsStart 溢出为
+        // 负值可绕过 > d.size 比较——负值在此一并拦截）→ 按空池处理
+        //（损坏输入的受控降级：调用方按"资源无路径"处理）
+        if (chunkSize <= 0 || start + chunkSize > d.size ||
+            stringCount < 0 || start + 28L + stringCount * 4L > d.size ||
+            stringsStart < 0 || start.toLong() + stringsStart > d.size
         ) {
             return Pool(emptyList(), if (chunkSize > 0) chunkSize else 0)
         }
+        val offsets = IntArray(stringCount) { u32(start + 28 + it * 4) }
+        val dataStart = start + stringsStart
         val strings = ArrayList<String>(stringCount)
         for (offset in offsets) {
-            if (offset < 0 || dataStart + offset > d.size) continue
+            // 偏移用 Long 比较：dataStart+offset 接近 Int 上限时溢出为负
+            // 可绕过 > d.size 检查，ByteBuffer.wrap 随即抛越界
+            if (offset < 0 || dataStart.toLong() + offset > d.size) continue
             val sb = ByteBuffer.wrap(d, dataStart + offset, d.size - dataStart - offset)
                 .order(ByteOrder.LITTLE_ENDIAN)
             strings.add(if (utf8) decodeUtf8(sb) else decodeUtf16(sb))
@@ -285,28 +300,40 @@ class ResourceTableParser(data: ByteArray) {
     private fun decodeUtf8(buffer: ByteBuffer): String {
         readLen8(buffer)
         val byteLength = readLen8(buffer)
-        val bytes = ByteArray(byteLength)
+        // 声明长度对剩余字节核对：损坏长度字段（最大 0x7FFF）超出缓冲时
+        // buffer.get 抛 BufferUnderflowException——截断到可读范围（受控降级）
+        val readable = minOf(byteLength, buffer.remaining())
+        if (readable <= 0) return ""
+        val bytes = ByteArray(readable)
         buffer.get(bytes)
         return String(bytes, Charsets.UTF_8)
     }
 
     private fun readLen8(buffer: ByteBuffer): Int {
+        if (buffer.remaining() < 1) return 0
         var length = buffer.get().toInt() and 0xFF
         if (length and 0x80 != 0) {
             // AOSP ResourceTypes.decodeLength：((b1 & 0x7F) << 8) | b2
+            if (buffer.remaining() < 1) return 0
             length = ((length and 0x7F) shl 8) or (buffer.get().toInt() and 0xFF)
         }
         return length
     }
 
     private fun decodeUtf16(buffer: ByteBuffer): String {
+        if (buffer.remaining() < 2) return ""
         var length = buffer.short.toInt() and 0xFFFF
         if (length and 0x8000 != 0) {
             // AOSP：((w1 & 0x7FFF) << 16) | w2
+            if (buffer.remaining() < 2) return ""
             length = ((length and 0x7FFF) shl 16) or (buffer.short.toInt() and 0xFFFF)
         }
-        val builder = StringBuilder(length)
-        repeat(length) { builder.append(buffer.char) }
+        // 声明长度（双字扩展后可达 0x7FFFFFFF）对剩余字节核对：超限时
+        // StringBuilder(length) 直接 OOM、逐字读取抛下溢——截断到可读范围
+        val readable = minOf(length, buffer.remaining() / 2)
+        if (readable <= 0) return ""
+        val builder = StringBuilder(readable)
+        repeat(readable) { builder.append(buffer.char) }
         return builder.toString()
     }
 
