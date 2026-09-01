@@ -50,14 +50,23 @@ object IdleWatchdog {
     // 后的首次检查中 erDiff ≥ limit 即被误判到期（er 单调走表整段
     // 错钟期，检查无法区分"用户活跃但锚点写不进"与"用户真闲置"）。
     // er 冻结无效且单调：以 (boot,er) 记录 touchIdle 在锚点写失败时的
-    // 到达时刻，同开机 er 差 < limit = 单调时钟证明的近期活跃 →
-    // 豁免到期引爆（锚点由时钟恢复后的下一次 touchIdle 正常刷新；
-    // 闲置超限后 er 差自然超限，豁免失效，契约保持）。
+    // 到达时刻，检查侧按两种形态消费：
+    // - b == 检查时的当前 boot：同开机 er 差 < limit = 单调时钟证明
+    //   的近期活跃 → 豁免到期引爆（锚点由时钟恢复后的下一次
+    //   touchIdle 正常刷新；闲置超限后 er 差自然超限，豁免失效，
+    //   契约保持）
+    // - b == 锚点 boot 且 e ≥ er0：e 与 er0 同一数轴，最后活跃的
+    //   真实墙钟 ≈ wc0 + (e - er0)（er 单调含 suspend、与真实时间
+    //   同速——错钟冻结的是墙钟读数，不是时间本身）→ 跨开机分支
+    //   的到期基线。修复：仅凭"当前 boot"形态在 boot > boot0 分支
+    //   恒不可用，"错钟期活跃 + 重启 + 时钟恢复"的首次检查（先于
+    //   任何续期）必误毁
     // 键含 boot：跨开机 er 归零重计，旧值与新 er 不可比——不加区分
     // 会让重启后的陈旧大值令 er - e 为负、恒命中豁免，闲置用户的
     // 到期判定被静默抑制
-    // 伪造面（root 写 prefs 伪造近期活跃）：能写本文件的攻击者本可
-    // 直接删除 idle 密钥整体解除 app 侧看门狗（已声明边界），无增量
+    // 伪造面（root 写 prefs 伪造近期活跃/换算基线）：能写本文件的
+    // 攻击者本可直接删除 idle 密钥整体解除 app 侧看门狗（已声明
+    // 边界），无增量
     private const val KEY_TOUCH = "sync_cycle"
 
     // 超时销毁默认档：6 个月（分钟）。首次启用/销毁后复位都用此值
@@ -118,6 +127,12 @@ object IdleWatchdog {
         val readable: Boolean, val retryable: Boolean = false,
         val limit: Long = 0L, val ts: String = ""
     )
+
+    /** 单调活性凭证（见 KEY_TOUCH）的解析结果："boot,er" 对 */
+    private data class Touch(val boot: Int, val er: Long)
+
+    /** 旧版锚点评估结果（evalLegacyAnchor）：destroy 判定 + 通过时到期剩余毫秒（闹钟布防用） */
+    private class LegacyEval(val destroy: Boolean, val remainingMs: Long)
 
     private suspend fun readIdleState(): IdleState = try {
         IdleState(
@@ -262,15 +277,15 @@ object IdleWatchdog {
         // BOOT_COUNT 回退/同开机 er 回退——四者均为精确不变量，与当前
         // 墙钟无关，错钟期间执行零误毁风险
         val wallOk = wc >= WC0_MIN
-        // 单调活性凭证（见 KEY_TOUCH 注释）：同开机 er 差 < limit =
-        // 错钟/IO 期间持续活跃的单调时钟证明，豁免到期引爆
-        val activeRecently = run {
-            val rec = prefs().getString(KEY_TOUCH, null) ?: return@run false
+        // 单调活性凭证（见 KEY_TOUCH）：解析 "boot,er"，分支内按
+        // "当前 boot 窗口豁免 / 锚点 boot 跨轴换算"两种形态消费
+        val touch = run {
+            val rec = prefs().getString(KEY_TOUCH, null) ?: return@run null
             val idx = rec.indexOf(',')
-            if (idx <= 0) return@run false
-            val b = rec.substring(0, idx).toIntOrNull() ?: return@run false
-            val e = rec.substring(idx + 1).toLongOrNull() ?: return@run false
-            b == boot && er >= e && er - e < limitMs
+            if (idx <= 0) return@run null
+            val b = rec.substring(0, idx).toIntOrNull() ?: return@run null
+            val e = rec.substring(idx + 1).toLongOrNull() ?: return@run null
+            if (e < 0) null else Touch(b, e)
         }
         val parts = st.ts.split(",")
 
@@ -294,11 +309,14 @@ object IdleWatchdog {
                     // 合法 boot0 比较落入 else 分支误判"BOOT_COUNT 回退"误杀。
                     // 启发式含墙钟判定，错钟期间整体推迟
                     if (wallOk) {
-                        if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                        val ev = evalLegacyAnchor(
+                            er0, wc0, er, wc, limitMs, boot, boot0, touch
+                        )
+                        if (ev.destroy) {
                             DefenseProtocol.destroyForCoercionLocked()
                             return true
                         }
-                        armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
+                        armDelayMs = ev.remainingMs
                     }
                 } else when {
                     boot == boot0 -> {
@@ -324,13 +342,25 @@ object IdleWatchdog {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
-                            // 到期引爆带单调活性豁免（activeRecently）：
-                            // 错钟期锚点写不进导致 er0 陈旧（见 KEY_TOUCH）
-                            if (erDiff >= limitMs && !activeRecently) {
+                            // 到期基线：单调活性凭证（b == boot0 = 与锚点
+                            // 同开机，e 在 er0 同一数轴且 er >= e）时推进
+                            // 到 max(er0, e)——锚点成功写入本身也是活跃
+                            // 时刻，er0 陈旧（错钟/IO 期锚点写不进，见
+                            // KEY_TOUCH）时以此豁免"活跃用户被陈旧锚点
+                            // 误判到期"。与旧 activeRecently 判定等价：
+                            // er - max(er0,e) >= limit ⟺ erDiff >= limit
+                            // 且 er - e >= limit
+                            val effEr0 =
+                                if (touch != null && touch.boot == boot0 && er >= touch.er)
+                                    maxOf(touch.er, er0) else er0
+                            if (er - effEr0 >= limitMs) {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
-                            armDelayMs = (er0 + limitMs) - er
+                            // 豁免生效时基线为 e：剩余恒正。以陈旧 er0 计算
+                            // delay <= 0 会令闹钟不布防——"app 永不再打开
+                            // 且不再重启"场景下销毁无触发点（链条死亡）
+                            armDelayMs = (effEr0 + limitMs) - er
                         }
                     }
 
@@ -344,12 +374,35 @@ object IdleWatchdog {
                                 DefenseProtocol.destroyForCoercionLocked()
                                 return true
                             }
-                            // 到期引爆带单调活性豁免（同上，见 KEY_TOUCH）
-                            if (wc - wc0 >= limitMs && !activeRecently) {
-                                DefenseProtocol.destroyForCoercionLocked()
-                                return true
+                            // 单调活性凭证两种形态（见 KEY_TOUCH）：
+                            // ① b == boot（当前开机）：重启后、时钟恢复前
+                            //    用户仍触碰过（锚点写失败）——er 同轴差
+                            //    < limit 直接豁免，死线闹钟以 e 为基
+                            // ② b == boot0 且 e >= er0（锚点同开机）：e 在
+                            //    er0 数轴上，最后活跃的真实墙钟 ≈
+                            //    wc0 + (e - er0)（er 与真实时间同速——
+                            //    错钟冻结的是墙钟读数，不是时间本身），
+                            //    以此为到期基线。修复跨开机误毁：旧实现
+                            //    豁免要求 b == 当前 boot，本分支恒不可用
+                            //    ——错钟期持续活跃 + 重启 + 时钟恢复的
+                            //    首次检查（先于任何 touchIdle 续期）必误毁
+                            val cur = touch?.takeIf { it.boot == boot && er >= it.er }
+                            if (cur != null && er - cur.er < limitMs) {
+                                armDelayMs = (cur.er + limitMs) - er
+                            } else {
+                                var base = wc0
+                                if (touch != null && touch.boot == boot0 &&
+                                    touch.er >= er0
+                                ) {
+                                    val est = wc0 + (touch.er - er0)
+                                    if (est > base) base = est
+                                }
+                                if (wc - base >= limitMs) {
+                                    DefenseProtocol.destroyForCoercionLocked()
+                                    return true
+                                }
+                                armDelayMs = (base + limitMs) - wc
                             }
-                            armDelayMs = (wc0 + limitMs) - wc
                         }
                     }
 
@@ -363,9 +416,9 @@ object IdleWatchdog {
 
             2 -> {
                 // 旧版两段式锚点（更早版本写入）：按旧规则评估一次，通过则迁移新格式。
-                // 评估逻辑与旧代码一致，不比旧版更严格（升级用户不引入新误炸）。
+                // 评估框架与旧代码一致（活性豁免仅降低误炸面，不新增引爆路径）。
                 // 字段合法性为时钟无关判定照常执行；墙钟评估与迁移写入
-                // （writeAnchor 在错钟期间拒绝落盘，迁移必然失败）推迟
+                //（writeAnchor 在错钟期间拒绝落盘，迁移必然失败）推迟
                 val er0 = parts[0].toLongOrNull()
                 val wc0 = parts[1].toLongOrNull()
                 if (er0 == null || wc0 == null || er0 < 0 || wc0 < WC0_MIN) {
@@ -373,12 +426,15 @@ object IdleWatchdog {
                     return true
                 }
                 if (wallOk) {
-                    if (checkLegacyAnchor(er0, wc0, er, wc, limitMs)) {
+                    val ev = evalLegacyAnchor(
+                        er0, wc0, er, wc, limitMs, boot, -1, touch
+                    )
+                    if (ev.destroy) {
                         DefenseProtocol.destroyForCoercionLocked()
                         return true
                     }
                     writeAnchor()
-                    armDelayMs = legacyRemaining(er0, wc0, er, wc, limitMs)
+                    armDelayMs = ev.remainingMs
                 }
             }
 
@@ -411,30 +467,54 @@ object IdleWatchdog {
      * er>=er0 视为同一开机做交叉校验；er<er0 视为重启走墙钟判定。
      * BOOT_COUNT 不可用设备的新锚点（boot=-1）也走此路径。
      * 漂移校验与三段式分支同为单向（仅 wc 落后方向引爆，见其注释）。
+     *
+     * 单调活性凭证（见 KEY_TOUCH）语义与三段式分支对齐：
+     * - 同开机（er >= er0）：e >= er0（凭证不早于锚点——同数轴）时
+     *   到期基线推进到 max(er0, e)（锚点成功写入本身也是活跃时刻）
+     * - 重启（er < er0）：b == boot（当前开机）er 差 < limit 直接豁免；
+     *   b == anchorBoot 且 e >= er0 时以 wc0 + (e - er0) 为到期基线
+     *  （2 段式锚点传 anchorBoot=-1：BOOT_COUNT 设备的凭证 b >= 0
+     *   恒不匹配 → 正确拒绝跨轴换算；BOOT_COUNT 不可用设备 b == -1
+     *   匹配，轴判定退化为该路径既有的 er 启发式精度边界——其重启
+     *   检测本身即 er 启发式，豁免不弱于其判定精度）
+     *
+     * @return destroy 判定 + 通过时的到期剩余毫秒（恒正，闹钟布防用）
      */
-    private fun checkLegacyAnchor(
-        er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long
-    ): Boolean {
+    private fun evalLegacyAnchor(
+        er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long,
+        boot: Int, anchorBoot: Int, touch: Touch?
+    ): LegacyEval {
         if (er >= er0) {
             // 同开机语义（与三段式分支一致）：到期只看 er；漂移仅 wc 落后
             // 方向引爆（wc 前跳 = 用户对时，攻击无收益，绝不引爆）
             val erDiff = er - er0
             val wcDiff = wc - wc0
             if (erDiff - wcDiff > ANCHOR_DRIFT_TOLERANCE_MS) {
-                return true
+                return LegacyEval(true, 0L)
             }
-            return erDiff >= limitMs
+            val effEr0 = if (touch != null && touch.er >= er0 && er >= touch.er)
+                maxOf(touch.er, er0) else er0
+            return LegacyEval(er - effEr0 >= limitMs, (effEr0 + limitMs) - er)
         }
         // er 倒退：按重启处理，墙钟判定（回拨容差同三段式分支）
-        if (wc < wc0 - ROLLBACK_TOLERANCE_MS) return true
-        return wc - wc0 >= limitMs
+        if (wc < wc0 - ROLLBACK_TOLERANCE_MS) return LegacyEval(true, 0L)
+        // 当前开机凭证：重启后触碰过（锚点写失败）——er 同轴差 < limit
+        // 直接豁免（BOOT_COUNT 不可用设备 b 恒 -1 == boot，旧轴陈旧小值
+        // 凭证的误豁免至多一个档位窗口，属该路径既有启发式精度边界）
+        if (touch != null && touch.boot == boot && er >= touch.er &&
+            er - touch.er < limitMs
+        ) {
+            return LegacyEval(false, (touch.er + limitMs) - er)
+        }
+        // 锚点同轴凭证换算：b == anchorBoot 且 e >= er0 时，最后活跃
+        // 真实墙钟 ≈ wc0 + (e - er0)（推理同三段式跨开机分支注释）
+        var base = wc0
+        if (touch != null && touch.boot == anchorBoot && touch.er >= er0) {
+            val est = wc0 + (touch.er - er0)
+            if (est > base) base = est
+        }
+        return LegacyEval(wc - base >= limitMs, (base + limitMs) - wc)
     }
-
-    /** 旧版锚点规则下的到期剩余毫秒（调用前提：checkLegacyAnchor 已通过，恒正） */
-    private fun legacyRemaining(
-        er0: Long, wc0: Long, er: Long, wc: Long, limitMs: Long
-    ): Long =
-        if (er >= er0) (er0 + limitMs) - er else (wc0 + limitMs) - wc
 
     /**
      * 布防到期复查闹钟（ELAPSED_REALTIME_WAKEUP：单调时钟 + 睡眠中唤醒）。
