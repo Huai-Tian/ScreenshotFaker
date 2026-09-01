@@ -31,6 +31,11 @@ class ScreenRecordTileService : TileService() {
     @Volatile
     private var isEncrypting = false
 
+    // startRecording 启动占位（主线程读写，见 onStopListening 注释）：
+    // 在 isRecording 置位前（execGetPid 等待期）充当"已有启动在途"的
+    // 原子标志，关闭双启动竞态
+    private var isStarting = false
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // 回调串行化 + exec 离开主线程（与 ScreenshotTileService 同语义）：
@@ -60,11 +65,16 @@ class ScreenRecordTileService : TileService() {
     override fun onClick() {
         super.onClick()
         // clicked 同步翻转（非录制时；截图磁贴同理由——onStopListening 的
-        // 意图快照依赖此刻已写入，异步翻转会丢“点击后立即收起”的意图）。
-        // 与原实现的已知差异：原实现先跑 checkAndResetIfProcessDead（含
-        // 同步 exec，ANR 面）再判定录制态，“录制已自行结束 + 点击”会武装
-        // 新录制；本实现同步读到 isRecording=true 不翻转，异步复核后不
-        // 武装——差异方向是“绝不误启动录制”（fail-safe），接受
+        // 意图快照依赖此刻已写入，异步翻转会丢"点击后立即收起"的意图）。
+        // 与原实现的已知差异（方向均为 fail-safe，接受）：
+        // 1) 原实现先跑 checkAndResetIfProcessDead（含同步 exec，ANR 面）
+        //    再判定录制态，"录制已自行结束 + 点击"会武装新录制；本实现
+        //    同步读到 isRecording=true 不翻转，异步复核后不武装
+        // 2) "停止在途 + 快速第二次点击想重新武装"：点击读到的 isRecording
+        //    仍是 true（停止在异步 handleClicked 内完成）→ 不武装，意图
+        //    静默丢失需重点一次。窗口 = 点击块排队+refresh（~R）。宁漏启
+        //    动不误启动——补救需在本延迟链里二次翻转，会重新引入
+        //    "翻转晚于收起快照"的丢意图竞态（P4），权衡后接受
         if (!isRecording) {
             clicked = !clicked
         }
@@ -113,10 +123,18 @@ class ScreenRecordTileService : TileService() {
         // 被拖延后开始的录制会录到任意时刻起的屏幕）
         val wasClicked = clicked
         val atEr = SystemClock.elapsedRealtime()
+        // 同步清零（与截图磁贴对齐，此前遗漏）：不清零时窗口期内重开
+        // 面板显示过期的"收起后开始录制"，且快速点击取消（onClick 翻回
+        // false）后被本延迟块以快照 wasClicked=true 照样启动——取消
+        // 意图被吞、违背用户意图开始录制
+        clicked = false
         showingNoPermission = false
+        // wasClicked=true 时，点击块（必先于本块持锁执行）刚刷新过权限态，
+        // 毫秒级新鲜；本块再刷一次纯属冗余——且排队串行下决策时刻被
+        // 推迟一个完整 refresh 周期，冷启动（R~1-1.5s）时 2s 时效窗被
+        // 提前耗尽，健康设备首次录制被静默放弃。删冗余刷新
         serviceScope.launch {
             handlerMutex.withLock {
-                Auxiliary.refreshShellState()
                 withContext(Dispatchers.Main) {
                     checkAndResetIfProcessDead()
                     val fresh =
@@ -124,11 +142,31 @@ class ScreenRecordTileService : TileService() {
                     if (wasClicked && fresh &&
                         (Auxiliary.isShellActivated || Auxiliary.isRootActivated)
                     ) {
-                        serviceScope.launch {
-                            startRecording()
+                        // isStarting 原子占位（主线程锁内）：关闭双启动竞态——
+                        // startRecording 脱离 handlerMutex 且 isRecording 在其
+                        // 尾部才置位，快速"收起→重开→点击→收起"两次武装时
+                        // 第二个 startRecording 可读过期 isRecording=false 并发
+                        // 启动两个 screenrecord，recordPid/lastTempName 被后者
+                        // 覆盖，前者无人收尾：不加密、不删除，明文录制文件
+                        // 永久残留 /data/local/tmp（shell/adb 可读，隐私泄露）。
+                        // 占位覆盖 startRecording 全程（含其开头等待上一次
+                        // 加密收尾的自旋，最长 5s）——等待期占位拒绝新启动
+                        // 是正确 fail-safe：上一次会话尚未收尾时本就不该有
+                        // 第二个启动。onDestroy 取消协程令占位残留时实例
+                        // 已销毁（重建后字段全新），无跨实例影响
+                        if (!isStarting) {
+                            isStarting = true
+                            serviceScope.launch {
+                                try {
+                                    startRecording()
+                                } finally {
+                                    withContext(Dispatchers.Main) {
+                                        isStarting = false
+                                    }
+                                }
+                            }
                         }
                     }
-                    clicked = false
                     updateTileUI()
                 }
             }
@@ -296,7 +334,12 @@ class ScreenRecordTileService : TileService() {
             val temp = lastTempName
             val save = lastSavePath
             val file = lastFileName
-            serviceScope.launch {
+            // 分离 scope（对齐 ScreenshotTileService.screenshot 的模式）：
+            // 加密收尾含明文删除（rm -f），挂 serviceScope 时 onDestroy
+            // 在 launch 与协程启动间的取消会令 chmod/加密/rm 全不执行，
+            // 明文录制文件永久残留 /data/local/tmp——明文清理必须跨
+            // 服务销毁存活，不可被取消
+            CoroutineScope(Dispatchers.IO).launch {
                 if (isEncrypting) return@launch
                 isEncrypting = true
                 try {
@@ -354,7 +397,14 @@ class ScreenRecordTileService : TileService() {
                 val temp = lastTempName
                 val save = lastSavePath
                 val file = lastFileName
-                serviceScope.launch {
+                // 分离 scope（与 stopRecording 对称，此前遗漏）：本路径是
+                // 录制自然结束（时长到/screenrecord 崩溃）后的明文收尾，
+                // 含最多 2.5s 的 pid 等待 delay——恰是系统解绑销毁磁贴的
+                // 高发窗口。挂 serviceScope 时 onDestroy 取消会令
+                // chmod/加密/rm 全不执行，明文录制文件永久残留
+                // /data/local/tmp（shell/adb 可读）。明文清理必须跨服务
+                // 销毁存活，不可被取消
+                CoroutineScope(Dispatchers.IO).launch {
                     if (isEncrypting) return@launch
                     isEncrypting = true
                     try {

@@ -461,6 +461,12 @@ internal class OverlaySurfaceBackend(
             // 纯移动（MOVE_WINDOW）：尺寸不变，只挪 root position，
             // 不触碰 buffer / matrix / 重绘——单 transaction 完成。
             if (w == width && h == height && !liveScaling) {
+                // 取消挂起的第二拍（与精确路径同语义）：其持松手时刻的旧
+                // 快照，位置已被本手势改变，照常执行会把位置回退到旧值
+                //（纯移动不置 liveScaling，第二拍 guard 拦不住）。取消后
+                // 精确化由松手时的 settleGeometry 完成，无遗漏
+                secondBeat?.let { handler.removeCallbacks(it) }
+                secondBeat = null
                 val tx = SurfaceControl.Transaction()
                 OverlayHiddenApi.txSetPosition(tx, r, x, y)
                 tx.apply()

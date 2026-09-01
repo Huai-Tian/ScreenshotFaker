@@ -11,6 +11,7 @@ import fake.screenshot.defense.KeyVault
 import fake.screenshot.wrappers.ConfigManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -39,7 +40,10 @@ class ScreenshotTileService : TileService() {
     // 保持 click/collapse 快速连击的处理顺序：后者等前者完成后才读状态，
     // 等价于原主线程同步串行语义
     private val handlerMutex = Mutex()
-    private val serviceScope = CoroutineScope(Dispatchers.IO)
+    // SupervisorJob（与录屏磁贴对齐）：工厂函数补的是普通 Job，单个块
+    // 未捕获异常会取消整个 scope，此后所有 launch 静默不执行——磁贴
+    // 看似正常但永不截图，直到服务重建
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun screenshot(fire: Boolean) {
         if ((Auxiliary.isShellActivated || Auxiliary.isRootActivated) && fire) {
@@ -219,7 +223,11 @@ class ScreenshotTileService : TileService() {
         showingNoPermission = false
         serviceScope.launch {
             handlerMutex.withLock {
-                Auxiliary.refreshShellState()
+                // 冗余 refresh 已删（理由见录屏磁贴 onStopListening 注释）：
+                // wasClicked=true 时点击块刚刷新过权限态（毫秒级新鲜），
+                // 再刷一次只会把决策时刻推迟一个 refresh 周期——冷启动
+                // 下 2s 时效窗被提前耗尽，健康设备首次截图被静默放弃；
+                // wasClicked=false 时刷新结果根本没被消费
                 withContext(Dispatchers.Main) {
                     val fresh =
                         SystemClock.elapsedRealtime() - atEr <= COLLAPSE_INTENT_FRESH_MS

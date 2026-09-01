@@ -53,6 +53,19 @@ object ConfigManager {
                 // 旧版本升级迁移：默认名文件存在则复制到新随机名（避免升级丢配置）
                 val def = dataStoreFile(appContext, DATA_REF_DEFAULT)
                 if (def.exists()) {
+                    // 历史迁移失败的半截副本兜底：前次迁移在 copyTo 中途/
+                    // delete 失败时残留的随机名文件（不可解密但多文件并存
+                    // 是"曾迁移失败"的弱侧信道，且永无清理时机——迁移只认
+                    // 默认名、sweep 仅销毁时跑）。进入迁移即历史 ref 未
+                    // 持久化（prefs 仍 null），任何随机名文件都不是当前
+                    // 活跃文件，可安全清除
+                    val datastoreDir = def.parentFile
+                    datastoreDir?.listFiles()?.forEach { f ->
+                        if (f.name != def.name) {
+                            f.delete()
+                            File(f.path + ".tmp").delete()
+                        }
+                    }
                     val copied = runCatching {
                         def.copyTo(dataStoreFile(appContext, ref), overwrite = true)
                     }.isSuccess
@@ -65,10 +78,21 @@ object ConfigManager {
                         dataStoreRef = DATA_REF_DEFAULT
                         return DATA_REF_DEFAULT
                     }
+                    // ref 持久化成功才删源：commit 失败（恰在复制耗尽最后磁盘
+                    // 空间后）时源已删 + ref 仅存内存 = 下次启动两文件皆失，
+                    // 全部配置静默孤儿化——与复制失败同族的误毁缺口，闭环
+                    // 同法（源保留、下次启动重试迁移）
+                    // androidx 的 edit(commit=true){...} 返回 Unit（内部丢弃
+                    // commit() 的 Boolean），感知持久化失败必须走原始 Editor API
+                    val committed = prefs.edit().putString(KEY_DATA_REF, ref).commit()
+                    if (!committed) {
+                        dataStoreFile(appContext, ref).delete() // 副本作废
+                        dataStoreRef = DATA_REF_DEFAULT
+                        return DATA_REF_DEFAULT
+                    }
                     def.delete()
                     File(def.path + ".tmp").delete()
                 }
-                prefs.edit(commit = true) { putString(KEY_DATA_REF, ref) }
             }
             dataStoreRef = ref
         }
