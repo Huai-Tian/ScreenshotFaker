@@ -386,6 +386,14 @@ fun ExtensionCompose() {
             if (sshTunnelRemotePort in 1024..65535) sshTunnelRemotePort.toString() else ""
         )
     }
+    // 已固定的主机密钥指纹（TOFU，按 host:port 隔离）：键随已保存的
+    // 地址/端口变化，切换服务器时各自独立显示/校验。未固定（空）时
+    // 下一次连接自动采纳；固定后指纹变化即拒绝连接（防 MITM）
+    val sshHostKeyPinned by SensitiveStore.rememberSensitiveValue(
+        context,
+        SensitiveStore.sshHostKeyStoreKey(sshTunnelServerAddress, sshTunnelServerPort),
+        ""
+    )
     val isSshTunnelConfigValid by remember {
         derivedStateOf {
             val addressValid = sshTunnelConfigDialogServerAddress.let {
@@ -1800,6 +1808,64 @@ fun ExtensionCompose() {
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
+                        // 主机密钥指纹（TOFU）：首次连接自动固定，此后指纹变化
+                        // 即拒绝连接（磁贴提示 ssh_hostkey_changed）。服务器重装/
+                        // 换钥时在此显式重置——清指纹 + 纪元自增（daemon 丢弃其
+                        // 本地缓存的旧指纹）+ 立即同步，下次连接重新采纳
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.ssh_host_key_fingerprint),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = if (sshHostKeyPinned.isEmpty()) {
+                                        stringResource(R.string.ssh_host_key_not_pinned)
+                                    } else {
+                                        "SHA256:" + sshHostKeyPinned.take(16) +
+                                                "…" + sshHostKeyPinned.takeLast(8)
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        if (!SensitiveStore.putSensitive(
+                                                context,
+                                                SensitiveStore.sshHostKeyStoreKey(
+                                                    sshTunnelServerAddress,
+                                                    sshTunnelServerPort
+                                                ),
+                                                ""
+                                            )
+                                        ) {
+                                            Toast.makeText(
+                                                context, R.string.failed, Toast.LENGTH_SHORT
+                                            ).show()
+                                            return@launch
+                                        }
+                                        val epoch = runCatching {
+                                            ConfigManager.getDataOnce(
+                                                context, "ssh_hostkey_epoch", 0L
+                                            )
+                                        }.getOrDefault(0L)
+                                        ConfigManager.saveData(
+                                            context, "ssh_hostkey_epoch", epoch + 1L
+                                        )
+                                        DaemonManager.syncConfig()
+                                    }
+                                },
+                                enabled = sshHostKeyPinned.isNotEmpty()
+                            ) {
+                                Text(stringResource(R.string.ssh_host_key_reset))
+                            }
+                        }
                     }
                 },
                 confirmButton = {

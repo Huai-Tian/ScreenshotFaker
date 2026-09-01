@@ -104,8 +104,12 @@ object ScreenShareReceiverManager {
             .mapNotNull { it.toIntOrNull() }
     }
 
-    fun getOrCreate(config: ScreenShareReceiverConfig): ScreenShareReceiver =
-        receivers.getOrPut(config.id) { ScreenShareReceiver(config) }
+    fun getOrCreate(context: Context, config: ScreenShareReceiverConfig): ScreenShareReceiver =
+        receivers.getOrPut(config.id) {
+            // applicationContext：实例跨页面生命周期存活，持 activity 级
+            // context 会泄漏——接收端 TOFU 指纹存取只需应用级 context
+            ScreenShareReceiver(config, context.applicationContext)
+        }
 
     fun get(id: Int): ScreenShareReceiver? = receivers[id]
 

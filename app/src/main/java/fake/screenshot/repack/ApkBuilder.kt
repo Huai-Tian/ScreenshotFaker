@@ -89,6 +89,10 @@ object ApkBuilder {
                     //（ServiceLoader 注册，如 kotlinx.coroutines 主调度器工厂），
                     // 混淆不充分的克隆会因缺少 Main dispatcher 启动即崩溃
                     if (isSignatureEntry(name)) continue
+                    // 目录条目跳过：数据为空却会作为 STORED 条目各带最多 4KB
+                    // 对齐填充（典型 APK 十余个目录 → 无谓膨胀数十 KB）；解压
+                    // 器按需自动建目录，功能零影响
+                    if (name.endsWith("/")) continue
 
                     written.add(name)
                     val replacement = replacements[name]
@@ -105,6 +109,11 @@ object ApkBuilder {
                 for ((name, data) in replacements) {
                     if (name !in written) writeEntry(name, data, ZipEntry.DEFLATED)
                 }
+
+                // EOCD 条目数是 u16：超出 65535 静默截断会产出中央目录损坏的
+                // APK（条目数与实际记录数不符，安装器直接拒绝）。自产 APK
+                // 场景概率极低，显式失败优于静默损坏
+                check(metas.size <= 0xFFFF) { "too many zip entries: ${metas.size}" }
 
                 // 中央目录
                 val centralDirOffset = offset

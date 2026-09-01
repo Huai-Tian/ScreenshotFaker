@@ -41,6 +41,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.pages.AboutCompose
@@ -69,6 +70,7 @@ import fake.screenshot.defense.DefenseProtocol
 import fake.screenshot.defense.GateManager
 import fake.screenshot.defense.GuardManager
 import fake.screenshot.defense.IdleWatchdog
+import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import kotlinx.coroutines.CoroutineScope
@@ -416,6 +418,28 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         super.onCreate()
         XposedServiceHelper.registerListener(this)
         AeadConfig.register()
+        // 首装共享密码生成：默认配置下共享认证关闭（无 auth_password 即
+        // 局域网任意设备可观看/控制/读写剪贴板）——首装即生成随机高强度
+        // 密码（DK 加密存 SensitiveStore），用户可显式清空回到无密码
+        // （允许无密码是产品决策，但默认值必须是"有密码"）。IO 协程执行
+        // （DataStore 加密读写，见 SensitiveStore）；幂等：已存在 _sec
+        // 密文（含显式清空后的空值语义——isConfigured 仅在从未写入时为
+        // false）不覆盖
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                if (!SensitiveStore.isSensitiveConfigured(
+                        this@LSPosedServiceManager, "screenShare_password"
+                    )
+                ) {
+                    val pwd = Auxiliary.getStrongPassword(
+                        Auxiliary.getSecureRandomInt(14..18)
+                    )
+                    SensitiveStore.putSensitive(
+                        this@LSPosedServiceManager, "screenShare_password", pwd
+                    )
+                }
+            }
+        }
         // 息屏锁定（进程级注册）：原实现注册在 MainActivity，用户解锁后
         // 按返回键 finish Activity（进程因 FGS/缓存存活）即注销——此后
         // 息屏不再锁定，DK 与信道密钥缓存随进程无限驻留，击穿防线 #10

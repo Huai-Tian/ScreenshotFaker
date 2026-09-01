@@ -30,6 +30,8 @@ class AxmlEditor(private val data: ByteArray) {
         const val TYPE_STRING = 0x03
         const val XML_HEADER_SIZE = 8
         const val POOL_HEADER_SIZE = 28
+        // START_ELEMENT 最小合法尺寸：chunk 头 16 + attrExt 20（无属性）
+        const val MIN_START_ELEMENT_SIZE = 36
         const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
     }
 
@@ -69,6 +71,10 @@ class AxmlEditor(private val data: ByteArray) {
         require(header.short.toInt() == RES_XML_TYPE) { "not a binary AXML file" }
         header.short // headerSize，恒为 8
         val fileSize = header.int
+        // 文件头字段防御性校验：fileSize 与实际数据长度核对（越界/
+        // 截断输入抛可读异常而非晦涩的 IndexOutOfBounds；偏小或超界
+        // 一律以实际数据为准，尾部余量按 chunk 处理与旧语义一致）
+        require(fileSize in 8..data.size) { "axml fileSize out of range: $fileSize" }
 
         // 字符串池 chunk 紧跟文件头
         val pool = ByteBuffer.wrap(data, XML_HEADER_SIZE, fileSize - XML_HEADER_SIZE)
@@ -84,15 +90,27 @@ class AxmlEditor(private val data: ByteArray) {
         val stylesStart = pool.int
         val offsets = IntArray(stringCount) { pool.int }
 
+        require(poolChunkSize in 0..data.size - XML_HEADER_SIZE) {
+            "axml pool chunk size out of range: $poolChunkSize"
+        }
+        require(stringDataInBounds(stringDataStart = stringsStart)) {
+            "axml strings offset out of range"
+        }
         val stringDataStart = XML_HEADER_SIZE + stringsStart
         strings = ArrayList(stringCount)
         for (offset in offsets) {
+            require(offset >= 0 && stringDataStart + offset <= data.size) {
+                "axml string offset out of range: $offset"
+            }
             val sb = ByteBuffer.wrap(data, stringDataStart + offset, data.size - stringDataStart - offset)
                 .order(ByteOrder.LITTLE_ENDIAN)
             strings.add(if (utf8) decodeUtf8(sb) else decodeUtf16(sb))
         }
 
         val poolEnd = XML_HEADER_SIZE + poolChunkSize
+        require(styleCount <= 0 || stylesStart <= 0 || stylesStart <= poolChunkSize) {
+            "axml styles offset out of range"
+        }
         styleBytes = if (styleCount > 0 && stylesStart > 0) {
             data.copyOfRange(XML_HEADER_SIZE + stylesStart, poolEnd)
         } else {
@@ -107,7 +125,7 @@ class AxmlEditor(private val data: ByteArray) {
             val type = tailU16(pos)
             val size = tailU32(pos + 4)
             if (size <= 0 || pos + size > tail.size) break
-            if (type == RES_XML_START_ELEMENT_TYPE) {
+            if (type == RES_XML_START_ELEMENT_TYPE && size >= MIN_START_ELEMENT_SIZE) {
                 val nameIdx = tailU32(pos + 20)
                 val elementName = strings.getOrNull(nameIdx) ?: "?"
                 if (root.isEmpty()) root = elementName
@@ -115,12 +133,20 @@ class AxmlEditor(private val data: ByteArray) {
                 val attrBase = pos + 16 + tailU16(pos + 24)
                 val attrSize = tailU16(pos + 26).coerceAtLeast(20)
                 val attrCount = tailU16(pos + 28)
+                // 属性区整体 clamp 到 chunk 内：attrStart/attrCount 来自
+                // 文件，越界值静默采用会产生错误补丁位置（写坏相邻 chunk）
+                val attrEnd = attrBase + attrCount * attrSize
+                if (attrEnd > pos + size) continue
                 elements.add(ElementInfo(elementName, pos, attrBase, attrSize, attrCount))
             }
             pos += size
         }
         rootElementName = root
     }
+
+    /** stringsStart 指向的字符串数据起点是否落在数据范围内 */
+    private fun stringDataInBounds(stringDataStart: Int): Boolean =
+        stringDataStart >= POOL_HEADER_SIZE && XML_HEADER_SIZE + stringDataStart <= data.size
 
     /**
      * 把 [element] 元素上名为 [attrName] 的属性设置为字符串值。
@@ -169,7 +195,7 @@ class AxmlEditor(private val data: ByteArray) {
             val type = tailU16(pos)
             val size = tailU32(pos + 4)
             if (size <= 0 || pos + size > tail.size) break
-            if (type == RES_XML_START_ELEMENT_TYPE) {
+            if (type == RES_XML_START_ELEMENT_TYPE && size >= MIN_START_ELEMENT_SIZE) {
                 val nameIndex = tailU32(pos + 20)
                 if (strings.getOrNull(nameIndex) == elementName) {
                     // 深度扫描定位与该 START 配对的 END_ELEMENT
@@ -416,8 +442,15 @@ class AxmlEditor(private val data: ByteArray) {
     }
 
     private fun writeLen8(out: ByteArrayOutputStream, value: Int) {
-        if (value > 0x7F) {
-            // AOSP encodeLength：b1 = 0x80 | (value >> 8)，b2 = value & 0xFF
+        // AOSP encodeLength 三段式：≤0x7F 单字节；0x80..0x7FFF 双字节
+        // （b1 = 0x80 | (value >> 8)）；>0x7FFF 双字扩展（w1 = 0x8000 |
+        // (value >> 16)，w2 = value & 0xFFFF，与 encodeUtf16 同构）。
+        // 旧实现缺第三段：超长字符串静默截断高位，产出长度字段损坏的
+        // 字符串池，错误直到安装器报"安装包已损坏"才暴露
+        if (value > 0x7FFF) {
+            writeLen8(out, (value ushr 16) or 0x8000)
+            writeLen8(out, value and 0xFFFF)
+        } else if (value > 0x7F) {
             out.write((value ushr 8) or 0x80)
             out.write(value and 0xFF)
         } else {

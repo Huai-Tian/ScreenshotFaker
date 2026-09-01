@@ -126,6 +126,10 @@
     <string name="click_to_config_ssh_tunnel">点击配置 SSH 隧道</string>
     <string name="config_ssh_tunnel">配置 SSH 隧道</string>
     <string name="ssh_server_user_password">用户密码</string>
+    <string name="ssh_host_key_fingerprint">主机密钥指纹（首次信任）</string>
+    <string name="ssh_host_key_not_pinned">未固定（首次连接时记录）</string>
+    <string name="ssh_host_key_reset">重置</string>
+    <string name="ssh_host_key_changed_hint">主机密钥已变化（可能遭遇中间人攻击），请在 SSH/接收配置中重置已固定指纹</string>
     <string name="hardware_file_encryption_and_decryption">文件加解密（硬件级）</string>
     <string name="software_file_encryption_and_decryption">文件加解密（软件级）</string>
     <string name="click_to_encrypt_or_decrypt_files">点击加密或解密文件</string>

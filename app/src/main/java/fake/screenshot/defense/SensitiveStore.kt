@@ -31,6 +31,18 @@ object SensitiveStore {
     private const val SEC_SUFFIX = "_sec"
     private const val NONCE_LENGTH = 12
 
+    /**
+     * SSH 主机密钥指纹的存储键（TOFU）。按 host:port 隔离：更换服务器
+     * 地址/端口各自独立进行首次信任，互不影响（换回旧服务器仍按旧指纹
+     * 校验）。地址字符集受 UI 校验限制（字母数字 . -），可安全拼入键名。
+     * 纪元键（ssh_hostkey_epoch，ConfigManager 明文存储）：设置页"重置
+     * 指纹"时自增，经 config 下发——daemon 侧据此丢弃其本地缓存的旧纪元
+     * 条目，否则换钥后 daemon 仍按旧指纹拒绝（app 重置而 daemon 不知情）
+     */
+    fun sshHostKeyStoreKey(address: String, port: Int): String =
+        "ssh_host_key_" + address + "_" + port
+
+
     /** DK 可用时解密敏感字段；不可用（锁定态）或密文损坏 → null */
     private fun decryptSensitiveOrNull(blob: String): String? {
         val dk = KeyVault.getDaemonKeyOrNull() ?: return null

@@ -1,5 +1,6 @@
 package fake.screenshot.wrappers
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -7,8 +8,13 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.view.Surface
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.UserInfo
+import fake.screenshot.Auxiliary
+import fake.screenshot.defense.SensitiveStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -77,7 +83,10 @@ data class ScreenShareReceiverConfig(
  *
  * 生命周期：[start] 可重入（[stop] 后可再次 start），解码器在数据线程内创建与释放。
  */
-class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
+class ScreenShareReceiver(
+    val config: ScreenShareReceiverConfig,
+    private val appContext: Context
+) {
 
     sealed interface State {
         data object Idle : State
@@ -88,6 +97,12 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     }
 
     companion object {
+        /**
+         * SSH 主机密钥变化（MITM/服务器换钥）的失败标识：与普通连接失败
+         * 区分——重试无意义（确定性失败），直接进入 Failed 供用户到
+         * 接收配置里核对并重置指纹
+         */
+        const val MSG_SSH_HOSTKEY_CHANGED = "ssh_hostkey_changed"
         /**
          * 单帧/单包长度上限：恶意或损坏的发送端可宣告超大 size，
          * ByteArray(size) 抛 OutOfMemoryError（Error 不被 catch(Exception)
@@ -309,7 +324,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
     /**
      * 建立一条到发送端的 TCP 连接。SSH 模式下通过 JSch 本地端口转发接入。
      */
-    private fun openSocket(): Socket {
+    private suspend fun openSocket(): Socket {
         if (!config.useSsh) {
             val socket = Socket()
             socket.tcpNoDelay = true
@@ -358,7 +373,7 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
      * 逐条连接并确认通道标识，直到 server 不再提供更多通道（EOF）或读满 3 条。
      * 每条连接确认配对后才发起下一条，保证与 server 端 accept 顺序一致。
      */
-    private fun negotiateChannels(): Channels {
+    private suspend fun negotiateChannels(): Channels {
         val channels = HashMap<Int, Socket>()
         val canonicalOrder = intArrayOf(CHANNEL_VIDEO, CHANNEL_AUDIO, CHANNEL_CONTROL)
         try {
@@ -414,11 +429,46 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         }
     }
 
-    private fun createSshSession(): Session {
+    private suspend fun createSshSession(): Session {
         val jsch = JSch()
+        // —— 主机密钥 TOFU（Trust On First Use，与发送端 ScreenShareManager
+        // 同语义）——接收端旧实现 StrictHostKeyChecking=no：MITM 伪装 SSH
+        // 服务器可截获接收端凭据并转发/窃取发送端的屏幕流（流经本隧道）。
+        // 首次连接记录主机密钥指纹（SHA-256，SensitiveStore DK 加密，按
+        // host:port 隔离），此后指纹变化即拒绝；换钥在接收配置里显式重置
+        val hostKeyStoreKey = SensitiveStore.sshHostKeyStoreKey(config.address, config.sshPort)
+        // 接收页面在门禁之后，DK 恒可用（配置本身即 DK 加密存储），
+        // getSensitive 不会因锁定态退化为空串
+        val storedFingerprint = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
+        // check() 在 JSch 连接线程上同步回调（非挂起上下文）：预读固定指纹，
+        // 连接成功后回写采纳（putSensitive 是挂起函数）
+        var observedFingerprint: String? = null
+        val hostKeyRepository = object : HostKeyRepository {
+            override fun check(host: String, key: ByteArray): Int {
+                val fingerprint = Auxiliary.sha256Hex(key)
+                // 摘要失败 = 无法判定 = 拒绝（fail-closed，不盲信）
+                if (fingerprint.isEmpty()) return HostKeyRepository.CHANGED
+                observedFingerprint = fingerprint
+                return if (storedFingerprint.isEmpty() ||
+                    storedFingerprint == fingerprint
+                ) HostKeyRepository.OK else HostKeyRepository.CHANGED
+            }
+
+            // 采纳/持久化由 createSshSession 在连接成功后统一处理
+            override fun add(hostkey: HostKey?, userinfo: UserInfo?) {}
+            override fun remove(host: String?, type: String?) {}
+            override fun remove(host: String?, type: String?, key: ByteArray?) {}
+            override fun getKnownHostsRepositoryID(): String = "tofu"
+            override fun getHostKey(): Array<HostKey> = emptyArray()
+            override fun getHostKey(host: String?, type: String?): Array<HostKey> =
+                emptyArray()
+        }
         val session = jsch.getSession(config.sshUserName, config.address, config.sshPort)
         session.setPassword(config.sshPassword.toByteArray(Charsets.UTF_8))
-        session.setConfig("StrictHostKeyChecking", "no")
+        session.setHostKeyRepository(hostKeyRepository)
+        // "yes"：check 返回 OK 才放行；CHANGED（指纹变化 = MITM/换钥）抛
+        // 异常终止连接。绝不可用 "no"——其对 CHANGED 也自动接受并覆盖
+        session.setConfig("StrictHostKeyChecking", "yes")
         // SSH 保活：NAT 静默丢弃连接（无 RST/EOF）时读线程一直阻塞、
         // isConnected 长期为 true——12 次重试全部复用死 session 白白耗尽，
         // 且 Failed 后页面"重试"不经 stop() 同样无法自愈（sshSession 只在
@@ -426,7 +476,26 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
         // runLoop 的"仅重置已断开 session"逻辑才能命中
         session.setServerAliveInterval(15)
         session.setServerAliveCountMax(4)
-        session.connect(SSH_TIMEOUT_MS)
+        try {
+            session.connect(SSH_TIMEOUT_MS)
+        } catch (e: Exception) {
+            runCatching { session.disconnect() }
+            // 已固定指纹且本轮观测不同 = 主机密钥变化：确定性失败，重试
+            // 无意义——以专有标识上抛，runLoop 直接 Failed
+            if (storedFingerprint.isNotEmpty() &&
+                observedFingerprint != null &&
+                observedFingerprint != storedFingerprint
+            ) {
+                throw IOException(MSG_SSH_HOSTKEY_CHANGED)
+            }
+            throw e
+        }
+        // 首次连接（TOFU 采纳）或指纹不变：持久化当前指纹
+        observedFingerprint?.let { fingerprint ->
+            if (fingerprint != storedFingerprint) {
+                SensitiveStore.putSensitive(appContext, hostKeyStoreKey, fingerprint)
+            }
+        }
         sshSession = session
         return session
     }
@@ -474,6 +543,13 @@ class ScreenShareReceiver(val config: ScreenShareReceiverConfig) {
                         }
                     }
                     if (!running.get() || gen != generation.get()) return
+                    // 主机密钥变化（MITM/换钥）是确定性失败：重试必然再败，
+                    // 直接 Failed 并带专有标识——用户到接收配置核对指纹后
+                    // 重置再重连，绝不自动采纳新密钥
+                    if (e.message == MSG_SSH_HOSTKEY_CHANGED) {
+                        state.value = State.Failed(MSG_SSH_HOSTKEY_CHANGED)
+                        return
+                    }
                     attempts++
                     if (attempts >= RETRY_COUNT || e is kotlinx.coroutines.CancellationException) {
                         state.value = State.Failed(e.message ?: e.javaClass.simpleName)

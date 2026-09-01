@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import fake.screenshot.R
+import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.wrappers.ScreenShareReceiverConfig
 import fake.screenshot.wrappers.ScreenShareReceiverManager
 import fake.screenshot.styles.CommonCard
@@ -321,6 +322,56 @@ private fun ReceiverConfigDialog(
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
+                    // —— 主机密钥指纹（TOFU，与发送端 SSH 设置同语义）——
+                    // 按当前编辑中的 host:port 显示已固定指纹；服务器重装/换钥
+                    // 导致连接被拒（ssh_hostkey_changed）时在此显式重置
+                    val pinnedHostKey by SensitiveStore.rememberSensitiveValue(
+                        context,
+                        SensitiveStore.sshHostKeyStoreKey(
+                            addressInput,
+                            sshPortInput.toIntOrNull() ?: 22
+                        ),
+                        ""
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.ssh_host_key_fingerprint),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = if (pinnedHostKey.isEmpty()) {
+                                    stringResource(R.string.ssh_host_key_not_pinned)
+                                } else {
+                                    "SHA256:" + pinnedHostKey.take(16) +
+                                            "…" + pinnedHostKey.takeLast(8)
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    SensitiveStore.putSensitive(
+                                        context,
+                                        SensitiveStore.sshHostKeyStoreKey(
+                                            addressInput,
+                                            sshPortInput.toIntOrNull() ?: 22
+                                        ),
+                                        ""
+                                    )
+                                }
+                            },
+                            enabled = pinnedHostKey.isNotEmpty()
+                        ) {
+                            Text(stringResource(R.string.ssh_host_key_reset))
+                        }
+                    }
                 }
 
                 OutlinedTextField(

@@ -96,7 +96,7 @@ fun ScreenShareViewerCompose(configId: Int) {
 
     config?.let { cfg ->
         DisposableEffect(cfg.id) {
-            val r = ScreenShareReceiverManager.getOrCreate(cfg)
+            val r = ScreenShareReceiverManager.getOrCreate(context, cfg)
             receiver = r
             onDispose { r.stop() }
         }
@@ -220,7 +220,14 @@ fun ScreenShareViewerCompose(configId: Int) {
                                     verticalArrangement = Arrangement.Center
                                 ) {
                                     Text(
-                                        text = stringResource(R.string.receiver_connection_failed) + s.message,
+                                        // 主机密钥变化（MITM/换钥）映射为可读提示：
+                                        // 引导用户到接收配置核对并重置已固定指纹
+                                        text = stringResource(R.string.receiver_connection_failed) +
+                                                if (s.message == ScreenShareReceiver.MSG_SSH_HOSTKEY_CHANGED) {
+                                                    stringResource(R.string.ssh_host_key_changed_hint)
+                                                } else {
+                                                    s.message
+                                                },
                                         color = Color.White.copy(alpha = 0.8f)
                                     )
                                     Spacer(modifier = Modifier.height(12.dp))

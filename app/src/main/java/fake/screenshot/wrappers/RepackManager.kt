@@ -19,6 +19,7 @@ import fake.screenshot.repack.RepackSigner
 import fake.screenshot.repack.ResourceTableParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
@@ -62,12 +63,24 @@ data class RepackIdentity(
     fun validate(): String? {
         if (!PACKAGE_NAME_REGEX.matches(packageName)) return "包名不合法"
         if (packageName == "fake.screenshot") return "包名必须与当前包名不同"
+        // 应用名/描述长度上限：AXML 字符串池对超长值本身可编码（>0x7FFF
+        // 双字扩展），但 launcher 显示与安装器解析对极端长度无合理用途，
+        // 上界同时封死"用户粘贴整段文本"造成的池体积失控
+        if (appNameEn.length > MAX_LABEL_LENGTH || appNameZh.length > MAX_LABEL_LENGTH) {
+            return "应用名过长（≤${MAX_LABEL_LENGTH} 字符）"
+        }
+        if (descriptionEn.length > MAX_LABEL_LENGTH || descriptionZh.length > MAX_LABEL_LENGTH) {
+            return "应用描述过长（≤${MAX_LABEL_LENGTH} 字符）"
+        }
         return null
     }
 
     companion object {
         private val PACKAGE_NAME_REGEX =
             Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+
+        /** 应用名/描述长度上限（字符） */
+        private const val MAX_LABEL_LENGTH = 200
 
         /** 简体中文 = zh-Hans 或 zh-CN / zh-SG / zh-MY / 无地区后缀的 zh */
         fun detectSimplifiedChinese(): Boolean {
@@ -87,6 +100,13 @@ data class RepackIdentity(
 
 object RepackManager {
 
+    // repack 互斥：RepackSigner.sign 每次签名前删除所有 repack_ 前缀别名，
+    // 并发的第二次 repack 会删掉第一次正在使用的私钥令签名中途失败；
+    // UI 单对话框防重入不构成互斥（对话框状态不约束其他入口）。加锁后
+    // 同一进程内 repack 严格串行
+    private val repackMutex = kotlinx.coroutines.sync.Mutex()
+
+
     suspend fun repack(
         context: Context,
         identity: RepackIdentity,
@@ -94,33 +114,53 @@ object RepackManager {
     ): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             identity.validate()?.let { throw IllegalArgumentException(it) }
-            val appContext = context.applicationContext
-            val sourceApk = File(appContext.applicationInfo.sourceDir)
-            // 私有缓存目录：仅本应用可读，中间产物对外不可见
-            val workDir = File(
-                appContext.cacheDir,
-                Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
-            ).apply { mkdirs() }
-            val unsignedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
-            val signedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
+            repackMutex.withLock {
+                val appContext = context.applicationContext
+                val sourceApk = File(appContext.applicationInfo.sourceDir)
+                // 历史孤儿清扫：repack 成功返回后若调用方未走到 install（进程
+                // 死亡/用户放弃/页面销毁），已签名克隆 APK 会无限期残留 cacheDir
+                // ——install 内部的删除逻辑覆盖不到该窗口。工作目录名均为
+                // 20..35 位随机串（本方法唯一落盘来源），入口全量清扫：
+                // 当前会话目录在锁内创建于清扫之后，不受影响
+                sweepOrphanWorkDirs(appContext)
+                val workDir = File(
+                    appContext.cacheDir,
+                    Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35))
+                ).apply { mkdirs() }
+                val unsignedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
+                val signedApk = File(workDir, Auxiliary.getRandomStringEx(Auxiliary.getSecureRandomInt(20..35)))
 
-            try {
-                val replacements = buildReplacements(appContext, sourceApk, identity, icon)
-                ApkBuilder.build(sourceApk, unsignedApk, replacements)
-                RepackSigner.sign(unsignedApk, signedApk)
-                unsignedApk.delete()
-                // 签名自检：AndroidKeyStore 签名链路产出无效签名时在此给出
-                // 精确原因，而不是把坏包交给系统安装器报"安装包已损坏"
-                val verifyResult = RepackSigner.verifySignedApk(signedApk)
-                check(!verifyResult.containsErrors()) {
-                    "verify failed: " + verifyResult.errors.joinToString("; ")
+                try {
+                    val replacements = buildReplacements(appContext, sourceApk, identity, icon)
+                    ApkBuilder.build(sourceApk, unsignedApk, replacements)
+                    RepackSigner.sign(unsignedApk, signedApk)
+                    unsignedApk.delete()
+                    // 签名自检：AndroidKeyStore 签名链路产出无效签名时在此给出
+                    // 精确原因，而不是把坏包交给系统安装器报"安装包已损坏"
+                    val verifyResult = RepackSigner.verifySignedApk(signedApk)
+                    check(!verifyResult.containsErrors()) {
+                        "verify failed: " + verifyResult.errors.joinToString("; ")
+                    }
+                    signedApk
+                } catch (t: Throwable) {
+                    // 失败清理：含已改写 manifest 的完整中间产物不得残留在 cacheDir
+                    //（敏感中间产物 + 磁盘泄漏）；删除整个随机名工作目录
+                    runCatching { workDir.deleteRecursively() }
+                    throw t
                 }
-                signedApk
-            } catch (t: Throwable) {
-                // 失败清理：含已改写 manifest 的完整中间产物不得残留在 cacheDir
-                //（敏感中间产物 + 磁盘泄漏）；删除整个随机名工作目录
-                runCatching { workDir.deleteRecursively() }
-                throw t
+            }
+        }
+    }
+
+    /** 清扫 cacheDir 下的 repack 孤儿工作目录（20..35 位随机名，见 repack） */
+    private fun sweepOrphanWorkDirs(appContext: Context) {
+        runCatching {
+            appContext.cacheDir.listFiles()?.forEach { dir ->
+                if (dir.isDirectory && dir.name.length in 20..35 &&
+                    dir.name.all { it.isLetterOrDigit() }
+                ) {
+                    dir.deleteRecursively()
+                }
             }
         }
     }

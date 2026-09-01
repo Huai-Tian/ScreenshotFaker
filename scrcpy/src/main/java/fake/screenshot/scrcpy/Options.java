@@ -433,6 +433,13 @@ public class Options {
                 case "auth_password":
                     options.authPassword = value;
                     break;
+                case "auth_password_env":
+                    // 密码经环境变量递交（不进 argv/cmdline）：value 为变量名。
+                    // argv 对同 uid（shell/root）进程经 /proc/<pid>/cmdline 可见，
+                    // 环境变量仅本进程与 root 可读（/proc/<pid>/environ 权限
+                    // 0400 root-only），暴露面显著收窄
+                    options.authPassword = System.getenv(value);
+                    break;
                 case "crop":
                     if (!value.isEmpty()) {
                         options.crop = parseCrop(value);

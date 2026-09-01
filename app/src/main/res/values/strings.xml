@@ -159,6 +159,10 @@
     <string name="ssh_server_port">SSH server port</string>
     <string name="ssh_server_user_name">User name</string>
     <string name="ssh_server_user_password">SSH server user password</string>
+    <string name="ssh_host_key_fingerprint">Host key fingerprint (TOFU)</string>
+    <string name="ssh_host_key_not_pinned">Not pinned (recorded on first connection)</string>
+    <string name="ssh_host_key_reset">Reset</string>
+    <string name="ssh_host_key_changed_hint">Host key changed (possible MITM). Reset the pinned fingerprint in the SSH/receiver config</string>
     <!--File Encrypt/Decrypt-->
     <string name="hardware_file_encryption_and_decryption">File encryption and decryption (Hardware level)</string>
     <string name="software_file_encryption_and_decryption">File encryption and decryption (Software level)</string>

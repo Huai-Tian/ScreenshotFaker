@@ -2,6 +2,7 @@ package fake.screenshot.wrappers
 
 import android.content.Context
 import android.os.Environment
+import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
 import fake.screenshot.defense.KeyVault
 import fake.screenshot.defense.SensitiveStore
@@ -343,7 +344,12 @@ object DaemonManager {
                 context = appContext,
                 key = "screenRecord_duration",
                 defaultValue = "180"
-            )
+            ).let {
+                // duration 经 daemon.cpp:1396-1402 原样拼接进 sh -c（非末段
+                // 未经 shell_quote）；UI 侧已有 isDigitsOnly 门，此处纵深
+                // 校验同语义（纯数字），防 DataStore 被篡改或 UI 回归引入元字符
+                if (it.isNotEmpty() && it.isDigitsOnly()) it else "180"
+            }
             val suffix = ConfigManager.getDataOnce(
                 context = appContext,
                 key = "screenRecord_suffix",
@@ -439,10 +445,12 @@ object DaemonManager {
                 .let { if (it) "audio_source=mic" else "" }
             // SSH 隧道模式下 server 只监听回环，防止局域网直连绕过隧道
             val tcpLocalOnly = if (sshEnabled) "tcp_local_only=true" else ""
-            // 共享认证密码：DK 第二层加密存储（防 root-as-uid 提取）
+            // 共享认证密码：DK 第二层加密存储（防 root-as-uid 提取）；
+            // 经 env 递交（server 侧 auth_password_env=VAR 消费）——不进
+            // argv/cmdline、不进 daemon 内存中的命令快照明文
             val authPassword =
                 SensitiveStore.getSensitive(appContext, "screenShare_password", "")
-                    .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
+                    .let { if (it.isEmpty()) "" else "auth_password_env=SF_SHARE_PWD" }
             val base =
                 "CLASSPATH=/data/local/tmp/FullRandomName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
 
@@ -489,7 +497,20 @@ object DaemonManager {
                 "ScreenshotFaker"
             )
             val remotePort = ConfigManager.getDataOnce(appContext, "ssh_tunnel_remote_port", 0)
-            listOf(enabled, address, port, name, password, remotePort).joinToString("\u001F")
+            // 主机密钥指纹（app 侧 TOFU 采纳的 SHA-256 hex；空 = 尚未固定）：
+            // daemon 侧隧道握手时强制校验，防 MITM 伪装服务器截获共享流。
+            // 空 = 首次使用，daemon 侧自行采纳并本地持久化（纪元一致时生效）
+            val hostKey = SensitiveStore.getSensitive(
+                appContext, SensitiveStore.sshHostKeyStoreKey(address, port), ""
+            )
+            // 指纹纪元（设置页"重置指纹"自增）：daemon 据此丢弃旧纪元的本地
+            // 缓存条目——否则用户换钥后重置了 app 侧指纹，daemon 仍按旧指纹
+            // 拒绝连接（app 重置而 daemon 不知情，行为分裂）
+            val hostKeyEpoch = runCatching {
+                ConfigManager.getDataOnce(appContext, "ssh_hostkey_epoch", 0L)
+            }.getOrDefault(0L)
+            listOf(enabled, address, port, name, password, remotePort, hostKey, hostKeyEpoch)
+                .joinToString("\u001F")
         }
         val otherOptions = suspend {
             val relayPath =
@@ -514,6 +535,11 @@ object DaemonManager {
             // root 模式下 daemon 过期时的可达擦除范围（shell 模式不可达，仅尽力）
             val appDataDir = appContext.applicationInfo.dataDir ?: ""
             val appUid = appContext.applicationInfo.uid
+            // 共享密码值：share_command 内只含 auth_password_env=SF_SHARE_PWD
+            // 变量名引用，值经此段下发——daemon 侧 spawn 时注入 env，全程
+            // 不进 argv/cmdline 与命令快照明文
+            val sharePwd =
+                SensitiveStore.getSensitive(appContext, "screenShare_password", "")
             listOf(
                 relayPath,
                 autoEncrypt,
@@ -521,7 +547,8 @@ object DaemonManager {
                 idleLimit.toString(),
                 idleDeadline.toString(),
                 appDataDir,
-                appUid.toString()
+                appUid.toString(),
+                sharePwd
             ).joinToString("\u001F")
         }
         val command =

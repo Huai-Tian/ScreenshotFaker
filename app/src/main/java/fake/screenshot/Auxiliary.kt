@@ -13,6 +13,15 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
 object Auxiliary {
+    // exec 系超时上限：子进程 stdout 写满管道缓冲（~64KB）且本端
+    // 未消费时，waitFor 永不返回（经典读写死锁）；root 授权弹窗
+    // 无人确认、Shizuku binder 无响应等也会无限挂起——超时后放弃
+    // 等待（子进程由 destroy 兜底终止），调用方按失败处理。120s
+    // 覆盖最长合法场景（守护脚本前台运行前的快速命令均为秒级；
+    // "sh watchPath" 类阻塞调用见各调用方，不受此影响——它们
+    // 依赖脚本自身退出语义，超时仅作死锁兜底）
+    private const val EXEC_TIMEOUT_MS = 120_000L
+
     private val suPaths = arrayOf(
         "/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sd/bin/su",
         "/vendor/bin/su", "/product/bin/su", "/data/local/xbin/su", "/data/local/bin/su"
@@ -65,7 +74,8 @@ object Auxiliary {
                 .run {
                     ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
                         .use { it.write(cmd.toByteArray()) }
-                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
+                    drainAndAwait(inputText = { inputStream.text.ifBlank { errorStream.text } },
+                        destroyAfter = { destroy() })
                 }
         } else if (isRootActivated) {
             ProcessBuilder("su")
@@ -73,8 +83,8 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
-                    waitFor() to inputStream.bufferedReader().use { it.readText() }
-                        .also { destroy() }
+                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        destroyAfter = { destroy() })
                 }
         } else {
             ProcessBuilder("sh")
@@ -82,7 +92,8 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(cmd.toByteArray()) }
-                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        destroyAfter = null)
                 }
         }
     }.getOrElse {
@@ -97,7 +108,8 @@ object Auxiliary {
                 .run {
                     ParcelFileDescriptor.AutoCloseOutputStream(outputStream)
                         .use { it.write(stdinData) }
-                    waitFor() to inputStream.text.ifBlank { errorStream.text }.also { destroy() }
+                    drainAndAwait(inputText = { inputStream.text.ifBlank { errorStream.text } },
+                        destroyAfter = { destroy() })
                 }
         } else if (isRootActivated) {
             ProcessBuilder("su", "-c", cmd)
@@ -105,8 +117,8 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(stdinData) }
-                    waitFor() to inputStream.bufferedReader().use { it.readText() }
-                        .also { destroy() }
+                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        destroyAfter = { destroy() })
                 }
         } else {
             ProcessBuilder("sh", "-c", cmd)
@@ -114,11 +126,52 @@ object Auxiliary {
                 .start()
                 .run {
                     outputStream.use { it.write(stdinData) }
-                    waitFor() to inputStream.bufferedReader().use { it.readText() }
+                    drainAndAwait(inputText = { inputStream.bufferedReader().use { it.readText() } },
+                        destroyAfter = null)
                 }
         }
     }.getOrElse {
         1 to it.stackTraceToString()
+    }
+
+    /**
+     * 先消费输出再等待退出（修复两类挂起）：
+     * 1. 读写死锁：旧实现 waitFor 在前、读输出在后——子进程 stdout
+     *    写满管道缓冲（~64KB）时阻塞在 write，waitFor 永不返回；
+     *    Shizuku 分支 errorStream 是独立管道，同样存在此问题
+     * 2. 无限挂起：root 授权弹窗无人确认 / Shizuku binder 无响应 /
+     *    daemon 自拷贝失败就地 daemonize（永不退出）——读流或等待
+     *    之一无限阻塞，调用方（含 startDaemon 的 mutex）永久卡死
+     *
+     * 读取放到独立线程与 waitFor 并行，先到者胜：正常路径读取完成 +
+     *    进程退出即返回；输出未完但超时到达则放弃等待（退出码按失败
+     *    处理），destroyAfter 兜底终止子进程/回收 Shizuku 进程对象
+     */
+    private fun drainAndAwait(
+        inputText: () -> String,
+        destroyAfter: (() -> Unit)?
+    ): Pair<Int, String> {
+        val output = StringBuilder()
+        val reader = Thread {
+            runCatching { output.append(inputText()) }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        val finished = runCatching {
+            reader.join(EXEC_TIMEOUT_MS)
+            reader.isAlive.not()
+        }.getOrDefault(false)
+        return if (finished) {
+            val code = runCatching { waitFor() }.getOrDefault(1)
+            destroyAfter?.invoke()
+            code to output.toString()
+        } else {
+            // 超时（死锁/挂起）：终止子进程回收资源，按失败返回。
+            // destroy 会令阻塞中的读流抛 IOException 结束读线程
+            destroyAfter?.invoke()
+            -1 to output.toString()
+        }
     }
 
     fun execGetPid(cmd: String): Int? {
@@ -217,6 +270,16 @@ object Auxiliary {
 
     fun getCurrentTimestampSeconds(): Long = System.currentTimeMillis() / 1000
 
+    /**
+     * SHA-256 摘要的 hex 表示（小写，64 字符）。
+     * 用于 SSH 主机密钥指纹（TOFU）：指纹是公开值（公钥哈希），仅作
+     * 比对/展示，不涉密；失败返回空串（调用方按校验失败处理，fail-closed）
+     */
+    fun sha256Hex(data: ByteArray): String = runCatching {
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(data).joinToString("") { "%02x".format(it) }
+    }.getOrDefault("")
+
     fun isTimestampValid(timestamp: Long, allowedSkewSeconds: Long = 10): Boolean {
         val now = getCurrentTimestampSeconds()
         return kotlin.math.abs(now - timestamp) <= allowedSkewSeconds
@@ -291,6 +354,35 @@ object Auxiliary {
 
     /** [getRandomString] 的别名（安全语义显式化场景使用）。 */
     fun getSecureRandomString(length: Int): String = getRandomString(length)
+
+    /**
+     * 高强度随机密码（大小写字母 + 数字 + 特殊字符，密码学安全）。
+     * 特殊字符集刻意避开 shell 元字符与引号（' " ` $ \ ; & | < > ( )
+     * 空白），避免密码进入任何命令行/env 构造时的转义负担；避开
+     * 视觉易混淆字符（0/O、1/l/I）。每组至少含一个类别的字符，
+     * 洗牌防类别位置固定。
+     */
+    fun getStrongPassword(length: Int): String {
+        require(length >= 8)
+        val upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+        val lower = "abcdefghijkmnpqrstuvwxyz"
+        val digits = "23456789"
+        val symbols = "!@#%^*-=+?~"
+        val all = upper + lower + digits + symbols
+        fun pick(set: String) = set[secureRandom.nextInt(set.length)]
+        val chars = mutableListOf(
+            pick(upper), pick(lower), pick(digits), pick(symbols)
+        )
+        repeat(length - chars.size) { chars.add(pick(all)) }
+        // Fisher-Yates 洗牌（SecureRandom 驱动）
+        for (i in chars.size - 1 downTo 1) {
+            val j = secureRandom.nextInt(i + 1)
+            val tmp = chars[i]
+            chars[i] = chars[j]
+            chars[j] = tmp
+        }
+        return chars.joinToString("")
+    }
 
     @SuppressLint("BlockedPrivateApi")
     fun View.enableScreenshotExclusion(): Boolean {

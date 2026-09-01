@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <sys/prctl.h>
 #include <dirent.h>
+#include <cctype>
 
 string capture_gesture;
 string capture_command;
@@ -10,6 +11,10 @@ string record_gesture;
 string record_command;
 string share_gesture;
 string share_command;
+// 共享密码值（config 下发，config_mutex 保护）：share_command 内只含
+// auth_password_env=SF_SHARE_PWD 变量名引用，spawn 时经 env 注入——
+// 不进 argv/cmdline，命令快照（日志触发启动时重组）亦不含明文
+string share_password;
 string ssh_options;
 atomic_bool auto_encrypt = false;
 // 自定义输出文件 mtime（epoch 秒；-1 = 禁用）。
@@ -47,6 +52,11 @@ string app_data_dir;            // config 下发，root 模式过期擦除范围
 atomic<int> app_uid{-1};
 string g_self_path;             // 自身可执行文件路径（tmp 随机名或 apk 内路径）
 string g_anchor_path;           // 看门狗锚点文件路径（密钥派生随机名）
+// SSH 主机密钥 TOFU 已信任指纹的持久化文件路径（密钥派生随机名，锚点
+// 同构）：daemon 侧独立采纳的指纹存于此（app 侧指纹经 config 下发时
+// 为权威；下发为空时以本文件为准，防"每次连接都当首次"的 TOFU 失效）。
+// 正常 stop/SIGTERM 保留（跨 daemon 重启的持久信任），仅 detonate 清除
+string g_knownhosts_path;
 mutex anchor_mutex;
 // 录屏明文 tmp 路径（detonate/SIGTERM 时删除，防明文残留）。
 // 双表示：std::string 供线程内加锁访问；定长缓冲 + sig_atomic 长度供
@@ -284,6 +294,107 @@ static string record_mark_path_for_key(const vector<unsigned char> &key) {
     return string("/data/local/tmp/.") + hex;
 }
 
+// 任意缓冲区的 SHA-256 hex（小写 64 字符）：SSH 主机密钥指纹（TOFU）用。
+// 失败返回空串（调用方按校验失败处理，fail-closed）
+static string sha256_hex(const void *data, size_t len) {
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen = 0;
+    if (EVP_Digest(data, len, md, &mdlen, EVP_sha256(), nullptr) != 1 || mdlen < 32) {
+        return "";
+    }
+    char hex[65];
+    for (int i = 0; i < 32; ++i) snprintf(hex + i * 2, 3, "%02x", md[i]);
+    hex[64] = '\0';
+    return string(hex);
+}
+
+// SSH TOFU 已信任指纹文件路径：同一密钥哈希的第 17..24 字节 hex——与
+// 锚点/录屏指针同构（仅持密钥者可推导文件名，'.' 前缀对 ls 默认隐藏），
+// 三者哈希字节段互不重叠
+static string knownhosts_path_for_key(const vector<unsigned char> &key) {
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen = 0;
+    if (EVP_Digest(key.data(), key.size(), md, &mdlen, EVP_sha256(), nullptr) != 1 || mdlen < 24) {
+        return "/data/local/tmp/.kh";
+    }
+    char hex[17];
+    for (int i = 0; i < 8; ++i) snprintf(hex + i * 2, 3, "%02x", md[16 + i]);
+    hex[16] = '\0';
+    return string("/data/local/tmp/.") + hex;
+}
+
+// SSH TOFU 已信任指纹的持久化载体（密钥加密，锚点同款原子写）。
+// 明文格式："epoch\n" + 若干行 "host:port fingerprint"：
+// - epoch 与 app 侧 ssh_hostkey_epoch 对齐（设置页"重置指纹"自增）：
+//   app 重置后 daemon 丢弃旧纪元条目，避免两侧行为分裂（app 已放行、
+//   daemon 仍按旧指纹拒绝）
+// - 条目按 host:port 隔离：切换服务器各自独立 TOFU
+// DK 轮换后本文件解密失败 → 视为无条目（重新首次信任，fail-open 可接受：
+// 攻击者须先达成 DK 轮换这一更强的攻破条件）
+struct KnownHosts {
+    long long epoch = -1;                    // -1 = 无文件/解密失败/格式非法
+    map<string, string> fp;                  // "host:port" -> 指纹 hex
+};
+
+static KnownHosts known_hosts_load() {
+    KnownHosts kh;
+    FILE *f = fopen(g_knownhosts_path.c_str(), "rb");
+    if (!f) return kh;
+    vector<unsigned char> data;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        data.insert(data.end(), buf, buf + n);
+    }
+    fclose(f);
+    string plain = decrypt_data(g_key, data);
+    if (plain.empty()) return kh;            // 存在但解不开 = DK 轮换/篡改
+    auto lines = split(plain, '\n');
+    if (lines.empty()) return kh;
+    kh.epoch = strtoll(lines[0].c_str(), nullptr, 10);
+    for (size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i].empty()) continue;
+        auto kv = split(lines[i], ' ');
+        // 严格格式：两段、host:port 含端口、指纹 64 位 hex——畸形行跳过
+        //（毒行不引爆：指纹文件非看门狗信任链，损坏只降级为重新首次信任）
+        if (kv.size() != 2 || kv[1].size() != 64) continue;
+        if (kv[0].find(':') == string::npos) continue;
+        bool hex_ok = true;
+        for (char c: kv[1]) {
+            if (!isxdigit(static_cast<unsigned char>(c))) {
+                hex_ok = false;
+                break;
+            }
+        }
+        if (!hex_ok) continue;
+        kh.fp[kv[0]] = kv[1];
+    }
+    return kh;
+}
+
+// 原子写（tmp + rename，锚点同款协议）。g_key 长度守卫同 anchor_save：
+// 清钥与共享 supervisor 并发时拒绝用零钥落盘毒文件
+static void known_hosts_save(const KnownHosts &kh) {
+    if (g_key.size() != KEY_LEN) return;
+    string plain = to_string(kh.epoch);
+    for (const auto &e: kh.fp) {
+        plain += "\n" + e.first + " " + e.second;
+    }
+    vector<unsigned char> enc = encrypt_data(g_key, plain);
+    if (enc.empty()) return;
+    string tmp = g_knownhosts_path + ".t";
+    FILE *f = fopen(tmp.c_str(), "wb");
+    if (!f) return;
+    bool ok = fwrite(enc.data(), 1, enc.size(), f) == enc.size();
+    if (fclose(f) != 0) ok = false;
+    if (!ok) {
+        remove(tmp.c_str());
+        return;
+    }
+    chmod(tmp.c_str(), 0600);
+    rename(tmp.c_str(), g_knownhosts_path.c_str());
+}
+
 // 锚点文件内容（加密前）："deadline,lastwall,lastuptime[,deadline_uptime]"
 // 第四段 deadline_uptime（0/缺段 = 未启用）：错钟（wall < WC0_MIN）期间的
 // uptime 基准死线。/proc/uptime 由内核维护（root 冻不动 jiffies）且单调、
@@ -456,8 +567,19 @@ bool encrypt_file(const vector<unsigned char> &key, const string &plain_path,
     return ok;
 }
 
-// spawn shell 命令，stdout/stderr 重定向 /dev/null（防止管道写满阻塞子进程）
-pid_t spawn_shell_command(const string &command) {
+// spawn shell 命令，stdout/stderr 重定向 /dev/null（防止管道写满阻塞子进程）。
+// extra_env：附加环境变量（KEY=VALUE 形式）——共享密码经 env 递交（不进
+// argv/cmdline；命令快照内只有变量名引用），空 vector 时行为与旧签名一致
+static pid_t spawn_shell_command(const string &command, const vector<string> &extra_env = {}) {
+    vector<string> env_strings;
+    env_strings.reserve(extra_env.size() + 16);
+    for (char **e = environ; e && *e; ++e) env_strings.emplace_back(*e);
+    for (const auto &kv: extra_env) env_strings.push_back(kv);
+    vector<char *> envp;
+    envp.reserve(env_strings.size() + 1);
+    for (auto &e: env_strings) envp.push_back(const_cast<char *>(e.c_str()));
+    envp.push_back(nullptr);
+
     vector<string> args = {"/system/bin/sh", "-c", command};
     vector<char *> argv;
     argv.reserve(args.size() + 1);
@@ -470,7 +592,7 @@ pid_t spawn_shell_command(const string &command) {
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     pid_t pid = -1;
-    int ret = posix_spawn(&pid, argv[0], &actions, &attr, argv.data(), environ);
+    int ret = posix_spawn(&pid, argv[0], &actions, &attr, argv.data(), envp.data());
     posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     if (ret != 0) return -1;
@@ -707,7 +829,8 @@ struct SshTunnel {
     }
 
     bool start(const string &host, int port, const string &user, const string &password,
-               int remote_port, int local_server_port) {
+               int remote_port, int local_server_port,
+               const string &expected_fp = string(), string *observed_fp = nullptr) {
         local_port = local_server_port;
         if (libssh2_init(0) != 0) return false;
         do {
@@ -728,6 +851,20 @@ struct SshTunnel {
             if (!session) break;
             libssh2_session_set_blocking(session, 1);
             if (libssh2_session_handshake(session, sock) != 0) break;
+            // —— 主机密钥 TOFU 校验（app 侧 JSch 同语义）——
+            // expected_fp 非空时指纹不匹配 = MITM/服务器换钥 → 拒绝
+            //（fail-closed：屏幕流经此隧道外发，放行即实时泄露）。空 =
+            // 首次使用，由调用方（supervisor）采纳并持久化。取不到主机
+            // 密钥/摘要失败同样拒绝——无法校验的连接不给建立
+            {
+                size_t hk_len = 0;
+                const char *hk = libssh2_session_hostkey(session, &hk_len, nullptr);
+                string fp = (hk && hk_len > 0)
+                            ? sha256_hex(hk, hk_len) : string();
+                if (fp.empty()) break;
+                if (observed_fp) *observed_fp = fp;
+                if (!expected_fp.empty() && expected_fp != fp) break;
+            }
             if (libssh2_userauth_password(session, user.c_str(), password.c_str()) != 0) break;
             listener = libssh2_channel_forward_listen_ex(session, nullptr, remote_port, nullptr,
                                                          16);
@@ -892,7 +1029,8 @@ struct SshTunnel {
 // 快照当前共享配置（config 线程与 supervisor 之间的数据竞争防护）
 bool build_share_snapshot(string &cmd, int &local_port, bool &ssh_enabled, string &ssh_host,
                           int &ssh_port, string &ssh_user, string &ssh_pass, int &ssh_remote_port,
-                          vector<unsigned char> &server_data) {
+                          vector<unsigned char> &server_data,
+                          string &ssh_expected_fp, long long &ssh_hk_epoch) {
     string share_cmd_copy, ssh_copy;
     {
         lock_guard<mutex> lock(config_mutex);
@@ -909,6 +1047,11 @@ bool build_share_snapshot(string &cmd, int &local_port, bool &ssh_enabled, strin
         ssh_user = sp.size() > 3 ? sp[3] : "";
         ssh_pass = sp.size() > 4 ? sp[4] : "";
         ssh_remote_port = sp.size() > 5 ? static_cast<int>(strtol(sp[5].c_str(), nullptr, 10)) : 0;
+        // 第 7 段：app 侧 TOFU 已固定的主机密钥指纹（空 = 未固定，本侧
+        // 首次信任）；第 8 段：指纹纪元（app 侧"重置指纹"自增，与本地
+        // 持久化条目比对，旧纪元条目作废）。旧版 app 缺省兼容（-1 = 未知）
+        ssh_expected_fp = sp.size() > 6 ? sp[6] : "";
+        ssh_hk_epoch = sp.size() > 7 ? strtoll(sp[7].c_str(), nullptr, 10) : -1;
     }
     // 从 base 命令提取 tcp_port（server 的本地监听端口）
     size_t p = share_cmd_copy.find("tcp_port=");
@@ -944,8 +1087,11 @@ void share_supervisor_main() {
     int local_port = 0, ssh_port = 22, ssh_remote_port = 0;
     bool ssh_enabled = false;
     vector<unsigned char> server_data;
+    string ssh_expected_fp;
+    long long ssh_hk_epoch = -1;
     if (!build_share_snapshot(cmd, local_port, ssh_enabled, ssh_host, ssh_port, ssh_user,
-                              ssh_pass, ssh_remote_port, server_data)) {
+                              ssh_pass, ssh_remote_port, server_data,
+                              ssh_expected_fp, ssh_hk_epoch)) {
         share_running.store(false);
         return;
     }
@@ -972,7 +1118,22 @@ void share_supervisor_main() {
     }
     SshTunnel tunnel;
     if (ssh_enabled) {
-        if (!tunnel.start(ssh_host, ssh_port, ssh_user, ssh_pass, ssh_remote_port, local_port)) {
+        // —— 主机密钥 TOFU：期望指纹的解析顺序 ——
+        // ① app 侧固定指纹（config 下发）非空 → 权威，直接用于校验
+        // ② 为空（未固定/锁定态）→ 回退本地持久化条目（纪元一致才有效：
+        //    app 侧重置过指纹 = 纪元已变 = 旧条目作废，重新首次信任）
+        // ③ 都没有 → 首次使用：本次放行，连接成功后采纳并本地持久化——
+        //    否则 daemon 触发的共享（日志手势，不经 app UI）每次连接都是
+        //    "首次"，TOFU 对该路径形同虚设（MITM 可长期驻留）
+        KnownHosts kh = known_hosts_load();
+        if (kh.epoch != ssh_hk_epoch) kh.fp.clear();
+        string host_id = ssh_host + ":" + to_string(ssh_port);
+        string effective_fp = !ssh_expected_fp.empty() ? ssh_expected_fp
+                                                       : (kh.fp.count(host_id) ? kh.fp[host_id]
+                                                                               : string());
+        string observed_fp;
+        if (!tunnel.start(ssh_host, ssh_port, ssh_user, ssh_pass, ssh_remote_port, local_port,
+                          effective_fp, &observed_fp)) {
             remove(server_file.c_str());
             {
                 lock_guard<mutex> lock(record_mutex);
@@ -981,10 +1142,30 @@ void share_supervisor_main() {
             share_running.store(false);
             return;
         }
+        // 连接成功：对齐本地持久化（首次采纳 / 刷新为当前观测值——app 固定
+        // 指纹为权威，本地条目与其一致可消除两侧状态漂移）。写失败无害：
+        // 下次连接回退 ②/③ 重新校验/采纳
+        if (!observed_fp.empty()) {
+            kh.epoch = ssh_hk_epoch;
+            kh.fp[host_id] = observed_fp;
+            known_hosts_save(kh);
+        }
     }
     int fast_exit = 0;
     while (!share_stop_requested.load()) {
-        pid_t pid = spawn_shell_command(cmd);
+        // 共享密码经 env 注入（cmd 内只含 auth_password_env=SF_SHARE_PWD
+        // 变量名引用）：值不进 argv/cmdline，app_process 侧 System.getenv
+        // 消费。config_mutex 下快照（与 build_share_snapshot 同竞争域）
+        string share_pwd_copy;
+        {
+            lock_guard<mutex> lock(config_mutex);
+            share_pwd_copy = share_password;
+        }
+        vector<string> share_env;
+        if (!share_pwd_copy.empty()) {
+            share_env.push_back("SF_SHARE_PWD=" + share_pwd_copy);
+        }
+        pid_t pid = spawn_shell_command(cmd, share_env);
         if (pid <= 0) {
             this_thread::sleep_for(chrono::seconds(1));
             continue;
@@ -1119,8 +1300,9 @@ void toggle_share() {
         for (int i = 0; i < 50 && process_alive(cleaner); ++i) usleep(100000);
     }
 
-    // 5. 删锚点与自拷贝（自拷贝 unlink 于运行中安全：inode 存活至进程退出）
+    // 5. 删锚点、TOFU 已信任指纹与自拷贝（自拷贝 unlink 于运行中安全：inode 存活至进程退出）
     if (!g_anchor_path.empty()) remove(g_anchor_path.c_str());
+    if (!g_knownhosts_path.empty()) remove(g_knownhosts_path.c_str());
     if (g_self_path.rfind("/data/local/tmp/", 0) == 0) {
         remove(g_self_path.c_str());
     }
@@ -1787,7 +1969,11 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             result += "[Port= " + get(2) + "] ";
             result += "[Name= " + get(3) + "] ";
             result += "[Password= " + get(4) + "] ";
-            result += "[RemotePort= " + get(5) + "]";
+            result += "[RemotePort= " + get(5) + "] ";
+            // TOFU：app 侧固定指纹（空 = 未固定，本侧首次信任）与纪元。
+            // 指纹非敏感（公钥哈希），显示截断前 16 hex 供核对
+            result += "[HostKey= " + (get(6).empty() ? "-" : get(6).substr(0, 16)) + "] ";
+            result += "[KeyEpoch= " + get(7) + "]";
             return result;
         };
         auto processOtherOptions = [](const string &text, const bool &state) -> string {
@@ -2070,6 +2256,9 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                 // 换算失败（空/格式非法）→ 禁用，这是防崩兜底而非校验
                 custom_mtime_raw = getOther(2);
                 custom_mtime.store(parse_defined_mtime(custom_mtime_raw));
+                // 第 8 段：共享密码值（share_command 内 auth_password_env 引用，
+                // spawn 时注入 env；空 = 无密码，旧版本缺省兼容）
+                share_password = getOther(7);
                 ssh_options = std::move(partsD[2]);
                 capture_gesture = std::move(cap_gs);
                 record_gesture = std::move(rec_gs);
@@ -2208,6 +2397,8 @@ int main(int argc, char *argv[]) {
     g_anchor_path = anchor_path_for_key(key);
     // 录屏明文 tmp 指针文件路径（同锚点构型，哈希不同字节段，不冲突）
     g_rec_mark = record_mark_path_for_key(key);
+    // SSH TOFU 已信任指纹文件路径（同锚点构型，哈希不同字节段，不冲突）
+    g_knownhosts_path = knownhosts_path_for_key(key);
     // 孤儿明文回收：上一实例若被 SIGKILL（stopDaemon 兜底升级 / OOM），
     // 所有 handler 清理被跳过，指针文件残留 → 回收其指向的明文 tmp。
     // 路径白名单校验（/data/local/tmp/ 前缀 + 无目录穿越段 + 无符号

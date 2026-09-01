@@ -66,6 +66,8 @@ class ResourceTableParser(data: ByteArray) {
     init {
         require(u16(0) == RES_TABLE_TYPE) { "not a resources.arsc" }
         val headerSize = u16(2)
+        // 表头至少 12 字节（type/headerSize/size/packageCount）才有后续解析意义
+        require(headerSize in 8..d.size) { "arsc header size out of range: $headerSize" }
         var pos = headerSize
         var pkgName = ""
 
@@ -91,8 +93,10 @@ class ResourceTableParser(data: ByteArray) {
     /** ResTable_package 头 offset 12 处的 256 字节 UTF-16LE 包名（\0 截断）。 */
     private fun parsePackageName(pkgStart: Int): String {
         val builder = StringBuilder()
+        // 读取范围 clamp 到文件末尾：外层只校验 chunk 边界，包名固定字段
+        // （头 12 + 名 256）可能超出小 chunk 声明
         var i = pkgStart + 12
-        val end = i + 256
+        val end = minOf(i + 256, d.size - 1)
         while (i + 1 < end) {
             val c = ((d[i].toInt() and 0xFF) or ((d[i + 1].toInt() and 0xFF) shl 8))
             if (c == 0) break
@@ -164,6 +168,10 @@ class ResourceTableParser(data: ByteArray) {
     }
 
     private fun parseTypeChunk(chunkStart: Int, headerSize: Int, pkgId: Int) {
+        // chunk 固定头 20 字节（id/flags/reserved + entryCount + entriesStart）
+        // 是本函数全部固定偏移读取的前提；headerSize 不足的损坏 chunk 跳过
+        if (headerSize < 20) return
+        val chunkEnd = chunkStart + u32(chunkStart + 4)
         val typeId = d[chunkStart + 8].toInt() and 0xFF
         val flags = d[chunkStart + 9].toInt() and 0xFF
         val entryCount = u32(chunkStart + 12)
@@ -171,11 +179,20 @@ class ResourceTableParser(data: ByteArray) {
         val indicesStart = chunkStart + headerSize
         val entriesAbs = chunkStart + entriesStart
 
+        // 偏移表与条目区均在 chunk 范围内是 record() 全部读取的前提：
+        // entryCount/entriesStart/offset 来自文件，越界值静默采用会把
+        // 无关字节解析成 ResTable_entry（错误补丁槽位 → 写坏其他字段）
+        val indicesBytes = if (flags and TYPE_FLAG_SPARSE != 0) entryCount * 4
+        else entryCount * (if (flags and TYPE_FLAG_OFFSET16 != 0) 2 else 4)
+        if (entryCount < 0 || entriesStart < 0 ||
+            indicesStart + indicesBytes > chunkEnd || entriesAbs > chunkEnd
+        ) return
+
         // ResTable_type 固定字段（header(8)+id/flags/reserved(4)+entryCount(4)+entriesStart(4)）
         // 之后紧跟 ResTable_config；注意 headerSize 已把 config 计入（= 20 + config.size），
         // 因此 config 起始是固定偏移 20，不能用 headerSize，否则会读到条目偏移表。
         val configStart = chunkStart + 20
-        val density = if (configStart + CONFIG_DENSITY_OFFSET + 2 <= chunkStart + u32(chunkStart + 4)) {
+        val density = if (configStart + CONFIG_DENSITY_OFFSET + 2 <= chunkEnd) {
             u16(configStart + CONFIG_DENSITY_OFFSET)
         } else {
             0
@@ -224,6 +241,8 @@ class ResourceTableParser(data: ByteArray) {
         offsetSlotU32: Boolean,
     ) {
         // ResTable_entry: u16 size, u16 flags, u32 key；其后紧跟 Res_value
+        // 固定 16 字节读取范围校验（复杂条目 map 首部更长，16 覆盖共同前缀）
+        if (entry < 0 || entry + 16 > d.size) return
         val entryFlags = u16(entry + 2)
         if (entryFlags and ENTRY_FLAG_COMPLEX != 0) return // 数组等复杂条目没有文件路径
         val dataType = d[entry + 11].toInt() and 0xFF
@@ -246,8 +265,16 @@ class ResourceTableParser(data: ByteArray) {
         val utf8 = (flags and UTF8_FLAG) != 0
         val offsets = IntArray(stringCount) { u32(start + 28 + it * 4) }
         val dataStart = start + stringsStart
+        // 边界校验：chunk/偏移表/字符串数据起点越界时按空池处理（损坏
+        // 输入的受控降级——调用方按"资源无路径"处理，不再产出错误解析）
+        if (chunkSize <= 0 || start + chunkSize > d.size || dataStart > d.size ||
+            start + 28 + stringCount * 4 > d.size
+        ) {
+            return Pool(emptyList(), if (chunkSize > 0) chunkSize else 0)
+        }
         val strings = ArrayList<String>(stringCount)
         for (offset in offsets) {
+            if (offset < 0 || dataStart + offset > d.size) continue
             val sb = ByteBuffer.wrap(d, dataStart + offset, d.size - dataStart - offset)
                 .order(ByteOrder.LITTLE_ENDIAN)
             strings.add(if (utf8) decodeUtf8(sb) else decodeUtf16(sb))

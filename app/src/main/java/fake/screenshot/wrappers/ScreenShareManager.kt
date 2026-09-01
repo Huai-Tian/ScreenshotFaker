@@ -3,8 +3,11 @@ package fake.screenshot.wrappers
 import android.content.ComponentName
 import android.content.Context
 import android.service.quicksettings.TileService
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.UserInfo
 import fake.screenshot.Auxiliary
 import fake.screenshot.R
 import fake.screenshot.defense.DefenseProtocol
@@ -92,12 +95,64 @@ object ScreenShareManager {
                 appContext, "ssh_tunnel_user_password",
                 "ScreenshotFaker"
             )
+            // —— 主机密钥 TOFU（Trust On First Use）——
+            // 旧实现 StrictHostKeyChecking=no 对任意主机密钥放行：局域网/
+            // 网络路径上的 MITM 可伪装 SSH 服务器，截获凭据并把远程转发
+            // 指向自己 → 屏幕流实时泄露。TOFU：首次连接记录主机密钥指纹
+            //（SHA-256，SensitiveStore DK 加密，按 host:port 隔离），此后
+            // 指纹变化即拒绝连接（服务器换钥需在设置页显式重置）
+            val hostKeyStoreKey = SensitiveStore.sshHostKeyStoreKey(address, port)
+            // fail-closed：指纹已固定（_sec 密文存在）但本会话不可解（锁定态）
+            // → 拒绝连接。若放行：解不出已固定指纹 → 退化为"首次连接"→
+            // 采纳 MITM 密钥。凭据在锁定态本就取不到（错误默认值），正常
+            // 服务器认证必败，唯一能"连上"的是来者不拒的 MITM——恰是要防的
+            if (SensitiveStore.isSensitiveConfigured(appContext, hostKeyStoreKey) &&
+                SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "").isEmpty()
+            ) {
+                return InitResult.SshFailed("locked_no_credentials")
+            }
+            val storedFingerprint =
+                SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
+            // check() 在 JSch 连接线程上同步回调（非挂起上下文）：已固定指纹
+            // 预读到局部量，连接成功后再回写采纳的指纹（putSensitive 是挂起函数）
+            var observedFingerprint: String? = null
+            val hostKeyRepository = object : HostKeyRepository {
+                override fun check(host: String, key: ByteArray): Int {
+                    val fingerprint = Auxiliary.sha256Hex(key)
+                    // 摘要失败 = 无法判定 = 拒绝（fail-closed，不盲信）
+                    if (fingerprint.isEmpty()) return HostKeyRepository.CHANGED
+                    observedFingerprint = fingerprint
+                    return if (storedFingerprint.isEmpty() ||
+                        storedFingerprint == fingerprint
+                    ) HostKeyRepository.OK else HostKeyRepository.CHANGED
+                }
+
+                // 采纳/持久化由本函数在连接成功后统一处理（回调在非挂起线程）
+                override fun add(hostkey: HostKey?, userinfo: UserInfo?) {}
+                override fun remove(host: String?, type: String?) {}
+                override fun remove(host: String?, type: String?, key: ByteArray?) {}
+                override fun getKnownHostsRepositoryID(): String = "tofu"
+                override fun getHostKey(): Array<HostKey> = emptyArray()
+                override fun getHostKey(host: String?, type: String?): Array<HostKey> =
+                    emptyArray()
+            }
             try {
                 val jsch = JSch()
                 val session = jsch.getSession(name, address, port)
                 session.setPassword(password.toByteArray(Charsets.UTF_8))
-                session.setConfig("StrictHostKeyChecking", "no")
+                session.setHostKeyRepository(hostKeyRepository)
+                // "yes"：check 返回 OK 才放行；CHANGED（指纹变化 = MITM/换钥）
+                // 抛异常终止连接。绝不可用 "no"——其语义对 CHANGED 也自动
+                // 接受并覆盖，TOFU 校验形同虚设
+                session.setConfig("StrictHostKeyChecking", "yes")
                 session.connect(8000)
+                // 首次连接（TOFU 采纳）或指纹不变：持久化当前指纹。
+                // mismatch 时 connect 必已抛异常，不会走到这里
+                observedFingerprint?.let { fingerprint ->
+                    if (fingerprint != storedFingerprint) {
+                        SensitiveStore.putSensitive(appContext, hostKeyStoreKey, fingerprint)
+                    }
+                }
                 // 旧连接先行断开：cp 失败等路径下 initialized 保持 false，
                 // 用户重试会再次进入本分支——直接覆盖 sshSession 会让旧
                 // JSch 连接（无 GC 收尾保证）驻留 TCP；连接失败分支同理
@@ -107,7 +162,12 @@ object ScreenShareManager {
                 sshSession?.disconnect()
                 sshSession = null
                 return InitResult.SshFailed(
-                    e.message ?: e.javaClass.simpleName
+                    // 已有固定指纹且本轮观测不同 = 主机密钥变化（MITM/服务器
+                    // 换钥），与普通连接失败区分供磁贴副标题反馈
+                    if (storedFingerprint.isNotEmpty() &&
+                        observedFingerprint != null &&
+                        observedFingerprint != storedFingerprint
+                    ) "ssh_hostkey_changed" else (e.message ?: e.javaClass.simpleName)
                 )
             }
         }
@@ -132,6 +192,9 @@ object ScreenShareManager {
             // 共享 relayName 被后续会话覆盖的极端交错下，本会话自引用
             // 仍一致，停止清理不脱钩
             val sessionName = relayName
+            // 新会话清除上一会话的错误残留（server_exited_repeatedly 等
+            // 不应显示到下一次启动失败为止）
+            lastError = null
             val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
             val enableControl = ConfigManager.getDataOnce(appContext, "screenShare_control", true)
                 .let { "control=$it" }
@@ -194,9 +257,12 @@ object ScreenShareManager {
                 .let { if (it) "audio_source=mic" else "" }
             val tcpLocalOnly =
                 if (sshSession != null) "tcp_local_only=true" else ""
+            // 共享密码经环境变量递交（server 侧 auth_password_env=VAR）：
+            // 不进 argv/cmdline（对 shell/root 可见）、不进守护脚本明文
+            // （脚本仅含变量名引用，由启动时刻的 env 注入值）
             val authPassword =
                 SensitiveStore.getSensitive(appContext, "screenShare_password", "")
-                    .let { if (it.isEmpty()) "" else "auth_password=${shellQuote(it)}" }
+                    .let { if (it.isEmpty()) "" else "auth_password_env=SF_SHARE_PWD" }
             // fail-closed：共享密码已配置（_sec 密文存在）但本会话不可解
             // （锁定态，DK 未组装）→ 中止启动。静默降级为无认证共享等于
             // 把认证控制 fail-open 给任何接收者。此时 server 尚未拉起，
@@ -244,8 +310,11 @@ object ScreenShareManager {
                     ConfigManager.getDataOnce(appContext, "ssh_tunnel_remote_port", 0)
                 val remotePort =
                     if (configuredRemotePort in 1024..65535) configuredRemotePort else localPort
-                // 远程转发指向本机端口，server 重启后重新监听同一端口，转发持续有效
+                // 远程转发指向本机端口，server 重启后重新监听同一端口，转发持续有效。
+                // 失败（端口被占/服务器拒绝）时 server 照常启动但共享不可达——
+                // 记入 lastError 供磁贴副标题反馈，不再静默
                 runCatching { session.setPortForwardingR(remotePort, "127.0.0.1", localPort) }
+                    .onFailure { lastError = "ssh_forward_failed" }
             }
 
             // 清理残留：app 进程被杀后重启时，上一会话的守护循环与 server
@@ -267,6 +336,11 @@ object ScreenShareManager {
             // 不含任何工具特征字样
             val stopFlag = "/data/local/tmp/.s_$sessionName"
             val watchPath = "/data/local/tmp/.w_$sessionName.sh"
+            // 密码值：经 env 注入守护 sh，再传给 server 进程（auth_password_env
+            // 消费）。脚本内容只含变量名引用，明文不落盘、不进 argv/cmdline
+            val passwordValue =
+                if (authPassword.isEmpty()) ""
+                else SensitiveStore.getSensitive(appContext, "screenShare_password", "")
             // $$ 前缀（multi-dollar interpolation，Kotlin 2.2+ 默认启用）：
             // 前缀字符串内单 $ 为字面量、$$ 才触发 Kotlin 插值。
             // 仅 $标识符 形式（$STOP/$d/$n）需要前缀；$ 后跟标点
@@ -286,8 +360,12 @@ object ScreenShareManager {
                 "done",
                 $$"rm -f \"$STOP\" \"$$watchPath\" 2>/dev/null"
             ).joinToString("\n")
-            // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开
-            Auxiliary.exec("cat > $watchPath <<'RL_EOF'\n$script\nRL_EOF")
+            // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开；
+            // 随即 chmod 600 收紧（cat 创建默认 644，脚本虽不含明文密码，
+            // 仍无理由对同 uid 其他进程可读）
+            Auxiliary.exec(
+                "cat > $watchPath <<'RL_EOF'\n$script\nRL_EOF\nchmod 600 $watchPath"
+            )
 
             // stop 交错兜底：stopScreenShare 先清 relayRunning 再清理文件；
             // 本协程的写脚本→拉起是非挂起 exec 段，取消点只能落在其后的
@@ -299,8 +377,12 @@ object ScreenShareManager {
                 return@launch
             }
 
-            // 阻塞运行守护循环：用户停止或连续快速退出时返回
-            Auxiliary.exec("sh $watchPath")
+            // 阻塞运行守护循环：用户停止或连续快速退出时返回。
+            // 密码经 env（SF_SHARE_PWD）注入守护 sh，脚本内 serverCmd 展开
+            // 时传递给 app_process（cmdline 只含变量名，env 不进 cmdline）
+            val runCmd = if (passwordValue.isEmpty()) "sh $watchPath"
+            else "SF_SHARE_PWD=${shellQuote(passwordValue)} sh $watchPath"
+            Auxiliary.exec(runCmd)
             if (relayRunning) {
                 lastError = "server_exited_repeatedly"
             }
@@ -328,8 +410,10 @@ object ScreenShareManager {
         // 与 Screenshot/ScreenRecord 磁贴的初始化保持一致
         DaemonManager.init(context)
         DefenseProtocol.init(context)
-        Auxiliary.refreshShellState()
         scope.launch {
+            // refreshShellState 调 exec("command -v su")（binder 阻塞时可感知
+            // 卡顿）——挪进 IO 协程避免主线程 ANR（之前在 launch 之外同步执行）
+            Auxiliary.refreshShellState()
             toggleMutex.withLock {
                 if (relayRunning || isServerActuallyRunning()) {
                     // daemon 管理的共享（日志触发启动）经加密信道停止：app 侧
@@ -344,8 +428,15 @@ object ScreenShareManager {
                 lastError = if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
                     context.getString(R.string.no_permission)
                 } else {
-                    when (initializeInternal()) {
-                        is InitResult.SshFailed -> "ssh_connect_failed"
+                    when (val result = initializeInternal()) {
+                        is InitResult.SshFailed -> when (result.reason) {
+                            // 主机密钥变化（MITM/服务器换钥）：提示用户到 SSH 设置
+                            // 核对指纹，确认换钥后显式重置再重连——绝不自动采纳
+                            "ssh_hostkey_changed" -> "ssh_hostkey_changed"
+                            // 锁定态无凭据/无已固定指纹（DK 未组装，fail-closed）
+                            "locked_no_credentials" -> "locked_no_credentials"
+                            else -> "ssh_connect_failed"
+                        }
                         is InitResult.CopyFailed -> "copy_server_failed"
                         InitResult.Ok -> {
                             if (startScreenShareInternal()) null
