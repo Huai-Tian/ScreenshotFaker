@@ -3,6 +3,7 @@ package fake.screenshot.defense
 import android.content.Context
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
+import fake.screenshot.wrappers.OverlayServiceManager
 import fake.screenshot.wrappers.ScreenShareManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,8 @@ import kotlin.time.Duration.Companion.milliseconds
  * 0. 快照 idle 激活态（此后即将销毁一切密文，wipe 后无法再判定）；
  * 1. 停 app 侧屏幕共享（杀 relay 与守护脚本，防"销毁后仍在推流"；
  *    有界等待——exec 挂起时不得阻塞后续步骤，见 runBounded）；
+ * 1.5 停 overlay 悬浮窗（root 路线宿主进程独立于 app 进程，不停则
+ *    销毁后悬浮窗继续显示、输入监视通道继续运行）；
  * 2. 停守护进程（此时密钥/配置仍在，stop 依赖端口与信道密钥；同样有界）；
  * 3. 删 Keystore 条目（Tink 主密钥、硬件密钥）与密文文件（keyset、硬件 DK）；
  * 4. 删除密文配置并轮换 DataStore 文件随机名（同进程重建走新路径，
@@ -43,9 +46,10 @@ import kotlin.time.Duration.Companion.milliseconds
  * 验证器保留（门禁行为前后一致，不暴露"销毁发生过"），销毁幂等
  * （重复触发无副作用），每步独立容错。
  *
- * 层级例外（唯一向上引用点）：销毁必须停业务服务（共享/守护进程），
- * 因此本类引用 wrappers.DaemonManager/ScreenShareManager——这是
- * defense 包对业务层唯一的依赖方向，新增引用需先在此文档化理由。
+ * 层级例外（唯一向上引用点）：销毁必须停业务服务（共享/守护进程/
+ * 悬浮窗），因此本类引用 wrappers.DaemonManager/ScreenShareManager/
+ * OverlayServiceManager——这是 defense 包对业务层唯一的依赖方向，
+ * 新增引用需先在此文档化理由。
  */
 object DefenseProtocol {
 
@@ -128,6 +132,15 @@ object DefenseProtocol {
         // 1. 停 app 侧共享（有界：内部 exec 在 root 授权弹窗等情形会挂起，
         //    无界等待会吃尽 receiver 的广播超时预算，见 runBounded）
         runBounded(3000L) { runCatching { ScreenShareManager.stopScreenShare() } }
+
+        // 1.5 停 overlay 悬浮窗：root 路线宿主进程（su app_process/Shizuku
+        //     UserService）独立于 app 进程存续——不在此停止则胁迫销毁完成后
+        //     悬浮窗继续显示、GestureInputMonitor 输入监视通道继续运行、
+        //     FGS 状态仍上报"运行中"，用户以为已销毁而展示/监视未停。
+        //     stop 走 binder/stopService（root 路线同步 unbind + destroy 帧，
+        //     普通路线 stopService），无 exec 挂起面，无需有界包装；未启动
+        //     时为幂等 no-op（stopService 对未运行服务无副作用）
+        runCatching { OverlayServiceManager.stop(appContext) }
 
         // 2. 停守护进程（purge：顺带清扫 app 侧共享——app 侧清理依赖 shell
         //    特权，Shizuku 断连时由持特权的 daemon 兜底；stop 后其自身完成

@@ -141,6 +141,20 @@ object DaemonManager {
                 "pkill -TERM -f '$daemonFallbackPattern1'; " +
                         "pkill -TERM -f '$daemonFallbackPattern2'"
             )
+            if (purge) {
+                // purge 语义兜底：本路径（信道不可用）与"特权不可用"
+                // （Shizuku 断连，步骤 1 的 app 侧 stopScreenShare 杀不掉
+                // shell uid 的 relay）高度伴生，而上方两个 daemon pattern
+                // 刻意不匹配 relay 与 .w_ 守护脚本——不补杀则销毁序列
+                // 完成后守护循环 1s 续命、推流继续。与 stopScreenShare
+                // 名称丢失分支同款通配清理；特权可用时生效（exec 内部
+                // 按当前 shell/root 状态路由），无特权时尽力而为
+                Auxiliary.exec(
+                    "pkill -f /data/local/tmp/.w_ ; pkill -INT -f vendor.entry.Main; " +
+                            "sleep 1; pkill -KILL -f vendor.entry.Main; " +
+                            "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
+                )
+            }
             repeat(20) {
                 if (!daemonProcessAlive()) return true
                 delay(100.milliseconds)

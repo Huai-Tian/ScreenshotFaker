@@ -263,6 +263,11 @@ class ControlOverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        // onCreate 提前退出路径（Display 未就绪/已销毁时挂空通知后
+        // stopSelf 并 return）不初始化 windowManager——stopSelf 生效前的
+        // 配置变更（旋转/分屏）直接访问会抛 UninitializedProperty
+        // Exception 崩溃整个进程。onDestroy 已有同款守卫，此处对齐
+        if (!this::windowManager.isInitialized) return
         val metrics = windowManager.currentWindowMetrics
         val bounds = metrics.bounds
         screenWidth = bounds.width()

@@ -15,6 +15,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.CopyOnWriteArrayList
 
 object ScreenShareManager {
@@ -27,6 +29,17 @@ object ScreenShareManager {
     private var initialized = false
     var relayRunning = false
         private set
+
+    // toggle 互斥（磁贴/页面统一入口串行化）：双击落在 initializeInternal
+    // 的 SSH 连接窗口（最长 8s）内时，两次并发 init 各生成 relayName 后
+    // 覆盖共享字段（r1→r2），首个 relay 协程仍以 r1 写守护脚本并拉起
+    // server——停止只清理 r2，.w_r1 守护循环的 STOP 标记（.s_r1）永不
+    // 存在，1s 无限续命："停止"后 server 复活并持续推流。串行化后第二次
+    // toggle 等待首次完成，见到 relayRunning=true 走停止分支，清理对象
+    // 与拉起对象一致。stopScreenShare 供 DefenseProtocol 销毁序列直调，
+    // 不经此锁（withLock 非重入，锁内调用会死锁）；其"先清 relayRunning
+    // 再清理文件"的顺序保证与本协程 setup 段的交错安全（见拉起前复查）
+    private val toggleMutex = Mutex()
 
     @Volatile
     var lastError: String? = null
@@ -85,8 +98,13 @@ object ScreenShareManager {
                 session.setPassword(password.toByteArray(Charsets.UTF_8))
                 session.setConfig("StrictHostKeyChecking", "no")
                 session.connect(8000)
+                // 旧连接先行断开：cp 失败等路径下 initialized 保持 false，
+                // 用户重试会再次进入本分支——直接覆盖 sshSession 会让旧
+                // JSch 连接（无 GC 收尾保证）驻留 TCP；连接失败分支同理
+                sshSession?.disconnect()
                 sshSession = session
             } catch (e: Exception) {
+                sshSession?.disconnect()
                 sshSession = null
                 return InitResult.SshFailed(
                     e.message ?: e.javaClass.simpleName
@@ -106,7 +124,14 @@ object ScreenShareManager {
     private fun startScreenShareInternal(): Boolean {
         if (!(initialized && (Auxiliary.isShellActivated || Auxiliary.isRootActivated))) return false
         if (relayRunning) return true
+        // 先立标志再启动协程：协程体拉起前的 relayRunning 复查依赖标志
+        // 已就位（launch 后置存在体先跑的理论窗口）
+        relayRunning = true
         relayJob = scope.launch {
+            // 会话名快照：本协程的守护脚本/停止标记与自身会话绑定——
+            // 共享 relayName 被后续会话覆盖的极端交错下，本会话自引用
+            // 仍一致，停止清理不脱钩
+            val sessionName = relayName
             val localPort = ConfigManager.getDataOnce(appContext, "screenShare_port", 2345)
             val enableControl = ConfigManager.getDataOnce(appContext, "screenShare_control", true)
                 .let { "control=$it" }
@@ -190,7 +215,7 @@ object ScreenShareManager {
             // 入口类用中性名 vendor.entry.Main：ps/pgrep 的进程 cmdline
             // 不暴露 app 身份（fake.screenshot）与功能提示，内部实现包名亦不出现
             val base =
-                "CLASSPATH=/data/local/tmp/$relayName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
+                "CLASSPATH=/data/local/tmp/$sessionName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
             val args = listOf(
                 base,
                 enableControl,
@@ -240,8 +265,8 @@ object ScreenShareManager {
             val serverCmd = args.joinToString(" ")
             // 标记/脚本文件名带随机后缀且以 . 开头（ls 默认不可见），
             // 不含任何工具特征字样
-            val stopFlag = "/data/local/tmp/.s_$relayName"
-            val watchPath = "/data/local/tmp/.w_$relayName.sh"
+            val stopFlag = "/data/local/tmp/.s_$sessionName"
+            val watchPath = "/data/local/tmp/.w_$sessionName.sh"
             // $$ 前缀（multi-dollar interpolation，Kotlin 2.2+ 默认启用）：
             // 前缀字符串内单 $ 为字面量、$$ 才触发 Kotlin 插值。
             // 仅 $标识符 形式（$STOP/$d/$n）需要前缀；$ 后跟标点
@@ -264,6 +289,16 @@ object ScreenShareManager {
             // heredoc 单引号定界：内容原样写入脚本文件，不做变量展开
             Auxiliary.exec("cat > $watchPath <<'RL_EOF'\n$script\nRL_EOF")
 
+            // stop 交错兜底：stopScreenShare 先清 relayRunning 再清理文件；
+            // 本协程的写脚本→拉起是非挂起 exec 段，取消点只能落在其后的
+            // 挂起点上——若停止恰好落在该段内，此处复查可见 false，放弃
+            // 拉起并清除刚写入的脚本。不复查则守护循环在 STOP 标记已被
+            // 删除的状态下执行 while 循环，无限续命（"停止"后推流复活）
+            if (!relayRunning) {
+                Auxiliary.exec("rm -f $watchPath")
+                return@launch
+            }
+
             // 阻塞运行守护循环：用户停止或连续快速退出时返回
             Auxiliary.exec("sh $watchPath")
             if (relayRunning) {
@@ -273,7 +308,6 @@ object ScreenShareManager {
             initialized = false
             notifyStateChanged()
         }
-        relayRunning = true
         return true
     }
 
@@ -296,29 +330,31 @@ object ScreenShareManager {
         DefenseProtocol.init(context)
         Auxiliary.refreshShellState()
         scope.launch {
-            if (relayRunning || isServerActuallyRunning()) {
-                // daemon 管理的共享（日志触发启动）经加密信道停止：app 侧
-                // pkill 杀不掉 supervisor 守护的 server（1s 内重启），不通知
-                // 则推流继续而用户以为已停止（隐私持续泄露）。daemon 不在线
-                // 时秒级失败，继续常规清理，无害
-                runCatching { DaemonManager.stopDaemonManagedShare() }
-                stopScreenShare()
-                notifyStateChanged()
-                return@launch
-            }
-            lastError = if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
-                context.getString(R.string.no_permission)
-            } else {
-                when (initializeInternal()) {
-                    is InitResult.SshFailed -> "ssh_connect_failed"
-                    is InitResult.CopyFailed -> "copy_server_failed"
-                    InitResult.Ok -> {
-                        if (startScreenShareInternal()) null
-                        else context.getString(R.string.initialize_failed)
+            toggleMutex.withLock {
+                if (relayRunning || isServerActuallyRunning()) {
+                    // daemon 管理的共享（日志触发启动）经加密信道停止：app 侧
+                    // pkill 杀不掉 supervisor 守护的 server（1s 内重启），不通知
+                    // 则推流继续而用户以为已停止（隐私持续泄露）。daemon 不在线
+                    // 时秒级失败，继续常规清理，无害
+                    runCatching { DaemonManager.stopDaemonManagedShare() }
+                    stopScreenShare()
+                    notifyStateChanged()
+                    return@launch
+                }
+                lastError = if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {
+                    context.getString(R.string.no_permission)
+                } else {
+                    when (initializeInternal()) {
+                        is InitResult.SshFailed -> "ssh_connect_failed"
+                        is InitResult.CopyFailed -> "copy_server_failed"
+                        InitResult.Ok -> {
+                            if (startScreenShareInternal()) null
+                            else context.getString(R.string.initialize_failed)
+                        }
                     }
                 }
+                notifyStateChanged()
             }
-            notifyStateChanged()
         }
     }
 
