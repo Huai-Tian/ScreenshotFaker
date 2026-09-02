@@ -576,10 +576,15 @@ object DaemonManager {
     /**
      * daemon 触发配置（daemon_*_config）的消费点校验，规则与 SettingsPage
      * 保存校验一致：separator 三分段 [优先级字母|空] [tag] [regex]，tag 经
-     * isConfigValid、regex 经 isRegexValid 且长度 ≤ 256（daemon 侧 sh -c
-     * 拼接明言信任本侧校验，绕过 UI 写入 DataStore 的路径——如备份恢复
-     * 导入——在此闭环；长度门与 daemon 侧 processGesture 同规则，封堵
-     * 病态回溯正则卡死 filter 线程的 ReDoS——手势失联含胁迫销毁手势）
+     * isConfigValid、regex 经 isRegexValid（daemon 侧 sh -c 拼接明言信任
+     * 本侧校验，绕过 UI 写入 DataStore 的路径——如备份恢复导入——在此
+     * 闭环）。非法（含 separator 不可用）返回 null = 按未配置处理。
+     * 已声明的接受面：病态回溯正则（如 (a+)+$）可卡死 daemon filter
+     * 线程致触发功能失联——销毁链在独立 watchdog 线程不受影响，且
+     * 可自愈（改配置 + 重启 daemon）；正则是 UI 一贯放行的自愿输入
+     *（恶意备份注入需用户输入攻击者的备份密码，与 savePath 任意目录
+     * 同属用户协助自授权），不加长度/内容门（窄于既有合法域的校验
+     * = 行为分裂，见第十四轮教训）
      */
     private fun sanitizeDaemonTriggerConfig(raw: String, separator: String): String? {
         if (raw.isEmpty() || separator.isEmpty()) return null
@@ -589,8 +594,7 @@ object DaemonManager {
                 (parts[0].isEmpty() ||
                         (parts[0].length == 1 && parts[0][0] in validPriority)) &&
                 parts[1].isNotEmpty() && Auxiliary.isConfigValid(parts[1]) &&
-                parts[2].isNotEmpty() && parts[2].length <= 256 &&
-                Auxiliary.isRegexValid(parts[2])
+                parts[2].isNotEmpty() && Auxiliary.isRegexValid(parts[2])
         return if (ok) raw else null
     }
 

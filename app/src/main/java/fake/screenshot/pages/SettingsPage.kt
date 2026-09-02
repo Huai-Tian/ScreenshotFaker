@@ -114,7 +114,6 @@ fun SettingsCompose(navController: NavController) {
                                 && ((parts[0].length == 1 && parts[0][0] in validPriorityLetters) || parts[0].isEmpty())
                                 && parts[1].isNotEmpty()
                                 && parts[2].isNotEmpty()
-                                && parts[2].length <= 256
                                 && Auxiliary.isConfigValid(parts[1])
                                 && Auxiliary.isRegexValid(parts[2]))
             }

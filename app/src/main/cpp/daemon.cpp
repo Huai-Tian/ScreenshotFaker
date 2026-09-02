@@ -2229,14 +2229,7 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                     // 边界检查：少于 3 段（优先级/tag/正则）直接拒绝，防越界 UB
                     if (patterns.size() < 3) return "";
                     auto result = patterns[0] + "\x1F" + patterns[1] + "\x1F";
-                    // 正则长度上限（ReDoS 封堵，app 侧消费点校验同规则）：
-                    // isRegexValid 只验语法不限复杂度，std::regex 是回溯
-                    // 引擎，病态式（如 (a+)+$）对长日志行可达指数级耗时
-                    // ——filter 线程卡死 = 全部手势失联（含胁迫销毁手势，
-                    // 安全功能退化）。现实注入路径：恶意构造的备份文件经
-                    // 恢复直写 DataStore（UI 手输自伤同理）。合法触发正则
-                    // 为短模式串，256 上限零误伤
-                    if (patterns[2].size() > 256 || !isRegexValid(patterns[2]))return "";
+                    if (!isRegexValid(patterns[2]))return "";
                     result += patterns[2];
                     return result;
                 };
