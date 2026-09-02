@@ -293,5 +293,10 @@ object ConfigManager {
         }
     }
 
-    private const val RESTORE_MAX_ENTRIES = 10_000
+    /**
+     * 恢复条目数上限（[restoreAll] 内同规则复核）：公开供调用方在产生
+     * 任何副作用（如停 daemon）之前预检——超限备份在 pre-stop 之后才
+     * 被 restoreAll 拒绝会白停一次 daemon（无毁损但属无谓副作用）
+     */
+    const val RESTORE_MAX_ENTRIES = 10_000
 }

@@ -1607,34 +1607,57 @@ fun SettingsCompose(navController: NavController) {
                                         // 死线失去续期，到期即 detonate（不可逆销毁，
                                         // 且发生在用户正常使用 app 期间）；旧 daemon
                                         // 同时带陈旧配置继续运行（共享/触发不随恢复更
-                                        // 新，隐私面）。停旧实例必须前置于 restoreAll：
-                                        // 此刻 DataStore 仍是旧端口，stopDaemon 走加密
-                                        // 信道优雅停止（不依赖 shell/root 特权；改完端
-                                        // 口后信道指向新端口，只剩 pkill 模式兜底——
-                                        // Shizuku 断连时杀不掉 shell uid 的旧实例，孤儿
-                                        // 照旧引爆）。恢复后有效端口确变时再 stopDaemon
-                                        // 清扫残留（前一步失败/端口类型异常的保险，信
-                                        // 道失败自动落入 pkill 分支），此前在运行则于
-                                        // 新端口重启并推送恢复后的配置（与设置页端口
-                                        // 变更流程同款语义）
+                                        // 新，隐私面）。
+                                        // 条目数预检前置于一切副作用（restoreAll 内同
+                                        // 规则复核是纵深）：超限备份若在 pre-stop 之后
+                                        // 才被拒绝，会白停一次 daemon（SIGTERM 保留锚
+                                        // 点无毁损，但属无谓副作用）
+                                        check(map.size <= ConfigManager.RESTORE_MAX_ENTRIES) {
+                                            "backup entry count out of range"
+                                        }
+                                        // 端口键规整（恢复是绕过 UI 门禁 1024..65535
+                                        // 的直写路径）：非 Int（类型异常备份）或越界
+                                        // 一律从快照剔除，端口保持现值——越界端口写入
+                                        // 后 startDaemon 恒失败（daemon 无法 bind），用
+                                        // 户看到恢复成功但 daemon 再也起不来；非 Int 值
+                                        // 会落成休眠死键（消费者全按 Int 读，取不中回
+                                        // 退默认——不破坏一致性但污染 DataStore）
+                                        val backupPortRaw = map["daemon_socket_port"]
+                                        if (backupPortRaw !is Int ||
+                                            backupPortRaw !in 1024..65535
+                                        ) {
+                                            map.remove("daemon_socket_port")
+                                        }
                                         val prevPort = ConfigManager.getDataOnce(
                                             context, "daemon_socket_port", 1234
                                         )
                                         val prevDaemonRunning = DaemonManager.isDaemonRunning()
-                                        val backupPortRaw = map["daemon_socket_port"]
-                                        // 有效端口语义与 getDataOnce 对齐：非 Int 值
-                                        //（类型异常的备份）读取时回退默认 1234
-                                        val backupPortEffective = backupPortRaw as? Int ?: 1234
-                                        if (prevDaemonRunning && backupPortRaw != null &&
-                                            backupPortEffective != prevPort
+                                        val backupPort = map["daemon_socket_port"] as? Int
+                                        // 停旧实例必须前置于 restoreAll：此刻 DataStore
+                                        // 仍是旧端口，stopDaemon 走加密信道优雅停止
+                                        //（不依赖 shell/root 特权；改完端口后信道指向
+                                        // 新端口，只剩 pkill 模式兜底——Shizuku 断连时
+                                        // 杀不掉 shell uid 的旧实例，孤儿照旧引爆）。
+                                        // fail-closed：停不掉（daemon 挂起致信道超时 +
+                                        // pkill 无特权）则中止整个恢复——此刻尚无任何
+                                        // 写入，配置与 daemon 保持原状（放行则孤儿死线
+                                        // 照旧引爆，误毁方向）
+                                        if (prevDaemonRunning && backupPort != null &&
+                                            backupPort != prevPort
                                         ) {
-                                            DaemonManager.stopDaemon()
+                                            if (!DaemonManager.stopDaemon()) {
+                                                throw java.io.IOException("daemon_stop_failed")
+                                            }
                                         }
                                         ConfigManager.restoreAll(context, map)
                                         val newPort = ConfigManager.getDataOnce(
                                             context, "daemon_socket_port", 1234
                                         )
                                         if (newPort != prevPort) {
+                                            // 清扫残留（pre-stop 已成功时为近 no-op；
+                                            // 信道此刻指向新端口必失败，自动落入 pkill
+                                            // 分支），此前在运行则于新端口重启并推送恢
+                                            // 复后的配置（与设置页端口变更流程同款语义）
                                             DaemonManager.stopDaemon()
                                             if (prevDaemonRunning) {
                                                 DaemonManager.startDaemon()
