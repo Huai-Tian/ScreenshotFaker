@@ -5,6 +5,7 @@ import android.util.Base64
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import fake.screenshot.Auxiliary
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.EncryptManager
 import kotlinx.coroutines.flow.Flow
@@ -113,6 +114,40 @@ object SensitiveStore {
             ConfigManager.saveData(context, key, "")
             true
         }.getOrDefault(false)
+    }
+
+    /**
+     * 首装默认共享密码兜底（幂等；DK 可用时才可能成功写入）。
+     *
+     * 默认配置下共享认证关闭 = 局域网任意设备可观看/控制/读写剪贴板，
+     * 故首装即生成随机高强度密码（DK 加密存本表）——默认值必须是
+     * "有密码"；允许无密码是用户的显式决策。
+     *
+     * 调用点（两处互补）：
+     * - LSPosedServiceManager.onCreate：无门禁/未拆分用户冷启动即成功；
+     *   有门禁用户冷启动处于锁定态（DK 不可用，putSensitive fail-closed
+     *   失败）
+     * - GatePage 安全密码解锁后：DK 已组装，锁定态失败的那次在此补跑
+     *
+     * 三重防覆盖（任一命中即不生成）：
+     * - _sec 已配置（非空密文）：既有密码（含显式设置/迁移完成态）
+     * - 旧明文仍有值：升级用户既存密码（DK 可用时 getSensitive 顺手
+     *   完成迁移）——随机密码静默覆盖会让既有连接全部认证失败
+     * - 生成标记为 true：首次成功生成后写入；用户此后显式清空密码
+     *   （putSensitive("") 抹掉 _sec = isConfigured 归零）是主动选择
+     *   无密码，重启/解锁不得复活随机密码（重新上密码走 UI 手输）
+     */
+    suspend fun ensureDefaultSharePassword(context: Context) {
+        runCatching {
+            if (isSensitiveConfigured(context, "screenShare_password")) return
+            if (getSensitive(context, "screenShare_password", "").isNotEmpty()) return
+            if (ConfigManager.getDataOnce(context, "screenShare_password_generated", false)) return
+            val pwd = Auxiliary.getStrongPassword(Auxiliary.getSecureRandomInt(14..18))
+            if (putSensitive(context, "screenShare_password", pwd)) {
+                // 标记仅在成功落库后写入：锁定态失败不置位，解锁补跑仍生效
+                ConfigManager.saveData(context, "screenShare_password_generated", true)
+            }
+        }
     }
 
     /**

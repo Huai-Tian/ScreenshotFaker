@@ -429,9 +429,11 @@ object OverlayServiceManager {
         if (stealthToastShown) return
         stealthToastShown = true
         runCatching {
-            val base = getString(ctx, R.string.overlay_failed)
-            val text = reason?.take(200)?.let { "$base\n$it" } ?: base
-            Toast.makeText(ctx, text, Toast.LENGTH_LONG).show()
+            // 屏显只给固定提示：reason 携带 root 侧完整诊断（su 命令串/
+            // 入口类名/进程名等可归因信息），Toast 是肩窥与取证的可见
+            // 面——完整诊断仅保留在 RootOverlayService.lastFailureReason
+            //（内存态，随进程消失），不上屏
+            Toast.makeText(ctx, getString(ctx, R.string.overlay_failed), Toast.LENGTH_LONG).show()
         }
     }
 

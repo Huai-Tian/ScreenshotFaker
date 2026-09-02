@@ -26,6 +26,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -34,6 +35,7 @@ import fake.screenshot.R
 import fake.screenshot.defense.DefenseProtocol
 import fake.screenshot.defense.GateManager
 import fake.screenshot.defense.GateResult
+import fake.screenshot.defense.SensitiveStore
 import kotlinx.coroutines.launch
 
 /**
@@ -42,6 +44,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun GateCompose(onUnlocked: () -> Unit) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
     var verifying by remember { mutableStateOf(false) }
@@ -98,6 +101,9 @@ fun GateCompose(onUnlocked: () -> Unit) {
                             GateResult.SECURITY -> {
                                 // 组装/激活 DK 拆分（失败不阻断解锁，DK 功能 fail-closed）
                                 runCatching { GateManager.onSecurityUnlock(password) }
+                                // 首装共享密码兜底补跑：冷启动锁定态 DK 不可用
+                                // 失败的那次在此重试（幂等，详见其 KDoc）
+                                runCatching { SensitiveStore.ensureDefaultSharePassword(context) }
                                 onUnlocked()
                             }
                             GateResult.COERCION -> {

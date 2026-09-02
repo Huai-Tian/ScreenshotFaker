@@ -41,7 +41,6 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import fake.screenshot.Auxiliary
 import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.pages.AboutCompose
@@ -418,27 +417,11 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         super.onCreate()
         XposedServiceHelper.registerListener(this)
         AeadConfig.register()
-        // 首装共享密码生成：默认配置下共享认证关闭（无 auth_password 即
-        // 局域网任意设备可观看/控制/读写剪贴板）——首装即生成随机高强度
-        // 密码（DK 加密存 SensitiveStore），用户可显式清空回到无密码
-        // （允许无密码是产品决策，但默认值必须是"有密码"）。IO 协程执行
-        // （DataStore 加密读写，见 SensitiveStore）；幂等：已存在 _sec
-        // 密文（含显式清空后的空值语义——isConfigured 仅在从未写入时为
-        // false）不覆盖
+        // 首装默认共享密码兜底（详见 SensitiveStore.ensureDefaultSharePassword）：
+        // 冷启动时无门禁/未拆分用户（DK 可用）即成功落库；有门禁用户处于
+        // 锁定态（DK 不可用）→ fail-closed 失败，由 GatePage 解锁后补跑
         CoroutineScope(Dispatchers.IO).launch {
-            runCatching {
-                if (!SensitiveStore.isSensitiveConfigured(
-                        this@LSPosedServiceManager, "screenShare_password"
-                    )
-                ) {
-                    val pwd = Auxiliary.getStrongPassword(
-                        Auxiliary.getSecureRandomInt(14..18)
-                    )
-                    SensitiveStore.putSensitive(
-                        this@LSPosedServiceManager, "screenShare_password", pwd
-                    )
-                }
-            }
+            runCatching { SensitiveStore.ensureDefaultSharePassword(this@LSPosedServiceManager) }
         }
         // 息屏锁定（进程级注册）：原实现注册在 MainActivity，用户解锁后
         // 按返回键 finish Activity（进程因 FGS/缓存存活）即注销——此后
