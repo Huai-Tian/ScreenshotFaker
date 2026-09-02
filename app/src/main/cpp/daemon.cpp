@@ -1999,7 +1999,11 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             result += "[Address= " + get(1) + "] ";
             result += "[Port= " + get(2) + "] ";
             result += "[Name= " + get(3) + "] ";
-            result += "[Password= " + get(4) + "] ";
+            // 密码掩码（与共享密码不进 detail 同一纪律；app 侧第十轮起
+            // 密码框全部遮蔽显示——状态页整屏等宽明文是同类肩窥面，
+            // 且此处仅作配置核对展示，无任何消费方需要明文）：空 = "-"
+            //（与 HostKey 的空值展示一致），非空 = "***"
+            result += "[Password= " + (get(4).empty() ? "-" : "***") + "] ";
             result += "[RemotePort= " + get(5) + "] ";
             // TOFU：app 侧固定指纹（空 = 未固定，本侧首次信任）与纪元。
             // 指纹非敏感（公钥哈希），显示截断前 16 hex 供核对
