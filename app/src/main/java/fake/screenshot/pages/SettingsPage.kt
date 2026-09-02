@@ -1540,6 +1540,10 @@ fun SettingsCompose(navController: NavController) {
                             restorePasswordDialog = false
                             if (uri == null) return@TextButton
                             scope.launch {
+                                // 锁定拒绝标记：区分"需解锁后重试"与普通失败
+                                //（与磁贴 unlock_app_first 提示同款，避免用户
+                                // 对可自愈的失败盲目重试）
+                                var lockedReject = false
                                 val ok = withContext(Dispatchers.IO) {
                                     runCatching {
                                         // 大小上限：合法备份为 KB 级（配置键值 +
@@ -1605,15 +1609,20 @@ fun SettingsCompose(navController: NavController) {
                                         // 依赖 DK（备份密码解密 + Tink DataStore
                                         // 写入），但端口变更孤儿封堵的
                                         // isDaemonRunning/stopDaemon 走加密信道——
-                                        // DK 锁定态（前台 5min 无操作即 lockSession，
-                                        // 恢复对话框输密码的耗时足以跨过该线）下
-                                        // getKey() 为 null：daemon 状态不可判定、
-                                        // 优雅停止不可达，prevDaemonRunning 误判
-                                        // false 令 pre-stop 被跳过，孤儿封堵整体
-                                        // 失效（pkill 无特权时旧实例死线照常引爆）。
-                                        // 拒绝恢复：此刻零副作用，解锁后重试即可。
+                                        // DK 锁定态下 getKey() 为 null：daemon 状态
+                                        // 不可判定、优雅停止不可达，prevDaemonRunning
+                                        // 误判 false 令 pre-stop 被跳过，孤儿封堵
+                                        // 整体失效（pkill 无特权时旧实例死线照常
+                                        // 引爆）。现实的锁定向量（均不触发 recreate、
+                                        // 对话框存活）：SAF 文件选择器打开即 onPause
+                                        // → 后台 30s 锁定（选备份文件超 30s 是常态），
+                                        // 息屏即锁。前台 5min 无操作锁会 recreate
+                                        // 销毁对话框，用户重走门禁后自然解锁，非
+                                        // 本检查的目标向量。拒绝恢复：此刻零副作用，
+                                        // 解锁后重试即可（Toast 提示与磁贴同款）。
                                         // 无门禁用户（单段 DK）恒就绪，不受影响
                                         if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
+                                            lockedReject = true
                                             throw java.io.IOException("locked_no_credentials")
                                         }
                                         // —— 端口变更孤儿封堵（误毁方向）——
@@ -1687,7 +1696,11 @@ fun SettingsCompose(navController: NavController) {
                                 }
                                 Toast.makeText(
                                     context,
-                                    if (ok) R.string.success else R.string.failed,
+                                    when {
+                                        ok -> R.string.success
+                                        lockedReject -> R.string.unlock_app_first
+                                        else -> R.string.failed
+                                    },
                                     Toast.LENGTH_SHORT
                                 ).show()
                             }
