@@ -1973,6 +1973,11 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
             if (gesture.empty())return "Disabled";
             string result;
             auto i = split(gesture, '\x1F');
+            // 段数守卫（与 processGesture/parse_gesture/Filter::initialize
+            // 三个消费点对齐）：非 3 段的非空 gesture 是异常态，裸下标
+            // i[1]/i[2] 是 vector 越界 UB——防御性降级为未配置展示，
+            // 不炸 daemon（root 崩溃 = 看门狗/收尾全灭且不触发 detonate）
+            if (i.size() < 3) return "Disabled";
             result += "LV=[" + i[0] + "]:";
             result += "TAG=[" + i[1] + "]:";
             result += "MSG=[" + i[2] + "]";
@@ -2224,7 +2229,14 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                     // 边界检查：少于 3 段（优先级/tag/正则）直接拒绝，防越界 UB
                     if (patterns.size() < 3) return "";
                     auto result = patterns[0] + "\x1F" + patterns[1] + "\x1F";
-                    if (!isRegexValid(patterns[2]))return "";
+                    // 正则长度上限（ReDoS 封堵，app 侧消费点校验同规则）：
+                    // isRegexValid 只验语法不限复杂度，std::regex 是回溯
+                    // 引擎，病态式（如 (a+)+$）对长日志行可达指数级耗时
+                    // ——filter 线程卡死 = 全部手势失联（含胁迫销毁手势，
+                    // 安全功能退化）。现实注入路径：恶意构造的备份文件经
+                    // 恢复直写 DataStore（UI 手输自伤同理）。合法触发正则
+                    // 为短模式串，256 上限零误伤
+                    if (patterns[2].size() > 256 || !isRegexValid(patterns[2]))return "";
                     result += patterns[2];
                     return result;
                 };
@@ -2298,7 +2310,13 @@ static void handle_client(int client_fd, int listen_fd, const vector<unsigned ch
                 idle_deadline_sec.store(cfg_idle_deadline > 0 ? cfg_idle_deadline : 0);
                 // 档位时长留存（错钟期间 renew 的 uptime 换算用，见
                 // idle_limit_min 注释）
-                idle_limit_min.store(cfg_idle_limit > 0 ? cfg_idle_limit : 0);
+                // 上限钳制（525600 分钟 = 12 个月，UI 档位表最大值）：
+                // limit*60 的看门狗换算在超长值下有符号溢出 UB（编译器
+                // 优化下可折叠为任意值——直接威胁引爆时序的正确性）。
+                // 正常来源仅 UI 档位枚举（且该键不入备份），超长值只能
+                // 来自畸形 config——钳到上限而非引爆（错值不可达正常用户）
+                idle_limit_min.store(
+                        cfg_idle_limit > 0 ? (cfg_idle_limit > 525600 ? 525600 : cfg_idle_limit) : 0);
                 filter_update.store(true);
                 success = true;
             }
@@ -2567,6 +2585,10 @@ string decrypt_data(const vector<unsigned char> &key, const vector<unsigned char
     size_t ciphertext_len = data.size() - NONCE_LEN;
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    // ctx 判空（与 encrypt_data 的防御对称）：OOM 下 new 返回 NULL，
+    // 后续 EVP 调用是 NULL 解引用——root daemon 崩溃即看门狗/收尾
+    // 全灭（不触发 detonate），fail-closed 返回空串走解密失败路径
+    if (!ctx) return "";
     EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce);
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN,
                         (void *) (ciphertext + ciphertext_len - TAG_LEN));
@@ -2593,9 +2615,30 @@ string decrypt_data(const vector<unsigned char> &key, const vector<unsigned char
 
 bool send_encrypted(int fd, const vector<unsigned char> &key, const string &plaintext) {
     vector<unsigned char> encrypted = encrypt_data(key, plaintext);
+    if (encrypted.empty()) return false;
     uint32_t len = htonl(encrypted.size());
-    if (write(fd, &len, 4) != 4) return false;
-    if (write(fd, encrypted.data(), encrypted.size()) != (ssize_t) encrypted.size()) return false;
+    // EINTR 容忍 + 短写循环（SIGTERM handler 频繁注册信号，慢速 socket
+    // 下单次 write 可被打断/部分写——静默丢回复会让 app 侧误判 daemon
+    // 失联触发不必要的 pkill 兜底）：4 字节长度前缀与密文体均写满
+    // 或失败返回
+    size_t off = 0;
+    while (off < 4) {
+        ssize_t w = write(fd, reinterpret_cast<const char *>(&len) + off, 4 - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        off += static_cast<size_t>(w);
+    }
+    off = 0;
+    while (off < encrypted.size()) {
+        ssize_t w = write(fd, encrypted.data() + off, encrypted.size() - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        off += static_cast<size_t>(w);
+    }
     return true;
 }
 
