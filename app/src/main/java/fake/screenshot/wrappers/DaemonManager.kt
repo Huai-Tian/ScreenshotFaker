@@ -125,6 +125,15 @@ object DaemonManager {
     }
 
     /**
+     * 进程特征探测（pgrep，公开只读）：不依赖加密信道——信道失配形态
+     * （改密后 daemon 未重启，isDaemonRunning 恒 false）下仍能判定进程
+     * 存活，供端口变更/恢复流程决定是否重启。已知边界：个别设备
+     * SELinux 收紧时 app uid 看不到 shell uid 进程的 cmdline → 假阴性
+     *（漏重启方向，保守无害）
+     */
+    fun isDaemonProcessAlive(): Boolean = daemonProcessAlive()
+
+    /**
      * 停止守护进程。
      * @param purge true = 同时清扫 app 侧共享（磁贴/页面启动的 relay 与守护 sh）。
      * 胁迫销毁序列使用——app 侧 stopScreenShare 依赖 shell 特权，Shizuku

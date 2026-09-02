@@ -1542,8 +1542,11 @@ fun SettingsCompose(navController: NavController) {
                             scope.launch {
                                 // 锁定拒绝标记：区分"需解锁后重试"与普通失败
                                 //（与磁贴 unlock_app_first 提示同款，避免用户
-                                // 对可自愈的失败盲目重试）
+                                // 对可自愈的失败盲目重试）；daemon 重启失败
+                                // 标记：恢复本身成功但端口变更后 daemon 拉起
+                                // 失败，如实反馈"部分成功"而非"成功"
                                 var lockedReject = false
+                                var daemonRestartFailed = false
                                 val ok = withContext(Dispatchers.IO) {
                                     runCatching {
                                         // 大小上限：合法备份为 KB 级（配置键值 +
@@ -1607,20 +1610,17 @@ fun SettingsCompose(navController: NavController) {
                                         // DK 就绪前置（fail-closed，与磁贴
                                         // encrypt_outputs 同款纪律）：恢复本身不
                                         // 依赖 DK（备份密码解密 + Tink DataStore
-                                        // 写入），但端口变更孤儿封堵的
-                                        // isDaemonRunning/stopDaemon 走加密信道——
-                                        // DK 锁定态下 getKey() 为 null：daemon 状态
-                                        // 不可判定、优雅停止不可达，prevDaemonRunning
-                                        // 误判 false 令 pre-stop 被跳过，孤儿封堵
-                                        // 整体失效（pkill 无特权时旧实例死线照常
-                                        // 引爆）。现实的锁定向量（均不触发 recreate、
-                                        // 对话框存活）：SAF 文件选择器打开即 onPause
-                                        // → 后台 30s 锁定（选备份文件超 30s 是常态），
-                                        // 息屏即锁。前台 5min 无操作锁会 recreate
-                                        // 销毁对话框，用户重走门禁后自然解锁，非
-                                        // 本检查的目标向量。拒绝恢复：此刻零副作用，
-                                        // 解锁后重试即可（Toast 提示与磁贴同款）。
-                                        // 无门禁用户（单段 DK）恒就绪，不受影响
+                                        // 写入），但端口变更孤儿封堵的信道操作
+                                        //（isDaemonRunning/stopDaemon）依赖 DK——
+                                        // 锁定态下优雅停止不可达，只能落 pkill 兜底
+                                        //（无特权时失败 → 恢复被 fail-closed 中止，
+                                        // 白费整轮解密）。入口快速路径覆盖锁定在先
+                                        // 的状态（Toast 提示与磁贴同款，解锁后重试，
+                                        // 零副作用即拒）；主流锁定向量（SAF 返回/
+                                        // 亮屏）已被 MainActivity.onStart 的锁定一致
+                                        // 性重建拦在确认键之前，恢复执行中途的息屏
+                                        // 竞态由下方决策点二次复核 + 无条件 pre-stop
+                                        // 闭环。无门禁用户（单段 DK）恒就绪，不受影响
                                         if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
                                             lockedReject = true
                                             throw java.io.IOException("locked_no_credentials")
@@ -1656,20 +1656,45 @@ fun SettingsCompose(navController: NavController) {
                                         val prevPort = ConfigManager.getDataOnce(
                                             context, "daemon_socket_port", 1234
                                         )
-                                        val prevDaemonRunning = DaemonManager.isDaemonRunning()
+                                        // 决策点二次 DK 复核（TOCTOU 闭环）：入口检查
+                                        // 与本决策点之间横跨整个解密耗时（秒级），息屏
+                                        // 即锁可在中途清 DK——之后 isDaemonRunning 恒
+                                        // false（信道无密钥），"未运行"与"不可判定"
+                                        // 无法区分：误判为前者会跳过 pre-stop，孤儿
+                                        // 误毁链从中途竞态重新打开。未就绪按"状态
+                                        // 未知"处理（null）：仍尝试停止，靠 fail-closed
+                                        // 中止兜底。确证 false 才是真正的"未运行"
+                                        val daemonStateKnown =
+                                            fake.screenshot.defense.KeyVault.isDaemonKeyReady()
+                                        val prevDaemonRunning =
+                                            if (daemonStateKnown) DaemonManager.isDaemonRunning()
+                                            else null
+                                        // 重启决策（pre-stop 杀掉旧实例前取）：信道判定
+                                        //（prevDaemonRunning）在失配态恒 false，进程特征
+                                        //（pgrep，不依赖 DK/信道）补全——两者任一为真即
+                                        // 视为"此前在运行"。未知（锁定）态 pgrep 仍可用：
+                                        // 存活则恢复后尝试重启（startDaemon 无 DK 必失败
+                                        // → 如实"部分成功"，比假装"成功"诚实）；不存活
+                                        // 则不重启。SELinux 盲区下 pgrep 假阴性 → 漏重启
+                                        //（保守方向，daemon 保持关闭无数据损失）
+                                        val daemonWasAlive = prevDaemonRunning == true ||
+                                                DaemonManager.isDaemonProcessAlive()
                                         val backupPort = map["daemon_socket_port"] as? Int
-                                        // 停旧实例必须前置于 restoreAll：此刻 DataStore
-                                        // 仍是旧端口，stopDaemon 走加密信道优雅停止
-                                        //（不依赖 shell/root 特权；改完端口后信道指向
-                                        // 新端口，只剩 pkill 模式兜底——Shizuku 断连时
-                                        // 杀不掉 shell uid 的旧实例，孤儿照旧引爆）。
+                                        // 停旧实例必须前置于 restoreAll，且不依赖
+                                        // prevDaemonRunning 判定：信道失配形态（改密后
+                                        // daemon 未重启，setPasswords 只清 app 侧缓存，
+                                        // daemon 仍持旧信道密钥）下 isDaemonRunning 恒
+                                        // false——与"未运行"不可区分，按其门控会跳过
+                                        // pre-stop，清扫 stopDaemon 的返回值又被忽略，
+                                        // 无特权时孤儿照旧引爆。无条件尝试：真未运行时
+                                        // 信道秒拒 + pgrep 不中，快速 no-op 返回 true
+                                        //（无误中止）；此刻 DataStore 仍是旧端口，信道
+                                        // 可达时走优雅停止（不依赖 shell/root 特权）。
                                         // fail-closed：停不掉（daemon 挂起致信道超时 +
                                         // pkill 无特权）则中止整个恢复——此刻尚无任何
                                         // 写入，配置与 daemon 保持原状（放行则孤儿死线
                                         // 照旧引爆，误毁方向）
-                                        if (prevDaemonRunning && backupPort != null &&
-                                            backupPort != prevPort
-                                        ) {
+                                        if (backupPort != null && backupPort != prevPort) {
                                             if (!DaemonManager.stopDaemon()) {
                                                 throw java.io.IOException("daemon_stop_failed")
                                             }
@@ -1681,11 +1706,15 @@ fun SettingsCompose(navController: NavController) {
                                         if (newPort != prevPort) {
                                             // 清扫残留（pre-stop 已成功时为近 no-op；
                                             // 信道此刻指向新端口必失败，自动落入 pkill
-                                            // 分支），此前在运行则于新端口重启并推送恢
-                                            // 复后的配置（与设置页端口变更流程同款语义）
+                                            // 分支）。此前在运行（daemonWasAlive，信道
+                                            // 或进程特征任一确证）则于新端口重启并推送
+                                            // 恢复后的配置（与设置页端口变更流程同款
+                                            // 语义）；锁定未知态 pgrep 确证存活时也尝试
+                                            //（startDaemon 无 DK 快速失败 → 如实"部分
+                                            // 成功"）。重启失败如实反馈（部分成功）
                                             DaemonManager.stopDaemon()
-                                            if (prevDaemonRunning) {
-                                                DaemonManager.startDaemon()
+                                            if (daemonWasAlive) {
+                                                daemonRestartFailed = !DaemonManager.startDaemon()
                                             }
                                         } else {
                                             // 配置大面积变更：尽力同步在运行的 daemon
@@ -1697,9 +1726,10 @@ fun SettingsCompose(navController: NavController) {
                                 Toast.makeText(
                                     context,
                                     when {
-                                        ok -> R.string.success
-                                        lockedReject -> R.string.unlock_app_first
-                                        else -> R.string.failed
+                                        !ok && lockedReject -> R.string.unlock_app_first
+                                        !ok -> R.string.failed
+                                        daemonRestartFailed -> R.string.part_success
+                                        else -> R.string.success
                                     },
                                     Toast.LENGTH_SHORT
                                 ).show()
