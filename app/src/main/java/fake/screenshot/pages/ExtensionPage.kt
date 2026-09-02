@@ -2085,6 +2085,9 @@ fun ExtensionCompose() {
                         onValueChange = { fileEncryptionPasswordInputText = it },
                         label = { Text(stringResource(R.string.verification_password)) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        // 遮蔽（与 :1405/:1813 同一纪律）：keyboardType 仅影响软
+                        // 键盘布局不影响渲染，缺遮蔽时密码明文上屏（肩窥）
+                        visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
