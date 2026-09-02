@@ -1600,6 +1600,22 @@ fun SettingsCompose(navController: NavController) {
                                             }
                                             map[o.getString("k")] = value
                                         }
+                                        // DK 就绪前置（fail-closed，与磁贴
+                                        // encrypt_outputs 同款纪律）：恢复本身不
+                                        // 依赖 DK（备份密码解密 + Tink DataStore
+                                        // 写入），但端口变更孤儿封堵的
+                                        // isDaemonRunning/stopDaemon 走加密信道——
+                                        // DK 锁定态（前台 5min 无操作即 lockSession，
+                                        // 恢复对话框输密码的耗时足以跨过该线）下
+                                        // getKey() 为 null：daemon 状态不可判定、
+                                        // 优雅停止不可达，prevDaemonRunning 误判
+                                        // false 令 pre-stop 被跳过，孤儿封堵整体
+                                        // 失效（pkill 无特权时旧实例死线照常引爆）。
+                                        // 拒绝恢复：此刻零副作用，解锁后重试即可。
+                                        // 无门禁用户（单段 DK）恒就绪，不受影响
+                                        if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
+                                            throw java.io.IOException("locked_no_credentials")
+                                        }
                                         // —— 端口变更孤儿封堵（误毁方向）——
                                         // 备份携带 daemon_socket_port：恢复改端口后
                                         // app 的 syncConfig/renew/touch 全部指向新端口，
