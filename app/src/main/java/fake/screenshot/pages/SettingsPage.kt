@@ -1717,9 +1717,86 @@ fun SettingsCompose(navController: NavController) {
                                                 daemonRestartFailed = !DaemonManager.startDaemon()
                                             }
                                         } else {
-                                            // 配置大面积变更：尽力同步在运行的 daemon
-                                            //（不在线秒级失败，静默跳过）
-                                            runCatching { DaemonManager.syncConfig() }
+                                            // 同端口：在运行的 daemon 需收到恢复后的
+                                            // 配置。信道失配态（改密后 daemon 持旧
+                                            // 密钥）syncConfig 静默失败——daemon 继续
+                                            // 以旧配置运行（陈旧触发器/共享配置，
+                                            // 隐私面）而用户看到"恢复成功"的假象。
+                                            // daemonWasAlive && 同步失败 → 重启 daemon
+                                            // 拾取新密钥与新配置（与端口变更分支同
+                                            // 语义；瞬态超时误判至多中断进行中的
+                                            // 共享/录制，daemon 的 SIGTERM 收尾路径
+                                            // 安全，用户可重新发起）。daemon 不在
+                                            //（daemonWasAlive=false）则无需动作
+                                            val synced = runCatching {
+                                                DaemonManager.syncConfig()
+                                            }.getOrDefault(false)
+                                            if (daemonWasAlive && !synced) {
+                                                if (DaemonManager.stopDaemon()) {
+                                                    daemonRestartFailed =
+                                                        !DaemonManager.startDaemon()
+                                                } else {
+                                                    // 停不掉：daemon 仍持旧配置运行，
+                                                    // 如实报部分成功（勿假装恢复完整生效）
+                                                    daemonRestartFailed = true
+                                                }
+                                            }
+                                        }
+                                        // —— 恢复后运行时态重应用 ——
+                                        // 三个命令式设置（hide_icon 的别名组件状态、
+                                        // enable_flag_secure 的 FLAG_SECURE、
+                                        // hide_from_recent 的 appTasks 排除）在 UI
+                                        // 切换时即时施加副作用、解锁时由
+                                        // MainActivity.applyWindowSecurityConfig 重建，
+                                        // 唯独恢复路径此前只写 DataStore 键——恢复
+                                        // hide_icon=true 图标不隐藏（隐蔽性缺口），
+                                        // 反向则图标残留隐藏且设置页显示已关闭
+                                        //（状态分裂）。仅在备份显式携带 Boolean 值
+                                        // 时动作：类型异常的垃圾备份跳过（fail-closed
+                                        // 保持当前运行态，不放大恶意输入的效果）
+                                        val restoredHideIcon = map["hide_icon"]
+                                        val restoredFlagSecure = map["enable_flag_secure"]
+                                        val restoredHideRecent = map["hide_from_recent"]
+                                        // 独立 runCatching：DataStore 已写入（恢复本体
+                                        // 已成功），重应用的任何意外异常不得把整次
+                                        // 恢复误标为失败——窗口标志在下次解锁时由
+                                        // MainActivity 重建，此处失败至多延迟生效
+                                        runCatching {
+                                            withContext(Dispatchers.Main) {
+                                                val activity = context as? Activity
+                                                if (restoredFlagSecure is Boolean && activity != null) {
+                                                    if (restoredFlagSecure) {
+                                                        activity.window.addFlags(
+                                                            WindowManager.LayoutParams.FLAG_SECURE
+                                                        )
+                                                    } else {
+                                                        activity.window.clearFlags(
+                                                            WindowManager.LayoutParams.FLAG_SECURE
+                                                        )
+                                                    }
+                                                }
+                                                if (restoredHideRecent is Boolean) {
+                                                    (activity ?: context)
+                                                        .getSystemService(ActivityManager::class.java)
+                                                        ?.appTasks?.forEach { task ->
+                                                            task.setExcludeFromRecents(restoredHideRecent)
+                                                        }
+                                                }
+                                                if (restoredHideIcon is Boolean) {
+                                                    context.packageManager.setComponentEnabledSetting(
+                                                        ComponentName(
+                                                            context.packageName,
+                                                            "${context.packageName}.MainActivityAlias"
+                                                        ),
+                                                        if (restoredHideIcon) {
+                                                            PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                                                        } else {
+                                                            PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                                                        },
+                                                        PackageManager.DONT_KILL_APP
+                                                    )
+                                                }
+                                            }
                                         }
                                     }.isSuccess
                                 }
