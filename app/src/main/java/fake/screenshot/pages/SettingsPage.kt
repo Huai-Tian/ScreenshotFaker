@@ -1600,10 +1600,50 @@ fun SettingsCompose(navController: NavController) {
                                             }
                                             map[o.getString("k")] = value
                                         }
+                                        // —— 端口变更孤儿封堵（误毁方向）——
+                                        // 备份携带 daemon_socket_port：恢复改端口后
+                                        // app 的 syncConfig/renew/touch 全部指向新端口，
+                                        // 旧端口 daemon 成为孤儿——超时销毁已武装时其
+                                        // 死线失去续期，到期即 detonate（不可逆销毁，
+                                        // 且发生在用户正常使用 app 期间）；旧 daemon
+                                        // 同时带陈旧配置继续运行（共享/触发不随恢复更
+                                        // 新，隐私面）。停旧实例必须前置于 restoreAll：
+                                        // 此刻 DataStore 仍是旧端口，stopDaemon 走加密
+                                        // 信道优雅停止（不依赖 shell/root 特权；改完端
+                                        // 口后信道指向新端口，只剩 pkill 模式兜底——
+                                        // Shizuku 断连时杀不掉 shell uid 的旧实例，孤儿
+                                        // 照旧引爆）。恢复后有效端口确变时再 stopDaemon
+                                        // 清扫残留（前一步失败/端口类型异常的保险，信
+                                        // 道失败自动落入 pkill 分支），此前在运行则于
+                                        // 新端口重启并推送恢复后的配置（与设置页端口
+                                        // 变更流程同款语义）
+                                        val prevPort = ConfigManager.getDataOnce(
+                                            context, "daemon_socket_port", 1234
+                                        )
+                                        val prevDaemonRunning = DaemonManager.isDaemonRunning()
+                                        val backupPortRaw = map["daemon_socket_port"]
+                                        // 有效端口语义与 getDataOnce 对齐：非 Int 值
+                                        //（类型异常的备份）读取时回退默认 1234
+                                        val backupPortEffective = backupPortRaw as? Int ?: 1234
+                                        if (prevDaemonRunning && backupPortRaw != null &&
+                                            backupPortEffective != prevPort
+                                        ) {
+                                            DaemonManager.stopDaemon()
+                                        }
                                         ConfigManager.restoreAll(context, map)
-                                        // 配置大面积变更：尽力同步在运行的 daemon
-                                        //（不在线秒级失败，静默跳过）
-                                        runCatching { DaemonManager.syncConfig() }
+                                        val newPort = ConfigManager.getDataOnce(
+                                            context, "daemon_socket_port", 1234
+                                        )
+                                        if (newPort != prevPort) {
+                                            DaemonManager.stopDaemon()
+                                            if (prevDaemonRunning) {
+                                                DaemonManager.startDaemon()
+                                            }
+                                        } else {
+                                            // 配置大面积变更：尽力同步在运行的 daemon
+                                            //（不在线秒级失败，静默跳过）
+                                            runCatching { DaemonManager.syncConfig() }
+                                        }
                                     }.isSuccess
                                 }
                                 Toast.makeText(

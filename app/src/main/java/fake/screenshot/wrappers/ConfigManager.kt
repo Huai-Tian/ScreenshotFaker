@@ -265,22 +265,33 @@ object ConfigManager {
      * 字段/记录分隔符）一律拒收——注入会让 daemon 侧 split 错位（字段
      * 移位可把内容送到无校验的命令位）。UI 键盘无法输入控制字符，
      * 唯一现实来源是恶意构造的备份文件（本恢复是绕过 UI 校验直写
-     * DataStore 的新路径，必须在此闭环）
+     * DataStore 的新路径，必须在此闭环）。
+     * 单次 edit 整体落地：逐键 saveData 是每键一次全量重写 + fsync +
+     * flow 发射（所有 rememberValue 收集者逐键重读），10MB 恶意备份
+     * 可塞入数十万微型条目——O(n²) 磁盘 IO 与重组风暴把恢复变成小时
+     * 级后台打满；单次 edit 恒为一次写、一次发射，且中途崩溃不再留
+     * 下部分应用的中间态。条目数上限封顶同一攻击面（合法配置为数十
+     * 键量级），超限整体拒绝（抛出由调用方转为失败提示，无写入）
      */
     suspend fun restoreAll(context: Context, data: Map<String, Any>) {
-        for ((key, value) in data) {
-            if (key in BACKUP_EXCLUDED_KEYS) continue
-            when (value) {
-                is String -> {
-                    if (value.none { it in '\u001C'..'\u001F' }) {
-                        saveData(context, key, value)
+        check(data.size <= RESTORE_MAX_ENTRIES) { "backup entry count out of range" }
+        getEncryptedDataStore(context).edit { preferences ->
+            for ((key, value) in data) {
+                if (key in BACKUP_EXCLUDED_KEYS) continue
+                when (value) {
+                    is String -> {
+                        if (value.none { it in '\u001C'..'\u001F' }) {
+                            preferences[stringPreferencesKey(key)] = value
+                        }
                     }
+                    is Int -> preferences[intPreferencesKey(key)] = value
+                    is Boolean -> preferences[booleanPreferencesKey(key)] = value
+                    is Long -> preferences[longPreferencesKey(key)] = value
+                    is Float -> preferences[floatPreferencesKey(key)] = value
                 }
-                is Int -> saveData(context, key, value)
-                is Boolean -> saveData(context, key, value)
-                is Long -> saveData(context, key, value)
-                is Float -> saveData(context, key, value)
             }
         }
     }
+
+    private const val RESTORE_MAX_ENTRIES = 10_000
 }
