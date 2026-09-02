@@ -1,5 +1,5 @@
 [versions]
-agp = "9.3.2"
+agp = "9.4.0"
 api = "13.1.5"
 apiVersion = "102.0.0"
 apksig = "9.3.2"
