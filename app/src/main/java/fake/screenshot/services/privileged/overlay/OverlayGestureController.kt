@@ -2,11 +2,7 @@ package fake.screenshot.services.privileged.overlay
 
 import android.content.Context
 import android.os.Handler
-import android.os.SystemClock
-import fake.screenshot.Auxiliary
 import android.view.GestureDetector
-import android.view.InputDevice
-import android.view.InputEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 
@@ -15,21 +11,27 @@ import android.view.ScaleGestureDetector
  * 本地 ControlOverlayService 完全一致，仅输入源由 View 触摸事件
  * 换为 [GestureInputMonitor] 解析出的 MotionEvent（屏幕绝对坐标）。
  *
- * - DOWN 命中悬浮窗矩形 → 立即 pilferPointers 抢占指针流（下层应用
- *   收不到该手势后续事件，也从未收到任何遮挡标记）；
- * - 模式：移动窗口 / 移动媒体（图片平移）/ 四角缩放 / 长按 seek /
- *   双击分区（切换媒体、播放暂停）/ 视频非边缘单击透传（注入）；
- * - 透传注入经 InputManager.injectInputEvent（uid=0 直过 INJECT_EVENTS，
- *   事件正常派发至下层——spy monitor 不拦截派发，无需旧方案的
- *   "瞬时 NOT_TOUCHABLE" 补丁）；注入事件会被 monitor 副本收到，
- *   以注入签名（downTime/deviceId/坐标）精确识别副本并整串忽略，
- *   防自激励循环。
+ * ==================== 纯观察者模式（零输入暴露面） ====================
+ *
+ * 本类只消费 spy monitor 的**事件副本**，从不调用 pilferPointers、
+ * 从不注入任何事件：
+ * - 下层应用收到的指针流永远是调度器原生输出（DOWN→MOVE…→UP 完整
+ *   合法收尾）——不存在孤儿 DOWN、不存在无成因 CANCEL、不存在指针流
+ *   截断，输入层无从区分"悬浮窗存在"与"悬浮窗不存在"；
+ * - 悬浮窗的手势（移动/缩放/双击/长按）从副本旁观判定——"跟随手指"
+ *   变为"旁观手指"；
+ * - 代价（有意接受）：同一次触摸被下层应用与悬浮窗同时消费——拖动
+ *   悬浮窗时下层也在滚动，悬浮窗盖住按钮时按钮也会被点中。交互意图
+ *   混流是纯观察架构的本质属性，换取的是输入层绝对零残留。
+ *
+ * 模式：移动窗口 / 移动媒体（图片平移）/ 四角缩放 / 长按 seek /
+ * 双击分区（切换媒体、播放暂停）。视频单击/双击的未命中区域无需
+ * 任何处理——事件本来就在向下派发（原生透传）。
  */
 internal class OverlayGestureController(
     context: Context,
     private val handler: Handler,
     private val backend: OverlaySurfaceBackend,
-    private val input: GestureInputMonitor,
     private val onSwitchMedia: (Int) -> Unit
 ) {
 
@@ -70,7 +72,7 @@ internal class OverlayGestureController(
     private var isScaling = false
 
     /**
-     * 本轮事件流始于悬浮窗上的 DOWN（已 pilfer）。MOVE/UP/CANCEL 的
+     * 本轮事件流始于悬浮窗上的 DOWN（命中矩形，从副本旁观响应）。MOVE/UP/CANCEL 的
      * 消费归属以此判定：视频非边缘触摸的 lockedMode 为 NONE（无锁定
      * 模式），此前以 lockedMode/isLongPress 早退会把整串 UP/MOVE 挡在
      * 门外，GestureDetector 收不到完整事件流 → 视频 单击/双击/长按
@@ -94,19 +96,11 @@ internal class OverlayGestureController(
     private var seekDirection = 0
     private var seekStepMs = 0
 
-    // ==================== 注入副本识别（签名精确过滤） ====================
+    // ==================== 注入副本识别（已废弃：纯观察者模式无注入） ====================
     //
-    // 注入的 tap 会回流到 monitor（spy 收到事件副本）。以注入时记录的
-    // 事件签名精确识别自身副本并整串忽略——替代旧的时间窗过滤
-    // （800ms 整窗会误杀用户紧随其后的真实触摸，快速连续操作时表现为
-    // "点了没反应"）。签名为注入事件的固有属性（我们构造事件时自选的
-    // downTime 毫秒值 + 伪装的 deviceId + 抖动后坐标），真实触摸不可能
-    // 逐项吻合：downTime 精确到毫秒的重合概率可忽略，坐标含随机抖动
-    // 更无从预知。
-    private var injectDownTime = 0L
-    private var injectDeviceId = 0
-    private var injectX = 0f
-    private var injectY = 0f
+    // 历史实现为视频单击透传注入 pilferPointers + injectTap，注入副本
+    // 回流 monitor 后以签名过滤。纯观察者模式下既不注入也不 pilfer，
+    // 回流过滤不再必要——monitor 副本与派发流同源同形，无需区分。
 
     private val gestureDetector: GestureDetector
     private val scaleDetector: ScaleGestureDetector
@@ -121,30 +115,22 @@ internal class OverlayGestureController(
     fun onTouch(event: MotionEvent) {
         if (!backend.isAttached) return
 
-        // 注入副本（downTime/deviceId/坐标与注入记录吻合）：逐事件直接
-        // 忽略，零状态干扰——不 pilfer（副本本就要透传给下层应用）、
-        // 不喂 detector（防自激励）、不改任何在途手势状态。不能只过滤
-        // DOWN：onSingleTapConfirmed 可能在另一真实手势进行中触发
-        // （双击确认窗口内的快速异地触摸），若此时按 DOWN 抑制整串，
-        // 会误杀在途真实手势
-        if (isSelfInjected(event)) return
-
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                // 命中悬浮窗 → 抢占指针流，此后下层应用收不到本手势
+                // 命中悬浮窗 → 仅标记本轮流的手势归属（从副本旁观响应）。
+                // 不 pilfer：真实事件流继续原生派发下层应用，悬浮窗与
+                // 下层同时消费同一次触摸（纯观察者模式，见类文档）
                 if (event.x >= windowX && event.x <= windowX + windowWidth &&
                     event.y >= windowY && event.y <= windowY + windowHeight
                 ) {
                     gestureActive = true
-                    input.pilferPointers()
                     handleDown(event)
                 }
-                // 未命中：不 pilfer，事件自然穿透给下层应用
             }
             MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
                 // 消费归属：DOWN 是否命中悬浮窗（见 gestureActive 文档）。
-                // 未命中的事件流属于下层应用，一概忽略
+                // 未命中的事件流只有下层应用消费，一概忽略
                 if (!gestureActive) return
                 val terminal = event.actionMasked == MotionEvent.ACTION_UP ||
                         event.actionMasked == MotionEvent.ACTION_CANCEL
@@ -353,128 +339,10 @@ internal class OverlayGestureController(
         }
 
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-            // 视频非边缘区域的单击：注入点击透传给下层应用。
-            // 以 downMode（DOWN 时的模式判定）核对——回调触发时
-            // lockedMode 已被 UP 复位为 NONE，旧条件恒真，边缘区域
-            // （移动条/缩放手柄）的单击会被误注入透传
-            if (backend.isVideo && downMode == Mode.NONE && !isLongPress) {
-                injectTap(e.x.toInt(), e.y.toInt())
-            }
-            return true
+            // 纯观察者模式：单击透传无需处理——事件本来就在原生向下
+            // 派发（历史实现经 pilfer + injectTap 合成透传，现已整体
+            // 移除，见类文档"注入副本识别"一节）
+            return false
         }
     }
-
-    // ==================== 单击透传注入 ====================
-
-    /**
-     * 直接构造 down+up 注入（uid=0 过 INJECT_EVENTS）。注入事件不经本
-     * monitor 拦截（spy 只观察），直接派发到下层窗口。
-     *
-     * 全参数真实设备伪装——注入事件无任何"虚拟设备"指纹，下层应用
-     * （含反作弊自检）无从区分真实手指：
-     * - deviceId / xPrecision / yPrecision 取自真实 touchscreen 设备
-     *   （虚拟设备指纹 deviceId=0 / 精度 0 是旧实现的破绽）；
-     * - 坐标 ±1.5px 抖动（真实手指不可能落在精确整数/原样目标点）；
-     * - 压力、接触面积在真实区间内随机（恒 1.0 是注入特征）；
-     * - DOWN→UP 时长 45~140ms 随机（恒定 16ms 是注入特征），UP 压力
-     *   归零与真实抬指一致。
-     *
-     * 注入前记录事件签名（downTime/deviceId/抖动后坐标），回流副本由
-     * [isSelfInjected] 精确识别后整串忽略。
-     *
-     * 无 shell 兜底：`/system/bin/input` 的 fork+exec 是无法掩盖的强特征
-     * （进程创建审计、/proc cmdline、input 工具自身 logcat 输出）。
-     * uid=0 下反射注入全版本可用；极端失败路径选择静默丢弃本次 tap
-     * （用户重试即可），绝不以暴露进程特征为代价。
-     */
-    private fun injectTap(x: Int, y: Int) {
-        val device = pickRealTouchscreen()
-        val deviceId = device?.id ?: 0
-        val xPrecision = device
-            ?.getMotionRange(MotionEvent.AXIS_X, InputDevice.SOURCE_TOUCHSCREEN)
-            ?.resolution?.takeIf { it > 0f } ?: 1f
-        val yPrecision = device
-            ?.getMotionRange(MotionEvent.AXIS_Y, InputDevice.SOURCE_TOUCHSCREEN)
-            ?.resolution?.takeIf { it > 0f } ?: 1f
-
-        val downTime = SystemClock.uptimeMillis()
-        val jx = x + (Auxiliary.getSecureRandomFloat() * 3f - 1.5f)
-        val jy = y + (Auxiliary.getSecureRandomFloat() * 3f - 1.5f)
-        val duration = 45L + Auxiliary.getSecureRandomLong(95L)
-        val downPressure = 0.45f + Auxiliary.getSecureRandomFloat() * 0.45f
-        val downSize = 0.08f + Auxiliary.getSecureRandomFloat() * 0.17f
-
-        injectDownTime = downTime
-        injectDeviceId = deviceId
-        injectX = jx
-        injectY = jy
-
-        val props = arrayOf(MotionEvent.PointerProperties().apply {
-            id = 0
-            toolType = MotionEvent.TOOL_TYPE_FINGER
-        })
-
-        fun event(action: Int, eventTime: Long, pressure: Float, size: Float) =
-            MotionEvent.obtain(
-                downTime, eventTime, action, 1, props, arrayOf(
-                    MotionEvent.PointerCoords().apply {
-                        this.x = jx
-                        this.y = jy
-                        this.pressure = pressure
-                        this.size = size
-                    }
-                ),
-                0, 0, xPrecision, yPrecision, // metaState, buttonState, xPrecision, yPrecision
-                deviceId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0 // deviceId, edgeFlags, source, flags
-            )
-
-        runCatching {
-            val im = Class.forName("android.hardware.input.InputManager")
-                .getMethod("getInstance").invoke(null)
-            val inject = im.javaClass.getMethod(
-                "injectInputEvent",
-                InputEvent::class.java, Int::class.javaPrimitiveType
-            )
-            val down = event(MotionEvent.ACTION_DOWN, downTime, downPressure, downSize)
-            // 真实抬指：UP 压力/面积归零
-            val up = event(MotionEvent.ACTION_UP, downTime + duration, 0f, 0f)
-            try {
-                inject.invoke(im, down, 0)
-                inject.invoke(im, up, 0)
-            } finally {
-                down.recycle()
-                up.recycle()
-            }
-        }
-    }
-
-    /**
-     * 选取真实 touchscreen 设备（注入伪装用）：id 非 0（非虚拟）、
-     * 非虚拟设备、source 含 touchscreen。无触摸屏的极端环境返回 null
-     * （注入退回 deviceId=0，仅保功能——此时设备本身无真实触摸可言）。
-     */
-    private fun pickRealTouchscreen(): InputDevice? = runCatching {
-        InputDevice.getDeviceIds()
-            .asSequence()
-            .mapNotNull { InputDevice.getDevice(it) }
-            .firstOrNull {
-                it.id != 0 && !it.isVirtual &&
-                        (it.sources and InputDevice.SOURCE_TOUCHSCREEN) != 0
-            }
-    }.getOrNull()
-
-    /**
-     * 精确判定事件是否为自身注入的副本：与最近一次注入的 downTime
-     * （毫秒级精确匹配，DOWN/UP 副本同源同值）、deviceId（注入时记录的
-     * 伪装设备 id）、单指针、坐标（抖动后，±2f 容差）逐项吻合。downTime
-     * 为注入时自选的 uptimeMillis、坐标含随机抖动，真实触摸逐项吻合的
-     * 概率可忽略。
-     */
-    private fun isSelfInjected(e: MotionEvent): Boolean =
-        injectDownTime != 0L &&
-                e.downTime == injectDownTime &&
-                e.deviceId == injectDeviceId &&
-                e.pointerCount == 1 &&
-                kotlin.math.abs(e.x - injectX) <= 2f &&
-                kotlin.math.abs(e.y - injectY) <= 2f
 }

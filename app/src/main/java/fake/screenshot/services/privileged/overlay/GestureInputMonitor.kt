@@ -19,10 +19,10 @@ import java.io.FileDescriptor
  *   SOCK_SEQPACKET 读取 InputMessage 二进制并自解析（见 [InputMessageCodec]）；
  * - 每条 KEY/MOTION 立即回发 FINISHED ACK——这是路线 B 唯一无法回避的
  *   协议义务（不 ACK 触发系统级输入 ANR，属严重暴露面）；
- * - 命中悬浮窗时调用 pilferPointers：InputDispatcher 立即截断该指针流
- *   向其他窗口的后续派发（下层最多收到一个孤立 DOWN，无 UP 不构成
- *   click，且事件本身不带任何遮挡标记）——等效旧方案的可触摸控制窗口，
- *   但完全不经 WMS / 不产生任何窗口记录。
+ * - 纯观察者模式：只读副本、从不 pilferPointers——真实事件流始终
+ *   原生派发下层应用（DOWN→MOVE…→UP 完整合法收尾，无孤儿 DOWN、
+ *   无无成因 CANCEL、无指针流截断），悬浮窗从副本旁观响应（见
+ *   [OverlayGestureController] 类文档）。
  *
  * ==================== fd 生命周期（单点关闭） ====================
  *
@@ -126,9 +126,8 @@ internal class GestureInputMonitor(
         running = false
         // 唤醒阻塞的 read：shutdown 使 socket 断开、read 立即返回 EOF，
         // 读线程随后自行退出并独占关闭 fd。不 close（close 权在读线程）。
-        // 持锁执行保证 fd 尚未被读线程关闭（读线程 close 前先在同锁内
-        // 置空本字段）；shutdown 不释放 fd 号，故无论时序如何都不会
-        // 触及复用中的 fd。
+        // 持锁执行保证 fd 尚未被读线程关闭（读线程 close 前先在同锁内置空本字段）；
+        // shutdown 不释放 fd 号，故无论时序如何都不会触及复用中的 fd。
         synchronized(fdLock) {
             ownerPfd?.let { pfd ->
                 runCatching {
@@ -142,11 +141,6 @@ internal class GestureInputMonitor(
         reader = null
         OverlayHiddenApi.callMonitor(monitor, "dispose")
         monitor = null
-    }
-
-    /** 命中悬浮窗（DOWN 时判定）即抢占指针流，下层收不到后续事件。 */
-    fun pilferPointers() {
-        OverlayHiddenApi.callMonitor(monitor, "pilferPointers")
     }
 
     // ==================== 读取线程 ====================

@@ -114,7 +114,7 @@ internal object OverlayHiddenApi {
         return null
     }
 
-    /** InputMonitor 反射方法调用（getInputChannel / pilferPointers / dispose）。 */
+    /** InputMonitor 反射方法调用（getInputChannel / dispose）。 */
     fun callMonitor(monitor: Any?, method: String): Any? {
         if (monitor == null) return null
         return runCatching {

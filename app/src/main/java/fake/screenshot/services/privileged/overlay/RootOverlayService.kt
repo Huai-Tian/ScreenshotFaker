@@ -57,10 +57,13 @@ import java.util.concurrent.atomic.AtomicInteger
  *   [OverlaySurfaceBackend]；
  * - 输入：IInputManager.monitorGestureInput（uid=0 过 MONITOR_INPUT）建立
  *   手势监视通道，自解析 InputMessage 二进制协议（Android 11-16 四代
- *   布局）并即时回发 FINISHED ACK；命中悬浮窗时 pilferPointers 抢占
- *   指针流——见 [GestureInputMonitor] / InputMessageCodec；
+ *   布局）并即时回发 FINISHED ACK；纯观察者模式——只读副本从不
+ *   pilferPointers，真实事件流始终原生派发下层应用——见
+ *   [GestureInputMonitor] / InputMessageCodec；
  * - 手势：与普通悬浮窗完全一致的状态机（移动/四角缩放/图片平移缩放/
- *   长按 seek/双击分区/视频单击透传注入）——见 [OverlayGestureController]。
+ *   长按 seek/双击分区），全部从事件副本旁观判定，触摸主权归下层
+ *   应用（悬浮窗与下层同时消费同一次触摸）——见
+ *   [OverlayGestureController]。
  *
  * ==================== 检测面对照 ====================
  *
@@ -74,6 +77,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * | 无障碍/窗口列表枚举窗口                  | 无窗口（纯 layer + monitor）|
  * | SYSTEM_ALERT_WINDOW AppOps 追溯         | 不使用 overlay 通道         |
  * | WMS session 加固（Android 15）           | 不经 WMS                    |
+ * | 指针流截断/孤儿 DOWN/无成因 CANCEL        | 纯观察者：不 pilfer 不注入， |
+ * |                                        | 下层流原生完整合法收尾      |
  * | 输入 ANR / 派发超时日志                  | 即时 FINISHED ACK           |
  * | monitor/layer/线程名                     | 全部随机字符串              |
  *
@@ -718,7 +723,6 @@ class RootOverlayService : Binder() {
                 context = context,
                 handler = handler,
                 backend = backend,
-                input = mon,
                 onSwitchMedia = { delta -> notifySwitchMedia(delta) }
             ).apply {
                 screenWidth = this@RootOverlayService.screenWidth
