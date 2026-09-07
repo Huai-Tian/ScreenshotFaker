@@ -6,13 +6,18 @@ import java.io.File
 import java.security.MessageDigest
 
 /**
- * L0 注入检测雷管（Java 侧编排，检测与兜底引爆在 libmemsys.so）。
+ * L0 执行路径劫持检测雷管（Java 侧编排，检测与兜底引爆在 libmemsys.so）。
  *
- * 覆盖：注入框架（Frida/Substrate/SandHook 等，maps 黑名单）与
- * ptrace 型内存扫描器（GG 修改器类——扫描必须 attach，TracerPid
- * 1s 快轮询 2s 内引爆；PR_SET_DUMPABLE=0 同时令非 root 攻击者
- * 完全无法 attach）。root 经 /proc/mem 的静默直读原理上不可检测，
- * 由会话自动锁定缩小 DK 驻留窗口缓解（见包 README 威胁模型）。
+ * 覆盖（自我 hook 审计三线，DuckDetector 方法论——不检测注入框架的
+ * 存在（痕迹检测在匿名装载时代已失效），检测自己的执行路径是否被
+ * 劫持；hook 是结构性动作，与注入载体的隐蔽方式无关）：
+ * - GOT/PLT 解析劫持（dlsym 感知面符号越出预期系统模块）
+ * - inline hook/蹦床（关键 libc 函数与本库雷管函数入口指令异常）
+ * - 驻留信号 handler（SIGTRAP/BUS/SEGV/ILL 指向匿名映射）
+ * 以及 ptrace 型内存扫描器（GG 修改器类——扫描必须 attach，TracerPid
+ * 1s 快轮询；PR_SET_DUMPABLE=0 同时令非 root 攻击者完全无法 attach）。
+ * root 经 /proc/mem 的静默直读原理上不可检测，由会话自动锁定缩小
+ * DK 驻留窗口缓解（见包 README 威胁模型）。
  *
  * 防绕过分层：
  * 1. native 自主线程（nativeInit 启动，不依赖 Java 调用驱动）——
@@ -27,7 +32,7 @@ import java.security.MessageDigest
  * 保留——门禁行为前后一致，不暴露"引爆发生过"。
  *
  * debug build 不启动（开发调试需要 jdwp/ptrace）。
- * 库加载失败不引爆（正常 ROM 不会失败；失败本身不构成注入证据）。
+ * 库加载失败不引爆（正常 ROM 不会失败；失败本身不构成劫持证据）。
  *
  * JNI 符号（guard.cpp）：Java_fake_screenshot_defense_GuardManager_*
  * ——本类的包名/类名是 JNI 契约的一部分，重命名必须同步 guard.cpp。
@@ -60,8 +65,8 @@ object GuardManager {
     }
 
     /**
-     * 单次同步注入检查（不引爆）。
-     * @return true = 检测到注入（调用方执行完整销毁）；false = 干净或库不可用
+     * 单次同步执行路径检查（不引爆）。
+     * @return true = 检测到劫持（调用方执行完整销毁）；false = 干净或库不可用
      */
     fun checkNow(): Boolean =
         nativeReady && runCatching { nativeCheck() }.getOrDefault(false)

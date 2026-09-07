@@ -1,8 +1,9 @@
-// 注入检测雷管（libmemsys.so——中性化库名，maps 可见；源码内称 guard）
+// 执行路径劫持检测雷管（libmemsys.so——中性化库名，maps 可见；源码内称 guard）
 //
-// 威胁：root 取证者向 app 进程注入（Frida attach/spawn、LSPosed 定向 hook、
-// Substrate/SandHook 等）或用 GG 修改器类扫描器扫取内存（均需 ptrace
-// attach）以窃取门禁密码或 DK。Java 层检测可被同层 hook 拦截（一行
+// 威胁：root 取证者劫持本进程 native 执行路径以窃取门禁密码或 DK——
+// hook 关键 libc 函数令检测/读文件"撒谎"、inline patch/蹦床劫持雷管
+// 函数、驻留信号 handler 拦截信号；以及 GG 修改器类扫描器扫取内存
+// （需 ptrace attach）。Java 层检测可被同层 hook 拦截（一行
 // hook 让检测函数恒返回"干净"），因此检测与引爆均在 native：
 // - 自主 watchdog 线程：不依赖任何 Java 调用驱动，Java 层被完全接管仍工作
 // - 引爆动作：覆写（零填充+fsync）并 unlink 密文文件 → SIGKILL 自身。
@@ -11,42 +12,54 @@
 //   （含 Keystore 条目删除与 daemon 停止，比 native 单删文件更彻底），
 //   native 引爆是 Java 层被拦截时的兜底
 //
-// 反扫描（GG 修改器类）：
-// - 扫描器必须 ptrace attach → TracerPid 快轮询（1s）2s 内引爆；
-//   GG 是交互式工具（会话持续数分钟），必被捕获
-// - PR_SET_DUMPABLE=0：非 root 攻击者（Shizuku 级）从此无法 attach，
-//   而不只是"被检测"
-// - 根本边界（诚实声明）：root 无需 attach 即可经 /proc/pid/mem、
-//   process_vm_readv 静默直读（TracerPid 恒 0），内核无任何"内存被读"
-//   通知机制，原理上不可检测——唯一缓解是 Java 侧自动锁定缩小 DK 驻留
+// 自我 hook 审计三线（DuckDetector 方法论）：不检测注入框架的存在
+// （框架痕迹检测在匿名内存装载/静态链入时代已失效），检测自己的
+// 执行路径是否被劫持——hook 是结构性动作（改机器码或改符号解析），
+// 与注入载体的隐蔽方式无关：
+// - 线1 GOT/PLT 解析审计：dlsym 解析 12 个感知面符号（open/read/mmap/
+//   dlopen 等——隐藏/操纵框架要控制 app 感知的必经之路），解析地址必须
+//   落在预期系统模块（libc/libdl/linker）范围内；越界或 unmapped
+//   = 符号解析被劫持
+// - 线2 入口序言审计：读函数入口指令——branch-like（B/BL/BR/BLR）且
+//   非正常编译器序言（stp/sub sp/nop/paciasp/adrp 白名单），或
+//   trampoline handoff（LDR literal + BR xN）= inline hook。审计对象
+//   含 libc 12 符号与本库雷管函数（detonate/shred_file/ct_eq_*/
+//   canary_check 等——攻击者要废雷管必须 hook 它们，入口必变）
+// - 线3 信号 handler 审计：SIGTRAP/SIGBUS/SIGSEGV/SIGILL 的 handler
+//   指向匿名映射或无映射 = 可疑（hook 框架驻留内存 handler 拦截信号/
+//   反调试）；指向有文件路径的正常模块豁免（ART fault manager 在
+//   libart.so、本库崩溃信号链的 guard_crash_handler 在本库）
 //
-// 自完整性校验（反 inline patch，见"自完整性校验"节）：
-// - 本库 .text 与磁盘基准逐字节比对，抓"改已有代码"（maps 黑名单
-//   只抓"注入新库"）——单发 POKE patch 掉常量时间比较即全绕过门禁，
-//   这是必须封堵的一行攻击路径
+// 与既有检测线的互补分工：
+// - 自完整性校验：函数内部 patch（nop 掉 detonate 内部的 kill、改检测
+//   线内部判定常量）——序言审计只看入口，函数内部只有它覆盖
+// - 双实现常量时间比较 + canary：硬件断点 hook 比较函数
+// - TracerPid 快轮询：交互式扫描器与 attach 瞬态窗口（frida-server
+//   attach→注入→detach 常短于 2s 确认窗，但注入完成即留下 inline
+//   hook/蹦床，由线1/线2 接续覆盖；zygote fork 链路注入本就无
+//   ptrace 瞬态，直接由三线覆盖）
 //
-// 反硬件断点内核外挂（内核态裸写 DBGBCR/DBGWVR hook 用户态函数）：
-// - 无法阻止也无法检测寄存器被写（用户态读不到调试寄存器）；占用
-//   断点资源（perf_event_open）对裸写寄存器的内核外挂无效
-// - 对策是"断点资源耗尽"策略：关键比较提供两个结构不同的独立实现
-//   （ct_eq_byte/ct_eq_word），验证方要求两者结果一致——每个关键点
-//   必须同时挂两个断点，ARM64 有限的断点资源（典型 4-6 个）被成倍
-//   消耗（见"常量时间比较"节）
-// - canary 哨兵自检（watchdog 周期）：随机数据验证比较函数语义
-//   （相同→true/不同→false，双实现一致）——hook 成恒真/恒假/
-//   结果反转均被抓。精确 hook（识别调用来源选择性撒谎）抓不住，
-//   但需要 hook 代码做栈回溯甄别，成本数量级提升
+// 诚实边界：
+// - root 无需 attach 即可经 /proc/pid/mem、process_vm_readv 静默直读
+//   （TracerPid 恒 0），原理上不可检测——唯一缓解是 Java 侧自动锁定
+//   缩小 DK 驻留
+// - 定向 patch 本库 GOT 项（如 dlsym 调用点）可令审计拿到假地址：
+//   需先注入代码（装载面政策上不检测）+ 逆向 stripped 库定位 RELRO
+//   段内特定 GOT 项 + mprotect 改写；自完整性/TracerPid/canary 独立
+//   于该路径仍然工作
+// - Java 层 hook（LSPlant/ArtMethod swap）不动 native 机器码，三线
+//   不命中——由 v3 解密式验证 + 双实现比较 + canary 承担
 //
 // 误报控制（引爆 = 用户数据销毁，代价极高，规则保守）：
-// - 黑名单只列注入框架特征库名；刻意排除 magisk/zygisk/riru/xposed 等
-//   root 框架名——它们由 zygote preload，出现在所有进程的 maps 中，
-//   列入会导致所有 root 用户被误杀
-// - "gum" 单独是误报源（webview 的 libgumbo），必须用完整 "gum-js"
+// - 符号解析失败（dlsym null）/ dlopen 失败：跳过该符号（怪环境不误杀）
+// - maps 读取失败 / libc 不在 maps：跳过本轮，不视为命中
+// - 入口序言白名单涵盖常见编译器序言；32 位 ABI（arm Thumb/x86）仅检
+//   最强蹦床特征（LDR PC,[PC,#-4] / JMP rel32 / PUSH imm32;RET）从宽
+// - 序言审计不越界读：入口距映射尾部不足 12 字节跳过
 // - crash 时 debuggerd/tombstoned 会 ptrace attach：三重白名单防误杀——
 //   ①tracer 进程名白名单（debuggerd/tombstoned）②本进程崩溃信号标记
 //   （崩溃后 30s 内的 attach 一律放过，覆盖未知名的 OEM 崩溃收集器）
 //   ③连续 2 轮（2s）确认（`debuggerd -b` 等瞬态合法 attach 活不过确认期）
-// - maps/status 读取失败：跳过本轮（怪异 ROM 不得误杀），不视为命中
 // - debug build：Java 侧不调用 nativeInit，watchdog 不启动
 //
 // 静默性：无任何日志输出，strip-all 去符号。
@@ -54,6 +67,7 @@
 #include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <signal.h>
@@ -80,19 +94,6 @@ static const int kConfirmRounds = 2;
 // 崩溃标记有效期（秒）：覆盖 crash 收集全程（debuggerd dump 约 2-10s）
 static const int kCrashWindowSec = 30;
 
-// 可执行映射路径黑名单（子串匹配，大小写敏感）
-// 全部为注入框架专属名，正常 app/系统库不含
-static const char* kBlacklist[] = {
-        "frida",       // frida-agent / frida-gadget（改名 gadget 的变体覆盖不到，接受）
-        "gum-js",      // frida gum JS 引擎（勿用 "gum"：撞 webview 的 libgumbo）
-        "linjector",   // frida 轻量注入器
-        "libdobby",    // inline hook 框架（LSPosed 生态常用）
-        "liblsplant",  // Java 方法 hook 核心（本进程被任何模块 hook 即出现）
-        "libsubstrate",// SaurikSubstrate
-        "libsandhook", // SandHook
-        "libepic",     // Epic hook 框架
-};
-
 // ===================== 状态（init 后只读） =====================
 
 static std::vector<std::string> g_target_files;  // 覆写+删除的密文文件
@@ -116,7 +117,8 @@ static bool in_crash_window() {
 }
 
 // 读 /proc/self/status 的 TracerPid。0 = 无 tracer；-1 = 读取失败
-// （不视为命中，防误杀）
+// （不视为命中，防误杀）。noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static int read_tracer_pid() {
     FILE* f = fopen("/proc/self/status", "re");
     if (!f) return -1;
@@ -135,7 +137,9 @@ static int read_tracer_pid() {
 // tracer 进程名白名单：系统崩溃收集器（crash 时合法 attach）。
 // /proc/<pid>/stat 全局可读（comm 字段不受 ptrace 限制）。
 // root 攻击者可把扫描进程改名为 debuggerd 绕过——但其本可静默直读
-// （已知边界），此白名单不为对抗 root 而设，只为不误杀
+// （已知边界），此白名单不为对抗 root 而设，只为不误杀。
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static bool tracer_whitelisted(int pid) {
     if (pid <= 0) return false;
     char path[64];
@@ -159,34 +163,282 @@ static bool tracer_whitelisted(int pid) {
            strncmp(comm, "tombstoned", 10) == 0;
 }
 
-// /proc/self/maps 扫描：可执行映射路径命中黑名单
-// 解析不依赖地址段长度（perms 定位到首个空格后第 3 字符），路径取 " /" 之后
-static bool scan_maps() {
-    FILE* f = fopen("/proc/self/maps", "re");
-    if (!f) return false;
-    char line[4096];
-    bool bad = false;
-    while (!bad && fgets(line, sizeof(line), f)) {
-        char* sp = strchr(line, ' ');
-        if (!sp || sp[3] != 'x') continue;  // perms 4 字符：r/x 位于 sp[1]、sp[3]
-        char* path = strstr(sp, " /");
-        if (!path) continue;                 // 匿名映射无路径
-        path += 1;                           // 指向 '/'
-        for (const char* pat : kBlacklist) {
-            if (strstr(path, pat) != nullptr) {
-                bad = true;
-                break;
-            }
+// ===================== 自我 hook 审计（三线，DuckDetector 方法论）=====================
+
+// 前向声明：自身雷管函数表引用文件后部定义的函数（noinline 在各自
+// 定义处，确保独立函数体与稳定入口——序言审计的前提）
+static void detonate();
+static void shred_file(const char* path);
+static void shred_dir(const char* path, int depth);
+static void* watchdog_main(void* arg);
+static void guard_crash_handler(int sig, siginfo_t* info, void* ctx);
+static int ct_eq_byte(const volatile unsigned char* a,
+                      const volatile unsigned char* b, size_t n);
+static int ct_eq_word(const volatile unsigned char* a,
+                      const volatile unsigned char* b, size_t n);
+static bool canary_check();
+static bool audit_execution_paths();
+
+// 线2 审计对象之一：本库雷管函数。攻击者要废雷管必须 hook/patch 它们，
+// 入口必变。表内容为函数地址（无名字符串——静默性，strip 后无信息量）
+static const void* const kSelfFunctions[] = {
+        reinterpret_cast<const void*>(&detonate),
+        reinterpret_cast<const void*>(&shred_file),
+        reinterpret_cast<const void*>(&shred_dir),
+        reinterpret_cast<const void*>(&watchdog_main),
+        reinterpret_cast<const void*>(&read_tracer_pid),
+        reinterpret_cast<const void*>(&tracer_whitelisted),
+        reinterpret_cast<const void*>(&guard_crash_handler),
+        reinterpret_cast<const void*>(&audit_execution_paths),
+        reinterpret_cast<const void*>(&ct_eq_byte),
+        reinterpret_cast<const void*>(&ct_eq_word),
+        reinterpret_cast<const void*>(&canary_check),
+};
+
+// 线1 审计对象：libc 感知面符号（隐藏/操纵框架要控制 app 感知的必经
+// 之路）。allowLinker：dl* 家族在不同 Android 版本由 libc/linker 提供
+static const struct {
+    const char* name;
+    bool allowLinker;
+} kSenseSymbols[] = {
+        {"open", false},     {"openat", false},  {"read", false},
+        {"write", false},    {"stat", false},    {"access", false},
+        {"readlink", false}, {"mmap", false},    {"mprotect", false},
+        {"dlopen", true},    {"dlsym", true},    {"dlclose", true},
+};
+
+// 待查地址的 maps 定位结果
+struct AddrPlacement {
+    uintptr_t addr;
+    uintptr_t mapEnd;  // 所在映射结束地址（序言读越界防护）
+    bool resolved;     // 定位到映射
+    bool readable;     // 映射可读
+    bool hasPath;      // 映射有文件路径（非匿名）
+};
+
+// 预期模块地址范围（线1 判定基准）
+struct AddrRange {
+    uintptr_t start;
+    uintptr_t end;
+};
+
+// 读 4 字节（memcpy 防对齐/别名 UB）。仅 aarch64/arm 的指令模式判定使用
+#if defined(__aarch64__) || defined(__arm__)
+static inline uint32_t read32_at(uintptr_t addr) {
+    uint32_t v;
+    memcpy(&v, reinterpret_cast<const void*>(addr), sizeof(v));
+    return v;
+}
+#endif
+
+// 入口是否被 hook。掩码/模式与 DuckDetector function_hook_detector
+// 一致；32 位 ABI 从宽（仅最强蹦床特征，正常函数入口不可能命中）
+#if defined(__aarch64__)
+static bool entry_is_hooked(uintptr_t addr) {
+    uint32_t first = read32_at(addr);
+    uint32_t second = read32_at(addr + 4);
+    // trampoline handoff：LDR Xn, [pc]; BR Xn（蹦床标志，双指令模式）
+    if ((first & 0xFF000000u) == 0x58000000u &&
+        (second & 0xFFFFFC00u) == 0xD61F0000u) {
+        return true;
+    }
+    // branch-like：B/BL（>>26 判定）或 BR/BLR xN
+    bool branch = (first >> 26) == 0x05 || (first >> 26) == 0x25 ||
+                  (first & 0xFFFFFC1Fu) == 0xD61F0000u ||
+                  (first & 0xFFFFFC1Fu) == 0xD63F0000u;
+    if (!branch) return false;
+    // 正常编译器序言白名单：stp x29,x30,[sp,#-N]!（任意 imm）/ sub sp,sp,#N /
+    // mov x29,sp / nop / paciasp / adrp。
+    // 注①：DuckDetector 原掩码 (0xFFC003FF==0xA9BF7BFD) 恒假（常量的
+    // 被掩蔽位非零）——上游 stp 条目从未真正比较过；此处改为保留
+    // opcode+Rt2+Rn+Rt、imm 任意的正确掩码。
+    // 注②：白名单仅在首指令 branch-like 时参与判定，而表中序言编码
+    // 均非 branch-like——此层为纵深防御（防未来指令集扩展的意外交叠），
+    // 实际判定力来自 branch-like 检测本身。bti c（0xD503245F）经核算
+    // 非 branch-like（>>26==3，BR/BLR 掩码不匹配），BTI 入口安全
+    bool normalPrologue = (first & 0xFFC07FFFu) == 0xA9807BFDu ||
+                          (first & 0xFF8003FFu) == 0xD10003FFu ||
+                          first == 0x910003FDu ||
+                          first == 0xD503201Fu ||
+                          first == 0xD503233Fu ||
+                          (first & 0x9F000000u) == 0x90000000u;
+    return !normalPrologue;
+}
+#elif defined(__x86_64__)
+static bool entry_is_hooked(uintptr_t addr) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(addr);
+    if (b[0] == 0xFF && b[1] == 0x25) return true;  // JMP [rip+disp32]
+    if (b[0] == 0x48 && b[1] == 0xB8 &&            // MOV rax, imm64
+        b[10] == 0xFF && b[11] == 0xE0) return true; // JMP rax
+    if (b[0] == 0xE9 || b[0] == 0xEB) return true; // JMP rel32/rel8
+    return false;
+}
+#elif defined(__i386__)
+static bool entry_is_hooked(uintptr_t addr) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(addr);
+    if (b[0] == 0xE9 || b[0] == 0xEB) return true;  // JMP rel32/rel8
+    if (b[0] == 0xFF && b[1] == 0x25) return true;  // JMP [disp32]
+    if (b[0] == 0x68 && b[5] == 0xC3) return true;  // PUSH imm32; RET
+    return false;
+}
+#elif defined(__arm__)
+static bool entry_is_hooked(uintptr_t addr) {
+    if (addr & 1u) {  // Thumb 模式（函数指针 bit0 置位）
+        addr &= ~(uintptr_t)1u;
+        uint16_t h0, h1;
+        memcpy(&h0, reinterpret_cast<const void*>(addr), 2);
+        memcpy(&h1, reinterpret_cast<const void*>(addr + 2), 2);
+        return h0 == 0xF85Fu && h1 == 0xF004u;  // LDR.W PC,[PC,#-4]
+    }
+    return read32_at(addr) == 0xE51FF004u;      // LDR PC,[PC,#-4]
+}
+#else
+static bool entry_is_hooked(uintptr_t) { return false; }  // 未知 ABI：从宽
+#endif
+
+// 单遍 maps 流式定位：地址落入当前行即记录映射特征
+static void place_addrs(AddrPlacement* items, int count, uintptr_t start,
+                        uintptr_t end, bool readable, bool hasPath) {
+    for (int i = 0; i < count; i++) {
+        if (!items[i].resolved && items[i].addr >= start && items[i].addr < end) {
+            items[i].resolved = true;
+            items[i].readable = readable;
+            items[i].hasPath = hasPath;
+            items[i].mapEnd = end;
         }
     }
+}
+
+static bool in_ranges(const AddrRange* ranges, int count, uintptr_t addr) {
+    for (int i = 0; i < count; i++) {
+        if (addr >= ranges[i].start && addr < ranges[i].end) return true;
+    }
+    return false;
+}
+
+// 三线审计主入口。返回 true = 执行路径被劫持（引爆/交 Java 完整销毁）；
+// maps 不可读或 libc 不在 maps：返回 false（怪环境不误杀，沿用旧原则）
+__attribute__((noinline))
+static bool audit_execution_paths() {
+    struct HookAudit {
+        AddrPlacement syms[12];    // dlsym 解析的感知面符号
+        bool allowLinker[12];
+        int symCount;
+        AddrPlacement selfs[11];   // 本库雷管函数
+        int selfCount;
+        AddrPlacement handlers[4]; // 非默认信号 handler
+        int handlerCount;
+        AddrRange libcRanges[32];
+        int libcRangeCount;
+        AddrRange linkerRanges[32]; // libdl.so / linker*
+        int linkerRangeCount;
+    } a{};
+    if (sizeof(a.syms) / sizeof(a.syms[0]) < sizeof(kSenseSymbols) / sizeof(kSenseSymbols[0]) ||
+        sizeof(a.selfs) / sizeof(a.selfs[0]) < sizeof(kSelfFunctions) / sizeof(kSelfFunctions[0])) {
+        return false;  // 静态防御（编译期可证，运行期不可能）
+    }
+
+    // 线3 前置：采集非默认信号 handler 地址
+    static const int kWatchedSigs[4] = {SIGTRAP, SIGBUS, SIGSEGV, SIGILL};
+    for (int sig : kWatchedSigs) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        if (sigaction(sig, nullptr, &sa) != 0) continue;
+        uintptr_t handler = (sa.sa_flags & SA_SIGINFO) != 0
+                            ? reinterpret_cast<uintptr_t>(sa.sa_sigaction)
+                            : reinterpret_cast<uintptr_t>(sa.sa_handler);
+        if (handler == 0 ||
+            handler == reinterpret_cast<uintptr_t>(SIG_DFL) ||
+            handler == reinterpret_cast<uintptr_t>(SIG_IGN)) {
+            continue;
+        }
+        a.handlers[a.handlerCount++].addr = handler;
+    }
+
+    // 线1/线2 前置：dlsym 解析感知面符号。dlopen/dlsym 失败（怪环境或
+    // 被 hook 到失效）只影响 libc 符号线；自身雷管函数审计不依赖 dlsym
+    void* globalHandle = dlopen(nullptr, RTLD_NOW);
+    if (globalHandle != nullptr) {
+        for (const auto& sym : kSenseSymbols) {
+            void* p = dlsym(globalHandle, sym.name);
+            if (p == nullptr) continue;  // 解析失败跳过（怪环境不误杀）
+            a.syms[a.symCount].addr = reinterpret_cast<uintptr_t>(p);
+            a.allowLinker[a.symCount] = sym.allowLinker;
+            a.symCount++;
+        }
+    }
+    for (const void* fn : kSelfFunctions) {
+        a.selfs[a.selfCount++].addr = reinterpret_cast<uintptr_t>(fn);
+    }
+
+    // 单遍读 maps：收集预期模块范围 + 定位全部待查地址
+    FILE* f = fopen("/proc/self/maps", "re");
+    if (f == nullptr) return false;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        uintptr_t s = 0, e = 0;
+        if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &s, &e) != 2 || e <= s) continue;
+        char* sp = strchr(line, ' ');
+        if (sp == nullptr) continue;
+        bool readable = sp[1] == 'r';
+        char* pathField = strstr(sp, " /");  // 匿名映射（含 [anon:...]）无 " /"
+        const char* path = pathField != nullptr ? pathField + 1 : nullptr;
+        // 收集预期模块范围（子串从宽匹配：范围集偏宽只降低线1 灵敏度，
+        // 不产生误报；痕迹对抗不在本线射程）
+        if (path != nullptr) {
+            if (strstr(path, "libc.so") != nullptr) {
+                if (a.libcRangeCount < (int)(sizeof(a.libcRanges) / sizeof(a.libcRanges[0]))) {
+                    a.libcRanges[a.libcRangeCount++] = {s, e};
+                }
+            } else if (strstr(path, "libdl.so") != nullptr ||
+                       strstr(path, "linker") != nullptr) {
+                if (a.linkerRangeCount < (int)(sizeof(a.linkerRanges) / sizeof(a.linkerRanges[0]))) {
+                    a.linkerRanges[a.linkerRangeCount++] = {s, e};
+                }
+            }
+        }
+        place_addrs(a.syms, a.symCount, s, e, readable, path != nullptr);
+        place_addrs(a.selfs, a.selfCount, s, e, readable, path != nullptr);
+        place_addrs(a.handlers, a.handlerCount, s, e, readable, path != nullptr);
+    }
     fclose(f);
-    return bad;
+    if (a.libcRangeCount == 0) return false;  // libc 不在 maps：环境异常，跳过
+
+    // 线1 GOT/PLT 解析审计：感知面符号必须解析进预期系统模块。
+    // unmapped 同样命中（dlsym 返回的活代码地址必然在 maps；
+    // 不在 = maps 被伪造/对我们隐藏）
+    for (int i = 0; i < a.symCount; i++) {
+        bool ok = in_ranges(a.libcRanges, a.libcRangeCount, a.syms[i].addr) ||
+                  (a.allowLinker[i] &&
+                   in_ranges(a.linkerRanges, a.linkerRangeCount, a.syms[i].addr));
+        if (!ok) return true;
+    }
+    // 线2 入口序言审计（libc 符号 + 本库雷管函数）。
+    // 未定位/不可读/入口距映射尾不足 12 字节：跳过（防越界读崩溃；
+    // 本库代码完整性另由自完整性校验覆盖）
+    for (int i = 0; i < a.symCount; i++) {
+        const AddrPlacement& it = a.syms[i];
+        if (!it.resolved || !it.readable || it.mapEnd - it.addr < 12) continue;
+        if (entry_is_hooked(it.addr)) return true;
+    }
+    for (int i = 0; i < a.selfCount; i++) {
+        const AddrPlacement& it = a.selfs[i];
+        if (!it.resolved || !it.readable || it.mapEnd - it.addr < 12) continue;
+        if (entry_is_hooked(it.addr)) return true;
+    }
+    // 线3 信号 handler 审计：非默认 handler 指向匿名映射/无映射 = 命中。
+    // 指向有路径的正常模块豁免（ART fault manager 在 libart.so、
+    // guard_crash_handler 在本库——均有路径）
+    for (int i = 0; i < a.handlerCount; i++) {
+        if (!a.handlers[i].resolved || !a.handlers[i].hasPath) return true;
+    }
+    return false;
 }
 
 // ===================== 自完整性校验（反 inline patch）=====================
 //
 // 威胁：ptrace POKE 单发 patch 本库 .text（如把 nativeConstantTimeEquals
-// 改为恒真）——maps 黑名单只抓"注入新库"，抓不住"改已有代码"，这是
+// 改为恒真）——序言审计只看函数入口，抓不住"改函数内部"，这是
 // 一行绕过门禁的真实路径。
 //
 // 防御：watchdog 周期性把本库全部可执行映射与磁盘 .so 文件逐字节比对
@@ -290,7 +542,9 @@ static int check_self_integrity() {
 // ===================== 引爆 =====================
 
 // 覆写（零填充 + fsync）后删除单个文件。覆写失败仍尝试 unlink：
-// 文件系统层面不可恢复优先，尽力而为
+// 文件系统层面不可恢复优先，尽力而为。
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static void shred_file(const char* path) {
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return;
@@ -312,6 +566,8 @@ static void shred_file(const char* path) {
 }
 
 // 递归清空目录内容（目录本身保留，避免 DataStore 路径判定的额外痕迹）
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static void shred_dir(const char* path, int depth) {
     if (depth > 8) return;  // 防异常深链/环
     DIR* d = opendir(path);
@@ -332,7 +588,9 @@ static void shred_dir(const char* path, int depth) {
     closedir(d);
 }
 
-// 引爆：密文覆写销毁 → SIGKILL（不可拦截）。全程无 Java 调用
+// 引爆：密文覆写销毁 → SIGKILL（不可拦截）。全程无 Java 调用。
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static void detonate() {
     for (const std::string& p : g_target_files) {
         shred_file(p.c_str());
@@ -360,6 +618,8 @@ static int crash_signal_index(int sig) {
     return -1;
 }
 
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static void guard_crash_handler(int sig, siginfo_t* info, void* ctx) {
     g_crash_time = time(nullptr);
     g_crash_flag = 1;
@@ -403,9 +663,9 @@ static void* watchdog_main(void*) {
     usleep(500 * 1000);  // 首检：启动后 0.5s（冷启动注入是主攻击场景）
     while (g_watchdog_running) {
         if (tick % kMapsEveryNPolls == 0) {
-            // maps 命中 = 注入库已驻留本进程（非瞬态，不存在 crash 误报源）
-            // → 立即引爆
-            if (scan_maps()) {
+            // 自我 hook 审计三线（原黑名单扫描继任者）：命中 = 执行路径
+            // 被劫持（驻留态非瞬态，不存在 crash 误报源）→ 立即引爆
+            if (audit_execution_paths()) {
                 detonate();
             }
             // canary 哨兵：比较函数语义被 hook（恒真/恒假/反转/双实现分歧）
@@ -489,7 +749,7 @@ Java_fake_screenshot_defense_GuardManager_nativeInit(
 // （watchdog 的布防状态机负责该语义）
 extern "C" JNIEXPORT jboolean JNICALL
 Java_fake_screenshot_defense_GuardManager_nativeCheck(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (scan_maps()) return JNI_TRUE;
+    if (audit_execution_paths()) return JNI_TRUE;
     if (check_self_integrity() == 1) return JNI_TRUE;
     int tracer = read_tracer_pid();
     return (tracer > 0 && !in_crash_window() && !tracer_whitelisted(tracer))
@@ -540,7 +800,9 @@ static int ct_eq_word(const volatile unsigned char* a,
 // canary 哨兵自检：随机数据下两实现必须语义正确且交叉一致。
 // 抓：恒真 hook（diff 期望 false 却得 true）、恒假、结果反转、
 // 单实现被 hook 导致两实现分歧。种子用地址/时间/线程 id 熵——
-// 哨兵只测函数语义，无需密码学随机
+// 哨兵只测函数语义，无需密码学随机。
+// noinline：序言审计对象（kSelfFunctions）
+__attribute__((noinline))
 static bool canary_check() {
     unsigned char x[32], y[32], z[32];
     uintptr_t entropy = (uintptr_t) &x ^ (uintptr_t) time(nullptr)
