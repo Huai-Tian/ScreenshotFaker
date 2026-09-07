@@ -49,9 +49,7 @@ object VaultClient {
     private const val OP_FSEAL_INIT = 0x0D
     private const val OP_FSEAL_UPDATE = 0x0E
     private const val OP_FSEAL_FINAL = 0x0F
-    private const val OP_FOPEN_INIT = 0x10
-    private const val OP_FOPEN_UPDATE = 0x11
-    private const val OP_FOPEN_FINAL = 0x12
+    // 0x10-0x12（FOPEN 流式解密）已随死代码删除；OP_DESTROY 固定 0x13
     private const val OP_DESTROY = 0x13
 
     // ---- UNLOCK 结果（vault.cpp UnlockResult）----
@@ -109,9 +107,10 @@ object VaultClient {
     }
 
     /**
-     * 文件级门禁判定（与 vault.cpp opStatus 的 gateOn 语义一致）：
-     * state ∈ {LIVE_PW, DEAD_PW, CORRUPT} = 门禁启用（CORRUPT 上报
-     * gateOn 是 fail-closed 决策——文件不可解析按疑似篡改处理）。
+     * 文件级门禁判定（与 vault.cpp loadState 的 gateOn 语义严格对齐）：
+     * 仅"文件存在且可解析为 LIVE_WK"是门禁关；魔数/版本/状态字节任何
+     * 不符、截断、读失败 = CORRUPT/LIVE_PW/DEAD_PW 同类（vault 对三者
+     * 均上报 gateOn——不可解析按疑似篡改处理，fail-closed）。
      * 崩溃窗口（tmp+rename 原子写）不产生中间态。
      */
     fun refreshGateStateFromDisk() {
@@ -127,12 +126,12 @@ object VaultClient {
                     if (r <= 0) break
                     got += r
                 }
-                if (got < 3) return@runCatching false
+                if (got < 3) return@runCatching true  // 截断 = 不可解析
                 b
             }
-            val st = head[2].toInt()
-            st == MODE_LIVE_PW || st == MODE_DEAD_PW || st == MODE_CORRUPT
-        }.getOrDefault(false)
+            !(head[0] == 'K'.code.toByte() && head[1] == 1.toByte() &&
+                    head[2] == MODE_LIVE_WK.toByte())
+        }.getOrDefault(true)  // 读异常 = 不可解析（fail-closed）
     }
 
     enum class UnlockResult { SECURITY, COERCION, BAD, RATE_LIMITED }
@@ -221,28 +220,36 @@ object VaultClient {
     /**
      * WK 递交（vault 冷启动路径）：
      * - LIVE_WK：sync_wrap.bin 经 Keystore 解包 → SETWK（解开 DK）
-     * - NOTHING（首装/无门禁销毁后）：生成新 WK → 包裹落盘 → SETWK
-     *   （vault 就地创建新 DK）——落盘先于 SETWK，崩溃无空窗
+     * - NOTHING（首装/无门禁销毁后）：生成新 WK → 确认包裹落盘成功 →
+     *   SETWK（vault 就地创建新 DK）——落盘先于 SETWK，崩溃无空窗且
+     *   不产生"vault 建了 DK 而 app 侧无包裹副本"的分裂态
      * - 有门禁/CORRUPT：无需 WK
+     * wkDelivered 仅成功后置位：任何瞬态失败令下次 request() 重新
+     * respawn + 重递（不产生"已递交"假象锁死 LIVE_WK 用户的 DK）。
      */
     private fun deliverWkLocked(): Boolean {
-        wkDelivered = true
         val st = nativeRequest(FrameBuilder().u8(OP_PING).build()) ?: return false
-        if (st.size != 4) return false
+        if (st.size != 3) return false
         val mode = st[1].toInt() and 0x7F
         gateEnabled = (st[1].toInt() and 0x80) != 0
         sessionUnlocked = st[2].toInt() == 1
-        if (mode != MODE_LIVE_WK && mode != MODE_NOTHING) return true
-        val wk: ByteArray = if (mode == MODE_LIVE_WK) {
-            readWrappedWk() ?: return false  // 包裹文件损坏 = DK 不可达（fail-closed）
-        } else {
-            ByteArray(WK_LENGTH).also { SecureRandom().nextBytes(it) }.also { writeWrappedWk(it) }
+        if (mode != MODE_LIVE_WK && mode != MODE_NOTHING) {
+            wkDelivered = true  // 有门禁/CORRUPT：无需 WK
+            return true
         }
+        val wk: ByteArray? = if (mode == MODE_LIVE_WK) {
+            readWrappedWk()  // 包裹文件损坏 = DK 不可达（fail-closed）
+        } else {
+            ByteArray(WK_LENGTH).also { SecureRandom().nextBytes(it) }
+                .takeIf { writeWrappedWk(it) }
+        }
+        if (wk == null) return false
         val resp = nativeRequest(
             FrameBuilder().u8(OP_SETWK).bytes(wk).build()
         )
         wk.fill(0)
         if (resp == null || resp.isEmpty() || resp[0].toInt() != 0) return false
+        wkDelivered = true
         sessionUnlocked = true
         return true
     }
@@ -259,7 +266,7 @@ object VaultClient {
 
     suspend fun status(): VaultStatus? {
         val r = request(FrameBuilder().u8(OP_PING).build()) ?: return null
-        if (r.size != 4) return null
+        if (r.size != 3) return null
         return VaultStatus(r[1].toInt() and 0x7F, (r[1].toInt() and 0x80) != 0, r[2].toInt() == 1)
     }
 
@@ -347,8 +354,14 @@ object VaultClient {
             VR_OK -> {
                 if (r.size != 1 + WK_LENGTH) return GateChangeResult.ERROR
                 val wk = r.copyOfRange(1, 1 + WK_LENGTH)
-                writeWrappedWk(wk)
+                val written = writeWrappedWk(wk)
                 wk.fill(0)
+                if (!written) {
+                    // vault 已转 LIVE_WK 但包裹落盘失败：下次会话 DK 不可达。
+                    // 返回 ERROR 促用户立即重新启用门禁（enableGate 在
+                    // LIVE_WK + DK 内存就绪下可恢复，无数据损失）
+                    return GateChangeResult.ERROR
+                }
                 gateEnabled = false
                 sessionUnlocked = true
                 GateChangeResult.OK
@@ -396,10 +409,12 @@ object VaultClient {
 
     /**
      * 流式文件加密（encrypt_outputs；格式 [12B nonce][ct][16B tag] 与旧
-     * CipherOutputStream 产物同构）。分块 60KB；任一步失败删输出文件。
+     * CipherOutputStream 产物同构）。分块 60KB；任一步失败（协议失败
+     * 返回 false 或异常）删输出文件——截断的 [nonce][ct][无tag] 产物
+     * 无法解密且看似正常。
      */
     suspend fun sealFile(input: File, output: File): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
+        val ok = runCatching {
             val init = request(FrameBuilder().u8(OP_FSEAL_INIT).build())
                 ?.takeIf { it.size == 1 + NONCE_LENGTH && it[0].toInt() == 0 }
                 ?: return@runCatching false
@@ -427,10 +442,9 @@ object VaultClient {
                 out.write(fin, 1, 16)
             }
             true
-        }.getOrElse {
-            runCatching { output.delete() }
-            false
-        }
+        }.getOrDefault(false)
+        if (!ok) runCatching { output.delete() }
+        ok
     }
 
     /**
@@ -466,21 +480,28 @@ object VaultClient {
         }.getOrNull()
     }
 
-    private fun writeWrappedWk(wk: ByteArray) {
-        runCatching {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                .apply { init(Cipher.ENCRYPT_MODE, getOrCreateHardwareKey()) }
-            val blob = cipher.iv + cipher.doFinal(wk)
-            val tmp = File(appContext.filesDir, "$WRAP_FILE.tmp")
-            tmp.outputStream().use { it.write(blob) }
-            if (!tmp.renameTo(wrapFile())) {
-                wrapFile().outputStream().use { out ->
-                    tmp.inputStream().use { it.copyTo(out) }
-                }
-                tmp.delete()
-            }
+    /**
+     * WK 包裹落盘（tmp + fsync + rename 原子写）。
+     * 失败返回 false——调用方不得在失败后递交 SETWK（vault 建了 DK 而
+     * app 侧无包裹副本 = 状态分裂，见 deliverWkLocked）。
+     */
+    private fun writeWrappedWk(wk: ByteArray): Boolean = runCatching {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            .apply { init(Cipher.ENCRYPT_MODE, getOrCreateHardwareKey()) }
+        val blob = cipher.iv + cipher.doFinal(wk)
+        val tmp = File(appContext.filesDir, "$WRAP_FILE.tmp")
+        java.io.FileOutputStream(tmp).use {
+            it.write(blob)
+            it.fd.sync()  // 密钥承载文件：rename 前强制落盘
         }
-    }
+        if (!tmp.renameTo(wrapFile())) {
+            // 同目录 rename 失败属异常环境：按失败处理（不退化为非原子
+            // copy——半截包裹 = 下次 readWrappedWk 解包失败 = DK 不可达）
+            tmp.delete()
+            return@runCatching false
+        }
+        true
+    }.getOrDefault(false)
 
     private fun getOrCreateHardwareKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEY_STORE).apply { load(null) }

@@ -62,7 +62,7 @@ IdleWatchdog.resetIdleAfterDestroy。
 | 8  | 设备被扣后长期不使用；重启后 app 永不被打开                                                                               | 未使用自动销毁**始终武装**（装机即默认 6 个月，不存在"未启用"态，用户只能选时长 5min\~12mo）：三段式锚点（BOOT\_COUNT+er+wc）反回拨（墙钟倒退/漂移带 10min 容差，NTP 校正与 RTC 纽扣电池老化不误杀，与 daemon 侧 600s 对齐），检查通过即布防到期复查闹钟（链条自续）                                               | IdleWatchdog；BootCompletedReceiver（重启缺口）；AlarmReceiver（到期复查）                                                                                |
 | 9  | root dump 内存抓 DK（SIGSTOP 先手/进程驻留）                                                                      | DK 驻留窗口 = vault 进程内的解锁会话：息屏立即/后台 30s/前台无操作 5min 自动锁定（vault 清 DK）；锁定后磁贴与敏感功能 fail-closed，超时计时不受影响                                                                                                                   | vault.cpp opLock；GateManager.lockSession；MainActivity 心跳                                                                                    |
 | 10 | 激活/改密/移除门禁时崩溃致密钥孤儿化                                                                                    | 单文件状态机（sync\_key.bin）+ tmp+rename 原子写——状态机内无跨文件事务窗口（旧 DK 迁移事务协议随 KeyVault 退役）                                                                                                                                      | vault.cpp writeLivePw/writeLiveWk                                                                                                           |
-| 11 | 在线爆破门禁密码（被扣押设备上交互式试密码）                                                                                 | UNLOCK 在线限速：连续 5 次失败起指数退避（1s,2s,4s…封顶 60s），成功复位；计数器仅驻内存（vault 被杀重启即复位，但每次尝试本身要付一次 64MiB Argon2id，重杀重启的攻击成本不低于等待退避）                                                                                                 | vault.cpp recordFailure/resetFailure                                                                                                        |
+| 11 | 在线爆破门禁密码（被扣押设备上交互式试密码，含经改密/解除路径旁路）                                                                     | UNLOCK/MIGRATE/REMOVE\_GATE 在线限速（共享计数）：连续 5 次失败起指数退避（1s,2s,4s…封顶 60s），成功复位；退避窗内返回码与密码错一致（不暴露限速存在）；计数器仅驻内存（vault 被杀重启即复位，但每次尝试本身要付一次 64MiB Argon2id，重杀重启的攻击成本不低于等待退避）；无胁迫项时的验证路径做等时哑计算（防"是否配置胁迫密码"的时序探测）            | vault.cpp recordFailure/resetFailure/tryCoe（哑计算）                                                                                            |
 | 12 | 恶意悬浮窗盖密码框 tapjacking/偷窥                                                                                | 通知栏遮盖防护（HIDE\_OVERLAY\_WINDOWS：31+ 公开 API；API 30 hidden flag 经 HiddenApiBypass 反射）                                                                                                                                 | MainActivity.applyOverlayProtection                                                                                                         |
 | 13 | 胁迫者翻最近任务归因"app 刚被用过"                                                                                   | 最近任务排除（默认开启；运行时 setExcludeFromRecents）                                                                                                                                                                             | MainActivity.applyWindowSecurityConfig                                                                                                      |
 | 14 | 无头销毁路径（Boot/AlarmReceiver goAsync \~10s 预算）被挂起拖垮：root 设备 exec 卡 su 授权弹窗数十秒 → 进程在删 Keystore 前被广播 ANR 杀掉 | 销毁步骤 1-2（停共享/停 daemon）有界执行（3s/3.5s），超时后台继续、序列推进到 Keystore 删除（密码学销毁优先于进程清理）                                                                                                                                         | DefenseProtocol.runBounded                                                                                                                  |
@@ -123,7 +123,9 @@ IdleWatchdog.resetIdleAfterDestroy。
   保留（门禁行为前后一致）
 
 * 帧协议 op 码：vault.cpp `Op` 枚举与 VaultClient.kt 常量一一对应
-  （0x01~0x13），改动两侧同步；帧格式 `[4B BE 长度][payload]`
+  （0x01\~0x0F 与 0x13；0x10-0x12 为已删除的 FOPEN 空位，不复用），
+  改动两侧同步；帧格式 `[4B BE 长度][payload]`；STATUS 响应固定
+  3 字节（status/mode/dkReady）
 
 * JNI 符号 `Java_fake_screenshot_defense_GuardManager_*`（2 个）
   与 `Java_fake_screenshot_defense_VaultClient_*`（4 个：
@@ -244,9 +246,10 @@ IdleWatchdog.resetIdleAfterDestroy。
   pkill 模式有误杀共享目录他人文件的风险，保留
 
 * root 拿到 APK 后的静态分析：DEX 字符串（GuardManager/VaultClient
-  类名被 R8 native keep 规则保留、SF-GATE 标记、prefs 键名）可
+  类名被 R8 native keep 规则保留、prefs 键名）可
   还原防御设计——彻底对抗需代码虚拟化/加壳，超出当前范围；R8
-  已混淆其余 defense 类名
+  已混淆其余 defense 类名；验证项明文标记为无特征伪随机样式
+  （内容不参与验证，仅 GCM tag 与长度承载正确性）
 
 * 门禁密码参数经 Java 层帧传递（输入框→VaultClient RPC）：被
   hook 的 Java 层可窃听密码参数（与旧实现一致的继承边界）——

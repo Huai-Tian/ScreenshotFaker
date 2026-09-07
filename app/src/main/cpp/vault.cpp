@@ -89,9 +89,14 @@ static const size_t DK_LEN = 32;
 static const size_t SALT_LEN = 16;
 static const size_t NONCE_LEN = 12;
 static const size_t TAG_LEN = 16;
-static const size_t MARK_LEN = 9;  // "SF-GATE-1/2"
-static const uint8_t MARK_SEC[MARK_LEN] = {'S', 'F', '-', 'G', 'A', 'T', 'E', '-', '1'};
-static const uint8_t MARK_COE[MARK_LEN] = {'S', 'F', '-', 'G', 'A', 'T', 'E', '-', '2'};
+// 验证项明文标记：内容不参与任何比较（checkEntry 只看 GCM tag 与
+// 长度），解密成功时的填充物——固定伪随机样式，不含身份特征
+//（历史值 "SF-GATE-1/2" 是 APK 内可提取的应用指纹）
+static const size_t MARK_LEN = 9;
+static const uint8_t MARK_SEC[MARK_LEN] =
+        {0xA7, 0x3C, 0x91, 0x5E, 0xD2, 0x48, 0x0B, 0xF6, 0x73};
+static const uint8_t MARK_COE[MARK_LEN] =
+        {0x4E, 0xB9, 0x06, 0xC5, 0x1D, 0x8A, 0xE3, 0x37, 0xD0};
 
 // Argon2id 生产参数：t=3, m=64MiB, p=1（OWASP 推荐档）
 static const uint32_t ARGON_T = 3;
@@ -128,9 +133,8 @@ enum Op {
     OP_FSEAL_INIT = 0x0D,
     OP_FSEAL_UPDATE = 0x0E,
     OP_FSEAL_FINAL = 0x0F,
-    OP_FOPEN_INIT = 0x10,
-    OP_FOPEN_UPDATE = 0x11,
-    OP_FOPEN_FINAL = 0x12,
+    // 0x10-0x12（FOPEN 流式解密）已删：全仓无调用方（加密产物为
+    // write-only 设计）；空位不复用，OP_DESTROY 固定 0x13
     OP_DESTROY = 0x13,
 };
 
@@ -337,15 +341,14 @@ struct VaultCore {
     uint8_t coeSalt[16], coeNonce[12], coeCt[MARK_LEN + 16];
     uint8_t keySalt[16], wrapNonce[12], wrapCt[DK_LEN + 16];
 
-    // 流式文件加密上下文（单活跃流，Java 侧串行化）
+    // 流式加密上下文（单活跃流，Java 侧串行化；仅 seal 方向）
     EVP_CIPHER_CTX* fsCtx;
-    bool fsSeal;
     bool fsActive;
 
     std::string kpath() const { return dir + "/" + KFILE_NAME; }
 
     VaultCore() : state(ST_NOTHING), hasCoe(false), dkValid(false), failCount(0),
-                  blockedUntilSec(0), fsCtx(nullptr), fsSeal(false), fsActive(false) {
+                  blockedUntilSec(0), fsCtx(nullptr), fsActive(false) {
         memset(dk, 0, sizeof(dk));
         memset(secSalt, 0, sizeof(secSalt)); memset(secNonce, 0, sizeof(secNonce));
         memset(secCt, 0, sizeof(secCt));
@@ -542,7 +545,18 @@ struct VaultCore {
     }
 
     bool tryCoe(const uint8_t* pw, size_t pwLen) {
-        return hasCoe && checkEntry(pw, pwLen, coeSalt, coeNonce, coeCt);
+        if (!hasCoe) {
+            // 时序抹平：无胁迫项时对哑参数跑同款计算（全零密文的 GCM
+            // tag 校验必然失败，结果恒 false）——有无胁迫项的错误密码
+            // 验证成本一致（各 2 次 Argon2id），封堵"是否配置胁迫密码"
+            // 的在线时序探测
+            static const uint8_t zeroSalt[16] = {0};
+            static const uint8_t zeroNonce[12] = {0};
+            static const uint8_t zeroCt[MARK_LEN + 16] = {0};
+            checkEntry(pw, pwLen, zeroSalt, zeroNonce, zeroCt);
+            return false;
+        }
+        return checkEntry(pw, pwLen, coeSalt, coeNonce, coeCt);
     }
 
     bool trySec(const uint8_t* pw, size_t pwLen) {
@@ -566,6 +580,7 @@ struct VaultCore {
 
     // ---- 操作实现（resp 写入 out；返回 false = 致命错误应退出）----
 
+    // 响应 [0]=status [1]=mode(gateOn 位) [2]=dkReady（3 字节）
     void opStatus(Writer& out) {
         uint8_t mode = (uint8_t) state;
         if (state == ST_LIVE_PW || state == ST_DEAD_PW || state == ST_CORRUPT) {
@@ -574,7 +589,6 @@ struct VaultCore {
         out.u8(0);
         out.u8(mode);
         out.u8(dkValid ? 1 : 0);
-        out.u8((state == ST_LIVE_PW || state == ST_DEAD_PW || state == ST_CORRUPT) ? 1 : 0);
     }
 
     void opUnlock(const uint8_t* pw, size_t pwLen, Writer& out) {
@@ -717,6 +731,12 @@ struct VaultCore {
             out.u8(VR_ERROR);
             return;
         }
+        // 退避窗内拒绝：与 UNLOCK 共享限速计数（封堵经 MIGRATE 旁路
+        // 在线试当前密码）；返回码与密码错一致，不暴露限速存在
+        if ((int64_t) time(nullptr) < blockedUntilSec) {
+            out.u8(VR_BAD_CURRENT);
+            return;
+        }
         uint8_t dk2[32];
         int v = verifyCurrent(cur, curLen, dk2);
         if (v == VR_BAD_CURRENT) {
@@ -738,6 +758,11 @@ struct VaultCore {
 
     void opRemoveGate(const uint8_t* cur, size_t curLen, Writer& out) {
         if (state != ST_LIVE_PW && state != ST_DEAD_PW) { out.u8(VR_ERROR); return; }
+        // 退避窗内拒绝（同 opMigrate：与 UNLOCK 共享限速计数）
+        if ((int64_t) time(nullptr) < blockedUntilSec) {
+            out.u8(VR_BAD_CURRENT);
+            return;
+        }
         uint8_t dk2[32], nwk[32];
         int v = verifyCurrent(cur, curLen, dk2);
         if (v == VR_BAD_CURRENT) {
@@ -893,14 +918,13 @@ struct VaultCore {
             out.u8(1);
             return;
         }
-        fsSeal = true;
         fsActive = true;
         out.u8(0);
         out.bytes(nonce, 12);
     }
 
     void opFsealUpdate(const uint8_t* pt, size_t n, Writer& out) {
-        if (!fsActive || !fsSeal || n > FSTREAM_CHUNK_MAX || n == 0) { out.u8(1); return; }
+        if (!fsActive || n > FSTREAM_CHUNK_MAX || n == 0) { out.u8(1); return; }
         std::vector<uint8_t> ct(n);
         int len = 0;
         if (EVP_EncryptUpdate(fsCtx, ct.data(), &len, pt, (int) n) != 1 || len != (int) n) {
@@ -914,7 +938,7 @@ struct VaultCore {
     }
 
     void opFsealFinal(Writer& out) {
-        if (!fsActive || !fsSeal) { out.u8(1); return; }
+        if (!fsActive) { out.u8(1); return; }
         uint8_t tag[16];
         int len = 0;
         bool ok = EVP_EncryptFinal_ex(fsCtx, tag, &len) == 1 &&
@@ -923,49 +947,6 @@ struct VaultCore {
         if (!ok) { out.u8(1); return; }
         out.u8(0);
         out.bytes(tag, 16);
-    }
-
-    void opFopenInit(const uint8_t* nonce, size_t n, Writer& out) {
-        if (!dkValid || n != 12) { out.u8(1); return; }
-        freeStream();
-        fsCtx = EVP_CIPHER_CTX_new();
-        if (!fsCtx ||
-            EVP_DecryptInit_ex(fsCtx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-            EVP_CIPHER_CTX_ctrl(fsCtx, EVP_CTRL_GCM_SET_IVLEN, 12, nullptr) != 1 ||
-            EVP_DecryptInit_ex(fsCtx, nullptr, nullptr, dk, nonce) != 1) {
-            freeStream();
-            out.u8(1);
-            return;
-        }
-        fsSeal = false;
-        fsActive = true;
-        out.u8(0);
-    }
-
-    void opFopenUpdate(const uint8_t* ct, size_t n, Writer& out) {
-        if (!fsActive || fsSeal || n > FSTREAM_CHUNK_MAX || n == 0) { out.u8(1); return; }
-        std::vector<uint8_t> pt(n);
-        int len = 0;
-        if (EVP_DecryptUpdate(fsCtx, pt.data(), &len, ct, (int) n) != 1 || len != (int) n) {
-            freeStream();
-            out.u8(1);
-            return;
-        }
-        out.u8(0);
-        out.u32(n);
-        out.bytes(pt.data(), n);
-    }
-
-    void opFopenFinal(const uint8_t* tag, size_t n, Writer& out) {
-        if (!fsActive || fsSeal || n != 16) { out.u8(1); return; }
-        uint8_t t[16];
-        memcpy(t, tag, 16);
-        int len = 0;
-        bool ok = EVP_CIPHER_CTX_ctrl(fsCtx, EVP_CTRL_GCM_SET_TAG, 16, t) == 1 &&
-                  EVP_DecryptFinal_ex(fsCtx, t, &len) == 1;
-        freeStream();
-        wipe(t, sizeof(t));
-        out.u8(ok ? 0 : 1);
     }
 
     void opDestroy(Writer& out) {
@@ -999,7 +980,6 @@ struct VaultCore {
         if (len < 1 || len > FRAME_MAX) return false;
         Writer out;
         Reader r(payload + 1, len - 1);
-        bool ok = true;
         switch (payload[0]) {
             case OP_PING:
                 opStatus(out);
@@ -1093,25 +1073,6 @@ struct VaultCore {
             case OP_FSEAL_FINAL:
                 opFsealFinal(out);
                 break;
-            case OP_FOPEN_INIT: {
-                const uint8_t* nonce = r.take(12);
-                if (r.bad || nonce == nullptr) { out.u8(1); break; }
-                opFopenInit(nonce, 12, out);
-                break;
-            }
-            case OP_FOPEN_UPDATE: {
-                uint32_t n = r.u32();
-                const uint8_t* ct = r.take(n);
-                if (r.bad || ct == nullptr) { out.u8(1); break; }
-                opFopenUpdate(ct, n, out);
-                break;
-            }
-            case OP_FOPEN_FINAL: {
-                const uint8_t* tag = r.take(16);
-                if (r.bad || tag == nullptr) { out.u8(1); break; }
-                opFopenFinal(tag, 16, out);
-                break;
-            }
             case OP_DESTROY:
                 opDestroy(out);
                 break;
@@ -1119,8 +1080,10 @@ struct VaultCore {
                 out.u8(1);
                 break;
         }
+        // 所有分支至少写 1 字节状态码（handler 契约——调用方按
+        // [4B 长度][≥1B] 帧格式消费，空响应即失步）
         respOut.swap(out.buf);
-        return ok;
+        return true;
     }
 };
 
@@ -1187,7 +1150,6 @@ int main(int argc, char* argv[]) {
         if (!read_full(0, req.data(), len)) break;
         std::vector<uint8_t> resp;
         if (!core.process(req.data(), req.size(), resp)) break;
-        if (resp.empty()) break;
         uint8_t rhdr[4];
         uint32_t rlen = (uint32_t) resp.size();
         rhdr[0] = (uint8_t) (rlen >> 24); rhdr[1] = (uint8_t) (rlen >> 16);

@@ -23,6 +23,7 @@
 #include <jni.h>
 
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -56,6 +57,9 @@ Java_fake_screenshot_defense_VaultClient_nativeStart(
         pthread_mutex_unlock(&g_vault_mutex);
         return JNI_TRUE;  // 幂等：已启动
     }
+    // vault 死亡后本侧对 socketpair 写入的 SIGPIPE 必须忽略（不依赖
+    // ART 默认行为——默认处置会杀死整个 app 进程；vault.cpp main 同款）
+    signal(SIGPIPE, SIG_IGN);
     const char* bin = env->GetStringUTFChars(binPath, nullptr);
     const char* dir = env->GetStringUTFChars(filesDir, nullptr);
     jboolean result = JNI_FALSE;
@@ -85,7 +89,9 @@ Java_fake_screenshot_defense_VaultClient_nativeStart(
             waitpid(pid1, &status, 0);  // 回收 child1（grandchild 由 init 收养）
             if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
                 // 30s 读超时：UNLOCK 含 Argon2id（64MiB 内存硬，慢设备
-                // 秒级），超时按本次失败处理（不判死——EOF 才是死亡信号）
+                // 秒级）。超时与 EOF 同为流级失败——nativeRequest 内关闭
+                // 连接判死，由下次调用懒重启（vault 存活的假超时仅损失
+                // 一次重试，fail-closed 语义无数据暴露）
                 struct timeval tv {30, 0};
                 setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
                 setsockopt(sv[0], SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -105,11 +111,17 @@ Java_fake_screenshot_defense_VaultClient_nativeStart(
     return result;
 }
 
+// EINTR 重试：JVM 进程信号（SIGQUIT 栈转储等）可中断 syscall——
+// 不重试会被误判为连接失败（触发关闭与重启，不必要的会话锁定）
 static bool read_full_fd(int fd, uint8_t* buf, size_t n) {
     size_t done = 0;
     while (done < n) {
         ssize_t r = read(fd, buf + done, n - done);
-        if (r <= 0) return false;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (r == 0) return false;  // EOF
         done += (size_t) r;
     }
     return true;
@@ -119,20 +131,30 @@ static bool write_full_fd(int fd, const uint8_t* buf, size_t n) {
     size_t done = 0;
     while (done < n) {
         ssize_t w = write(fd, buf + done, n - done);
-        if (w <= 0) return false;
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (w == 0) return false;
         done += (size_t) w;
     }
     return true;
 }
 
-// 单请求-响应往返。返回 jbyteArray 或 null（超时/EOF/协议错）。
-// 调用方约定：null 后用 nativeAlive 区分"vault 仍在（瞬态失败，可重试
-// 同一连接）"与"vault 已死（下次调用前重启动）"。
+// 单请求-响应往返。返回 jbyteArray 或 null。
+// 失败语义（两层）：
+// - 流级失败（半写/EOF/读超时/协议失步/半读）：连接不可复用——关闭
+//   fd 判死，nativeAlive() 此后返回 false，Kotlin 侧下次调用前懒重启
+//   vault 并复位会话镜像。封堵"vault 进程死后 fd 恒开 → 全部 RPC
+//   永久失败、正确密码也报 BAD"的死亡检测失效
+// - 写帧前的纯 JVM 侧失败（非法长度/GetByteArrayElements OOM）：
+//   未触及流，保持连接原状（瞬态，调用方可重试同一连接）
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_fake_screenshot_defense_VaultClient_nativeRequest(
         JNIEnv* env, jobject /*thiz*/, jbyteArray req) {
     pthread_mutex_lock(&g_vault_mutex);
     jbyteArray result = nullptr;
+    bool dirty = false;  // 已开始写帧：此后任何失败 = 流状态不可信
     do {
         if (g_vault_fd < 0) break;
         jsize n = env->GetArrayLength(req);
@@ -141,6 +163,7 @@ Java_fake_screenshot_defense_VaultClient_nativeRequest(
         if (in == nullptr) break;
         uint8_t hdr[4] = {(uint8_t) ((uint32_t) n >> 24), (uint8_t) ((uint32_t) n >> 16),
                           (uint8_t) ((uint32_t) n >> 8), (uint8_t) n};
+        dirty = true;
         bool ok = write_full_fd(g_vault_fd, hdr, 4) &&
                   write_full_fd(g_vault_fd, (const uint8_t*) in, (size_t) n);
         env->ReleaseByteArrayElements(req, in, JNI_ABORT);
@@ -151,10 +174,13 @@ Java_fake_screenshot_defense_VaultClient_nativeRequest(
                         ((uint32_t) rhdr[2] << 8) | (uint32_t) rhdr[3];
         if (rlen == 0 || rlen > 131072) break;  // 协议失步
         result = env->NewByteArray((jsize) rlen);
-        if (result == nullptr) { result = nullptr; break; }
+        if (result == nullptr) break;
         // 直接读入 JVM 数组（避免中转缓冲）
         jbyte* out = env->GetByteArrayElements(result, nullptr);
-        if (out == nullptr) { result = nullptr; break; }
+        if (out == nullptr) {
+            result = nullptr;
+            break;
+        }
         if (!read_full_fd(g_vault_fd, (uint8_t*) out, rlen)) {
             env->ReleaseByteArrayElements(result, out, JNI_ABORT);
             result = nullptr;
@@ -162,6 +188,10 @@ Java_fake_screenshot_defense_VaultClient_nativeRequest(
         }
         env->ReleaseByteArrayElements(result, out, 0);
     } while (false);
+    if (dirty && result == nullptr && g_vault_fd >= 0) {
+        close(g_vault_fd);
+        g_vault_fd = -1;
+    }
     pthread_mutex_unlock(&g_vault_mutex);
     return result;
 }
