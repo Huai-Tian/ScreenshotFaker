@@ -4,10 +4,14 @@ import android.content.Context
 import android.os.Environment
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
+import fake.screenshot.defense.DefenseProtocol
+import fake.screenshot.defense.GuardManager
 import fake.screenshot.defense.KeyVault
 import fake.screenshot.defense.SensitiveStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -293,6 +297,16 @@ object DaemonManager {
 
     suspend fun syncConfig(): Boolean {
         if (!isDaemonRunning()) return false
+        // 检查点(d)：配置下发前的栈流审计——覆盖"hook 本函数篡改下发内容"
+        // （如解除超时死线）的 call-through 路径：要篡改必须让原逻辑
+        // 执行（桥帧此刻在栈上），命中即完整销毁 + 中止下发（daemon
+        // 保留旧配置，fail-closed）
+        if (GuardManager.auditCallStack()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { DefenseProtocol.destroyForCoercion() }
+            }
+            return false
+        }
         // fail-closed（与 ScreenShareManager 启动前检查同语义）：共享密码
         // 已配置（_sec 密文存在）但本会话不可解（锁定态 DK 未组装，或单段
         // DK 轮换后密文孤儿化）→ 中止整个 config 下发。静默发送无

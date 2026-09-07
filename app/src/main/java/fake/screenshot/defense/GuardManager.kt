@@ -72,6 +72,24 @@ object GuardManager {
         nativeReady && runCatching { nativeCheck() }.getOrDefault(false)
 
     /**
+     * 栈流审计（检查点 b/c/d 用，命中处置由调用方决定）：
+     * 对当前线程的活跃调用链（fp 链）做敌意可执行区归属检查——
+     * LSPlant call-through hook 的桥帧是安全链路执行期间的活跃
+     * 祖先帧，其返回地址物理落在注入模块的匿名映射里。
+     *
+     * 调用方约定（KeyVault.assembleDaemonKey / SensitiveStore 读写 /
+     * DaemonManager.syncConfig）：命中即启动 [DefenseProtocol.destroyForCoercion]
+     * 完整销毁 + 本路径 fail-closed 返回（false/默认值/中止下发）。
+     * 门禁链的检查点 (a) 在 native（jni_ct_eq 内嵌，命中直接引爆），
+     * 不经本方法。
+     *
+     * @return true = 活跃栈上存在敌意帧（Java hook 正在执行）；
+     *         false = 干净/库不可用/解析异常（不引爆）
+     */
+    fun auditCallStack(): Boolean =
+        nativeReady && runCatching { nativeAuditCallStack() }.getOrDefault(false)
+
+    /**
      * 常量时间字节序列比较（双实现交叉验证）。
      *
      * 反硬件断点内核外挂：主实现（逐字节）与备用实现（8 字节步进，
@@ -98,6 +116,7 @@ object GuardManager {
 
     private external fun nativeInit(files: Array<String>, dir: String)
     private external fun nativeCheck(): Boolean
+    private external fun nativeAuditCallStack(): Boolean
     private external fun nativeConstantTimeEquals(a: ByteArray, b: ByteArray): Boolean
     private external fun nativeConstantTimeEqualsAlt(a: ByteArray, b: ByteArray): Boolean
 }

@@ -8,6 +8,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fake.screenshot.Auxiliary
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.EncryptManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import javax.crypto.spec.SecretKeySpec
@@ -65,6 +68,15 @@ object SensitiveStore {
      *   无 DK（锁定态/升级后未解锁）返回旧明文——兼容窗口，暴露面与升级前一致
      */
     suspend fun getSensitive(context: Context, key: String, default: String): String {
+        // 检查点(c)：敏感字段读取的栈流审计——要读到真凭据必须让原逻辑
+        // 执行（call-through hook 桥帧此刻在栈上），命中即完整销毁 +
+        // fail-closed 返回 default（与解密失败同语义，不暴露审计命中）
+        if (GuardManager.auditCallStack()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { DefenseProtocol.destroyForCoercion() }
+            }
+            return default
+        }
         val sec = runCatching {
             ConfigManager.getDataOnce(context, key + SEC_SUFFIX, "")
         }.getOrDefault("")
@@ -94,6 +106,14 @@ object SensitiveStore {
      * 不降级为明文）。调用方均在解锁后的 UI 上下文，正常路径恒可用
      */
     suspend fun putSensitive(context: Context, key: String, value: String): Boolean {
+        // 检查点(c)：写入路径同审计（防篡改写入内容——如把 _sec 换成
+        // 攻击者可控密文）。命中完整销毁 + fail-closed false（不落盘）
+        if (GuardManager.auditCallStack()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { DefenseProtocol.destroyForCoercion() }
+            }
+            return false
+        }
         val dk: SecretKeySpec = KeyVault.getDaemonKeyOrNull() ?: return false
         return runCatching {
             if (value.isEmpty()) {

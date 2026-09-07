@@ -2,7 +2,9 @@ package fake.screenshot.defense
 
 import android.content.Context
 import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
 import fake.screenshot.wrappers.EncryptManager
@@ -155,6 +157,16 @@ object KeyVault {
      * - 单段模式：读盘或按需生成（旧版语义），恒成功
      */
     suspend fun assembleDaemonKey(password: String): Boolean = withContext(Dispatchers.Default) {
+        // 检查点(b)：DK 组装的栈流审计——攻击者要拿到真 DK 必须让本函数
+        // 原逻辑执行（call-through hook 下桥帧此刻是活跃祖先帧），命中即
+        // 完整销毁 + fail-closed（DK 保持不可用）。短路 hook 无桥帧不中，
+        // 但短路拿不到真 DK（verifyCheck fail-closed），残余仅参数窃听
+        if (GuardManager.auditCallStack()) {
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching { DefenseProtocol.destroyForCoercion() }
+            }
+            return@withContext false
+        }
         // 迁移中断兜底恢复（幂等；init 的恢复被 runCatching 吞掉异常时由此兜底）
         runCatching { recoverPendingMigration() }
         if (!isSplitActive()) {
