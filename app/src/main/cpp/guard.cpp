@@ -207,6 +207,10 @@ static const struct {
         {"dlopen", true},    {"dlsym", true},    {"dlclose", true},
 };
 
+// 线3 审计信号集（与 HookAudit.handlers 定长数组构成尺寸契约，
+// 见 audit_execution_paths 内 static_assert）
+static const int kWatchedSigs[4] = {SIGTRAP, SIGBUS, SIGSEGV, SIGILL};
+
 // 待查地址的 maps 定位结果
 struct AddrPlacement {
     uintptr_t addr;
@@ -333,13 +337,26 @@ static bool audit_execution_paths() {
         AddrRange linkerRanges[32]; // libdl.so / linker*
         int linkerRangeCount;
     } a{};
-    if (sizeof(a.syms) / sizeof(a.syms[0]) < sizeof(kSenseSymbols) / sizeof(kSenseSymbols[0]) ||
-        sizeof(a.selfs) / sizeof(a.selfs[0]) < sizeof(kSelfFunctions) / sizeof(kSelfFunctions[0])) {
-        return false;  // 静态防御（编译期可证，运行期不可能）
-    }
+    // 编译期尺寸契约：HookAudit 定长数组必须容纳审计表全部条目。
+    // 原实现为运行期 return false——恒假分支必被编译器死码消除
+    // （消除本身无损失：优化掉的正是本次编译已证不可达的路径，
+    // 未来扩表后条件可真，该次编译自然保留检查），但触发时审计
+    // 静默停摆属于 fail-open，对雷管组件方向错误。改 static_assert：
+    // 尺寸失配直接编译失败（fail-loud），比运行期拦截更早且不可绕过。
+    // handlers/kWatchedSigs 对同样入契约：该写入路径无运行期边界保护，
+    // 失配是栈越界写（libcRanges/linkerRanges 为动态数据，其运行期
+    // 上限检查保持不变，不在此列）
+    static_assert(sizeof(a.syms) / sizeof(a.syms[0]) >=
+                  sizeof(kSenseSymbols) / sizeof(kSenseSymbols[0]),
+                  "HookAudit.syms too small for kSenseSymbols");
+    static_assert(sizeof(a.selfs) / sizeof(a.selfs[0]) >=
+                  sizeof(kSelfFunctions) / sizeof(kSelfFunctions[0]),
+                  "HookAudit.selfs too small for kSelfFunctions");
+    static_assert(sizeof(a.handlers) / sizeof(a.handlers[0]) >=
+                  sizeof(kWatchedSigs) / sizeof(kWatchedSigs[0]),
+                  "HookAudit.handlers too small for kWatchedSigs");
 
     // 线3 前置：采集非默认信号 handler 地址
-    static const int kWatchedSigs[4] = {SIGTRAP, SIGBUS, SIGSEGV, SIGILL};
     for (int sig : kWatchedSigs) {
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
