@@ -39,7 +39,7 @@ It allows you to customize how your personal information is protected during scr
   Page protection against screenshot‑based configuration leakage;  
   Supports automatic high‑strength encryption for screenshot and screen recording files;  
   Filenames support full randomization;  
-  All port communications are secured with high‑strength encryption;  
+  All port communications are secured with high‑strength encryption;
 
 - **Ultimate duress protection**  
   Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.  
@@ -140,12 +140,14 @@ This project is initiated by the developer out of personal interest and for tech
 
 ## 🙏 Acknowledgements
 
-- LSPosed
-- Shizuku
-- JSch
-- scrcpy
-- libssh2
-- openssl
+- [LSPosed](https://github.com/LSPosed/LSPosed)
+- [Shizuku](https://github.com/RikkaApps/Shizuku)
+- [JSch](https://github.com/mwiede/jsch)
+- [scrcpy](https://github.com/Genymobile/scrcpy)
+- [libssh2](https://github.com/libssh2/libssh2)
+- [openssl](https://github.com/openssl/openssl)
+- [Argon2](https://github.com/P-H-C/phc-winner-argon2)
+- [apksig](https://github.com/google/apksig)
 
 ---
 

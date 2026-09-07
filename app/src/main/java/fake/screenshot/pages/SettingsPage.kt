@@ -45,6 +45,7 @@ import androidx.core.graphics.scale
 import fake.screenshot.wrappers.RepackManager
 import fake.screenshot.defense.GateManager
 import fake.screenshot.defense.IdleWatchdog
+import fake.screenshot.defense.VaultClient
 import fake.screenshot.wrappers.EncryptManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 
@@ -1007,39 +1008,54 @@ fun SettingsCompose(navController: NavController) {
                         onClick = {
                             passwordWorking = true
                             scope.launch {
-                                val currentOk = !gateEnabled ||
-                                        GateManager.verifyGatePassword(currentPasswordInputText)
+                                // 当前密码校验内聚在 vault 的 MIGRATE/REMOVE_GATE
+                                //（一次调用原子完成验证+改写，消除旧实现
+                                // verifyGatePassword 与 setPasswords 之间的窗口）；
+                                // BAD_CURRENT 单独反馈（当前密码错），ERROR 按
+                                // 失败提示并保留旧状态（vault 内单文件原子写，
+                                // 中止 = 未动）
                                 when {
-                                    !currentOk -> currentPasswordWrong = true
                                     newPasswordInputText.isEmpty() -> {
-                                        // 当前密码已验证，三项全空 = 移除保护。
-                                        // 事务中止（验证器与 DK 均未动）时不得
-                                        // 更新 gateEnabled——否则 UI 显示"无门禁"
-                                        // 而验证器实际仍在，下次启动仍弹门禁
-                                        if (GateManager.removeGate(currentPasswordInputText)) {
-                                            gateEnabled = false
-                                            passwordConfigDialog = false
-                                        } else {
-                                            Toast.makeText(
+                                        // 三项全空（含当前密码）= 移除保护。
+                                        // 失败时不得更新 gateEnabled——否则 UI
+                                        // 显示"无门禁"而验证项实际仍在
+                                        when (VaultClient.removeGate(currentPasswordInputText)) {
+                                            VaultClient.GateChangeResult.OK -> {
+                                                gateEnabled = false
+                                                passwordConfigDialog = false
+                                            }
+
+                                            VaultClient.GateChangeResult.BAD_CURRENT ->
+                                                currentPasswordWrong = true
+
+                                            else -> Toast.makeText(
                                                 context, R.string.failed, Toast.LENGTH_SHORT
                                             ).show()
                                         }
                                     }
 
                                     else -> {
-                                        // 事务中止（密钥文件异常等）时验证器未写入：
-                                        // 必须提示失败并保留旧状态，否则用户误以为
-                                        // 已设门禁（安全裸奔）
-                                        if (GateManager.setPasswords(
+                                        val result =
+                                            if (gateEnabled) VaultClient.migrate(
                                                 currentPasswordInputText,
                                                 newPasswordInputText,
                                                 coercionPasswordInputText
                                             )
-                                        ) {
-                                            gateEnabled = true
-                                            passwordConfigDialog = false
-                                        } else {
-                                            Toast.makeText(
+                                            else VaultClient.enableGate(
+                                                newPasswordInputText,
+                                                coercionPasswordInputText
+                                            )
+                                        when (result) {
+                                            VaultClient.GateChangeResult.OK,
+                                            true -> {
+                                                gateEnabled = true
+                                                passwordConfigDialog = false
+                                            }
+
+                                            VaultClient.GateChangeResult.BAD_CURRENT ->
+                                                currentPasswordWrong = true
+
+                                            else -> Toast.makeText(
                                                 context, R.string.failed, Toast.LENGTH_SHORT
                                             ).show()
                                         }
@@ -1075,7 +1091,7 @@ fun SettingsCompose(navController: NavController) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        // 无禁用项：只有时长档位，一旦启用不可关闭
+                        // 始终武装：只有时长档位，无禁用项
                         IdleWatchdog.idleTimeoutOptions.forEach { option ->
                             Row(
                                 modifier = Modifier
@@ -1621,7 +1637,7 @@ fun SettingsCompose(navController: NavController) {
                                         // 性重建拦在确认键之前，恢复执行中途的息屏
                                         // 竞态由下方决策点二次复核 + 无条件 pre-stop
                                         // 闭环。无门禁用户（单段 DK）恒就绪，不受影响
-                                        if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
+                                        if (!fake.screenshot.defense.VaultClient.isKeyReady()) {
                                             lockedReject = true
                                             throw java.io.IOException("locked_no_credentials")
                                         }
@@ -1665,7 +1681,7 @@ fun SettingsCompose(navController: NavController) {
                                         // 未知"处理（null）：仍尝试停止，靠 fail-closed
                                         // 中止兜底。确证 false 才是真正的"未运行"
                                         val daemonStateKnown =
-                                            fake.screenshot.defense.KeyVault.isDaemonKeyReady()
+                                            fake.screenshot.defense.VaultClient.isKeyReady()
                                         val prevDaemonRunning =
                                             if (daemonStateKnown) DaemonManager.isDaemonRunning()
                                             else null

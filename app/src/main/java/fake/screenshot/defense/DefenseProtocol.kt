@@ -31,18 +31,20 @@ import kotlin.time.Duration.Companion.milliseconds
  * （在途检查读取同一状态，其判定覆盖本次，后来者直接放行）。
  *
  * 销毁序列，顺序严格：
- * 0. 快照 idle 激活态（此后即将销毁一切密文，wipe 后无法再判定）；
  * 1. 停 app 侧屏幕共享（杀 relay 与守护脚本，防"销毁后仍在推流"；
  *    有界等待——exec 挂起时不得阻塞后续步骤，见 runBounded）；
  * 1.5 停 overlay 悬浮窗（root 路线宿主进程独立于 app 进程，不停则
  *    销毁后悬浮窗继续显示、输入监视通道继续运行）；
- * 2. 停守护进程（此时密钥/配置仍在，stop 依赖端口与信道密钥；同样有界）；
- * 3. 删 Keystore 条目（Tink 主密钥、硬件密钥）与密文文件（keyset、硬件 DK）；
- * 4. 删除密文配置并轮换 DataStore 文件随机名（同进程重建走新路径，
+ * 2. 停守护进程（此时 vault 的 DK 仍在，stop 依赖信道加密；同样有界）；
+ * 2.5 vault 层销毁（胁迫路径下 vault 已先自行销毁 DK——双层独立引爆；
+ *    此处补齐 WK 包裹文件与内存；验证项保留——门禁行为前后一致）；
+ * 3. 删 Keystore 条目（Tink 主密钥、WK 包裹密钥）；
+ * 4. 删密文文件（tink keyset）；
+ * 5. 删除密文配置并轮换 DataStore 文件随机名（同进程重建走新路径，
  *    规避 "multiple DataStores active for the same file"，且不暴露销毁史）；
- * 5. 清进程内信道密钥缓存与 DK 拆分状态；
- * 6. armed 启用过超时时复位写默认档（防连环雷管；写入触发新 keyset 生成）；
- * 7. 二次清扫 datastore 目录（旧实例在途写入可能复活已删文件，保留当前 ref）。
+ * 7. 超时销毁复位默认档（始终武装：写锚点 + 默认 6 个月；写入触发新
+ *    keyset 生成）；
+ * 8. 二次清扫 datastore 目录（旧实例在途写入可能复活已删文件，保留当前 ref）。
  * 验证器保留（门禁行为前后一致，不暴露"销毁发生过"），销毁幂等
  * （重复触发无副作用），每步独立容错。
  *
@@ -79,12 +81,12 @@ object DefenseProtocol {
     }
 
     /**
-     * defense 组件统一初始化（替代旧 EncryptManager.init + GateManager.init）。
-     * KeyVault 必须最先（其余组件的密钥操作以其迁移恢复为前置）。
+     * defense 组件统一初始化（幂等，多入口重复调用无害）。
+     * VaultClient 最先（库加载；vault 进程懒 spawn）。
      */
     fun init(context: Context) {
         appContext = context.applicationContext
-        KeyVault.init(context)
+        VaultClient.init(context)
         GateManager.init(context)
         IdleWatchdog.init(context)
     }
@@ -133,8 +135,7 @@ object DefenseProtocol {
         //     coercionDestroyed 注释）
         runCatching { ScreenShareManager.markCoercionDestroyed() }
 
-        // 0. wipe 前快照（修复：旧实现在 wipe 后判定，恒为 no-op）
-        val wasIdleActivated = runCatching { IdleWatchdog.isIdleActivated() }.getOrDefault(false)
+        // 0. （始终武装改造后无需快照：resetIdleAfterDestroy 无条件复位默认档）
 
         // 1. 停 app 侧共享（有界：内部 exec 在 root 授权弹窗等情形会挂起，
         //    无界等待会吃尽 receiver 的广播超时预算，见 runBounded）
@@ -151,8 +152,16 @@ object DefenseProtocol {
 
         // 2. 停守护进程（purge：顺带清扫 app 侧共享——app 侧清理依赖 shell
         //    特权，Shizuku 断连时由持特权的 daemon 兜底；stop 后其自身完成
-        //    tmp 明文/锚点/自拷贝清理）。同样有界（同步骤 1 理由）
+        //    tmp 明文/锚点/自拷贝清理）。同样有界（同步骤 1 理由）。
+        //    须先于 vault 销毁：stop 的信道加密依赖 vault 内存中的 DK
         runBounded(3500L) { runCatching { DaemonManager.stopDaemon(purge = true) } }
+
+        // 2.5 vault 层销毁（双层独立引爆的第一层在 vault 内已完成——
+        //     胁迫 UNLOCK 命中时 vault 已就地改写 sync_key.bin 为销毁态；
+        //     此处补齐：清 DK/CK 内存、删 sync_wrap.bin（WK 包裹）。
+        //     vault 不在则等价（进程不在 = 内存无密钥）。验证项
+        //     （sync_key.bin 的门禁条目）保留——门禁行为前后一致
+        runBounded(1000L) { runCatching { VaultClient.destroy() } }
 
         // 3. 删 Keystore 条目——密码学擦除优先于文件删除：
         // 此步完成后即使后续删除全部失败，所有密文在数学上已不可恢复
@@ -162,21 +171,14 @@ object DefenseProtocol {
             keyStore.deleteEntry("hardware_encryption_key")
         }
 
-        // 4. 删密文文件（tink keyset 与硬件 DK；pepper 条目保留——
-        //    验证器保留语义要求 pepper 跨销毁存活）
+        // 4. 删密文文件（tink keyset；DK 文件已由 vault 步骤 2.5 处理）
         runCatching { appContext.deleteSharedPreferences("tink_prefs") }
-        runCatching { KeyVault.deleteKeyFile() }
 
         // 5. 删密文配置 + 轮换 DataStore 随机文件名（全目录清扫）
         runCatching { ConfigManager.resetForCoercion(appContext) }
 
-        // 6. 清信道密钥缓存与 DK 拆分状态（后续走重新生成的 DK；
-        //    拆分三键随销毁清除——验证器保留但密钥状态归零，与全新安装一致）
-        runCatching { DaemonManager.clearCachedKey() }
-        runCatching { KeyVault.resetSplitState() }
-
-        // 7. 复位默认档（首次写入触发新 keyset 生成，与 Keystore 新主密钥配对）
-        runCatching { IdleWatchdog.resetIdleAfterDestroy(wasIdleActivated) }
+        // 7. 复位默认档（始终武装：无 wasActivated 快照——见 IdleWatchdog）
+        runCatching { IdleWatchdog.resetIdleAfterDestroy() }
 
         // 8. 二次清扫：旧 DataStore 实例的在途写入可能在步骤 5 之后落盘复活旧文件，
         //    稍作等待后清除（保留当前 ref 指向的新文件）

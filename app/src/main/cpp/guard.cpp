@@ -1,13 +1,17 @@
 // 执行路径劫持检测雷管（libmemsys.so——中性化库名，maps 可见；源码内称 guard）
 //
-// 威胁：root 取证者劫持本进程 native 执行路径以窃取门禁密码或 DK——
-// hook 关键 libc 函数令检测/读文件"撒谎"、inline patch/蹦床劫持雷管
-// 函数、驻留信号 handler 拦截信号；以及 GG 修改器类扫描器扫取内存
-// （需 ptrace attach）。Java 层检测可被同层 hook 拦截（一行
-// hook 让检测函数恒返回"干净"），因此检测与引爆均在 native：
+// 定位（vault 时代的收缩版纵深）：DK/CK 的唯一持有者是独立 vault 进程
+// （vault.cpp，无 ART——Java hook 框架无处下钩），本雷管不再守护
+// "秘密流经主进程的瞬间"（已不存在），守护面收敛为：
+// - 主进程 native 执行路径劫持（hook 检测本身/引爆逻辑/雷管函数）
+// - ptrace 型内存扫描器（GG 修改器类）
+// - 本库代码完整性（反 inline patch）
+// 检测与引爆均在 native（Java 层检测可被同层 hook 拦截）：
 // - 自主 watchdog 线程：不依赖任何 Java 调用驱动，Java 层被完全接管仍工作
-// - 引爆动作：覆写（零填充+fsync）并 unlink 密文文件 → SIGKILL 自身。
-//   SIGKILL 不可被任何信号 handler/注入代码拦截；密文先于进程死亡被销毁
+// - 引爆动作：先经 socketpair 尽力令 vault 执行 DESTROY（DK 内存清零 +
+//   密钥文件改写为销毁态、门禁验证项保留），再覆写（零填充+fsync）并
+//   unlink 密文文件 → SIGKILL 自身。SIGKILL 不可被任何信号 handler/
+//   注入代码拦截；密文先于进程死亡被销毁
 // - Java 侧主动检查入口（nativeCheck）：命中时由 Java 走完整销毁序列
 //   （含 Keystore 条目删除与 daemon 停止，比 native 单删文件更彻底），
 //   native 引爆是 Java 层被拦截时的兜底
@@ -23,8 +27,8 @@
 // - 线2 入口序言审计：读函数入口指令——branch-like（B/BL/BR/BLR）且
 //   非正常编译器序言（stp/sub sp/nop/paciasp/adrp 白名单），或
 //   trampoline handoff（LDR literal + BR xN）= inline hook。审计对象
-//   含 libc 12 符号与本库雷管函数（detonate/shred_file/ct_eq_*/
-//   canary_check 等——攻击者要废雷管必须 hook 它们，入口必变）
+//   含 libc 12 符号与本库雷管函数（detonate/shred_file 等——攻击者
+//   要废雷管必须 hook 它们，入口必变）
 // - 线3 信号 handler 审计：SIGTRAP/SIGBUS/SIGSEGV/SIGILL 的 handler
 //   指向匿名映射或无映射 = 可疑（hook 框架驻留内存 handler 拦截信号/
 //   反调试）；指向有文件路径的正常模块豁免（ART fault manager 在
@@ -33,7 +37,6 @@
 // 与既有检测线的互补分工：
 // - 自完整性校验：函数内部 patch（nop 掉 detonate 内部的 kill、改检测
 //   线内部判定常量）——序言审计只看入口，函数内部只有它覆盖
-// - 双实现常量时间比较 + canary：硬件断点 hook 比较函数
 // - TracerPid 快轮询：交互式扫描器与 attach 瞬态窗口（frida-server
 //   attach→注入→detach 常短于 2s 确认窗，但注入完成即留下 inline
 //   hook/蹦床，由线1/线2 接续覆盖；zygote fork 链路注入本就无
@@ -41,14 +44,16 @@
 //
 // 诚实边界：
 // - root 无需 attach 即可经 /proc/pid/mem、process_vm_readv 静默直读
-//   （TracerPid 恒 0），原理上不可检测——唯一缓解是 Java 侧自动锁定
-//   缩小 DK 驻留
+//   （TracerPid 恒 0），原理上不可检测——DK 驻留窗口由 vault 进程
+//   隔离 + 会话自动锁定收窄（vault 侧 dumpable=0 挡同 uid；root dump
+//   vault 是已声明边界）
 // - 定向 patch 本库 GOT 项（如 dlsym 调用点）可令审计拿到假地址：
 //   需先注入代码（装载面政策上不检测）+ 逆向 stripped 库定位 RELRO
-//   段内特定 GOT 项 + mprotect 改写；自完整性/TracerPid/canary 独立
-//   于该路径仍然工作
+//   段内特定 GOT 项 + mprotect 改写；自完整性/TracerPid 独立于该
+//   路径仍然工作
 // - Java 层 hook（LSPlant/ArtMethod swap）不动 native 机器码，三线
-//   不命中——由 v3 解密式验证 + 双实现比较 + canary 承担
+//   不命中——但其目标（DK/凭据流经主进程）已随 vault 结构隔离消失；
+//   主进程残余暴露面（RPC oracle/键盘记录级）见 README 威胁表 #23
 //
 // 误报控制（引爆 = 用户数据销毁，代价极高，规则保守）：
 // - 符号解析失败（dlsym null）/ dlopen 失败：跳过该符号（怪环境不误杀）
@@ -172,14 +177,11 @@ static void shred_file(const char* path);
 static void shred_dir(const char* path, int depth);
 static void* watchdog_main(void* arg);
 static void guard_crash_handler(int sig, siginfo_t* info, void* ctx);
-static int ct_eq_byte(const volatile unsigned char* a,
-                      const volatile unsigned char* b, size_t n);
-static int ct_eq_word(const volatile unsigned char* a,
-                      const volatile unsigned char* b, size_t n);
-static bool canary_check();
 static bool audit_execution_paths();
-static int collect_hostile_exec_regions(struct HostileExecRegion* out, int maxOut);
-static bool audit_call_stack_native();
+
+// vault 雷管联动（vault_client.cpp，同库）：引爆前尽力让 vault 执行
+// DESTROY（DK 内存清零 + sync_key.bin 改写为销毁态，门禁验证项保留）
+bool vault_detonate_best_effort();
 
 // 线2 审计对象之一：本库雷管函数。攻击者要废雷管必须 hook/patch 它们，
 // 入口必变。表内容为函数地址（无名字符串——静默性，strip 后无信息量）
@@ -192,11 +194,6 @@ static const void* const kSelfFunctions[] = {
         reinterpret_cast<const void*>(&tracer_whitelisted),
         reinterpret_cast<const void*>(&guard_crash_handler),
         reinterpret_cast<const void*>(&audit_execution_paths),
-        reinterpret_cast<const void*>(&collect_hostile_exec_regions),
-        reinterpret_cast<const void*>(&audit_call_stack_native),
-        reinterpret_cast<const void*>(&ct_eq_byte),
-        reinterpret_cast<const void*>(&ct_eq_word),
-        reinterpret_cast<const void*>(&canary_check),
 };
 
 // 线1 审计对象：libc 感知面符号（隐藏/操纵框架要控制 app 感知的必经
@@ -456,220 +453,11 @@ static bool audit_execution_paths() {
     return false;
 }
 
-// ===================== 栈流审计（Java hook 检测，LSPlant 桥帧）=====================
-//
-// 三线的盲区：LSPlant 换 ArtMethod 入口（Java hook）不动任何 native
-// 机器码。本节补位——效果检测：不问注入框架是否存在（装载面政策上
-// 不检测），只问"hook 桥帧此刻是否在本进程安全链路的活跃调用栈上"。
-//
-// 原理：call-through hook 的执行链为
-//   调用方 → [LSPlant native 桥——物理驻留在注入模块的匿名映射里]
-//         → Java callback → 原方法继续执行
-// 原方法执行期间桥帧是活跃祖先帧，且桥调用 callback 的返回地址
-// （callback 帧的 RA 槽）指向敌意区。审计点布置在原方法链路的
-// native 深处（门禁比较/DK 组装/敏感读写/密钥下发），沿 fp 链向上
-// 走栈必见。
-//
-// 敌意可执行区判定（不看任何框架名/路径特征，与"框架合法"政策零冲突）：
-// - 有文件路径（系统库/apex/本库/apk lib）/ 内核伪段 [vdso][vvar]
-//   [sigpage][vectors][vsyscall] / [anon:dalvik-*] → 合法
-// - JIT 名义段（/memfd:jit*、/dev/ashmem/jit*、/dev/ashmem/dalvik-*、
-//   [anon:jit*）：真 JIT 段首与紧邻前驱段首均无 ELF 头 → 合法；
-//   任一处有 ELF 头 → 敌意（memfd 撞名装载的模块——现代 .so 第一
-//   PT_LOAD（r--p 含 ELF 头）与可执行段相邻拼接成完整镜像，真 JIT
-//   双映射（rw+rx）任一段首都是 JIT 结构非 ELF）
-// - 无名段 / 其他 [anon:*] 命名段的可执行映射 → 敌意（主判据：匿名/
-//   内置链接器装载的 ELF 模块；二级信号：lsplt/Dobby 蹦床池——无
-//   ELF 头。二级信号按裁决武装：零售机无名 exec 段仅剩蹦床池与
-//   敌意模块两个来源，实测基线 zero 无名 exec）
-//
-// 为什么 fp 链而非整栈逐字扫描：ZN 对每个进程"先装载全部模块再令其
-// 自卸载"——无害全局模块的 preAppSpecialize 帧早已返回，栈内存残留
-// 其返回地址且（模块拒卸载）地址至今有效；整栈扫描会把死帧陈旧值
-// 误判为活跃敌意帧（误杀）。fp 链只走真实活跃调用链，死帧结构性
-// 不可达：无害模块不在本进程调用链上 → 不误杀；桥帧（活祖先）必中；
-// 链断裂（omit-fp/协程切换边界）就地终止 → 只漏报不误报。ART
-// managed 帧与 NDK native 帧在四个 ABI 上均维护 fp 链（ART 自身
-// StackVisitor 同样依赖它走栈）。
-//
-// 检查点：(a) jni_ct_eq 内嵌——命中直接 detonate（不可抑制 native
-// 兜底，Kotlin 门禁层被完全接管仍有效：攻击者 hook 门禁函数恒返回
-// "通过"，比较仍必经此处）；(b/c/d) Kotlin 侧经 nativeAuditCallStack
-// ——命中走 DefenseProtocol 完整销毁（含 Keystore 条目删除）+ 本路径
-// fail-closed。
-//
-// 诚实边界：短路 hook（不调原方法）无桥帧不中——但短路拿不到真 DK/
-// 真密文（dk_check 与敏感读取 fail-closed），残余 = 纯参数窃听（与
-// 三线时代声明一致）；检测瞬态（仅关键链路执行瞬间，非连续监控）；
-// OEM ROM 的 ART prctl 命名失败产生无名真 JIT 理论上可误爆（零售机
-// 概率极低，跨 OEM non-hooked 真机基线为发布前置验证项）；敌意区
-// 分类依赖 maps 真实性（与三线共享边界，自完整性校验独立覆盖）。
-
-struct HostileExecRegion {
-    uintptr_t start;
-    uintptr_t end;
-};
-
-// JIT 名义段：真 ART JIT 的全部命名形态；撞名伪装装载也落在此桶，
-// 靠 ELF 头邻接判定分辨
-static bool is_jit_named(const char* name) {
-    return strncmp(name, "/memfd:jit", 10) == 0 ||
-           strncmp(name, "memfd:jit", 9) == 0 ||
-           strncmp(name, "/memfd:/jit", 11) == 0 ||
-           strncmp(name, "memfd:/jit", 10) == 0 ||
-           strncmp(name, "/dev/ashmem/jit", 16) == 0 ||
-           strncmp(name, "/dev/ashmem/dalvik-", 19) == 0 ||
-           strncmp(name, "[anon:jit", 9) == 0;
-}
-
-// 内核伪段（映射存在但无 backing 文件，属正常运行时结构）
-static bool is_kernel_pseudo(const char* name) {
-    return strncmp(name, "[vdso]", 6) == 0 ||
-           strncmp(name, "[vvar]", 6) == 0 ||
-           strncmp(name, "[sigpage]", 9) == 0 ||
-           strncmp(name, "[vectors]", 9) == 0 ||
-           strncmp(name, "[vsyscall]", 10) == 0;
-}
-
-// 段首 4 字节是否 ELF 魔数（\x7fELF 小端 u32 = 0x464C457F）。
-// 仅对可读映射调用（readable 保证页已映射，读不触发异常）；
-// memcpy 防对齐/别名 UB
-static bool elf_magic_at(uintptr_t addr) {
-    uint32_t magic = 0;
-    memcpy(&magic, reinterpret_cast<const void*>(addr), sizeof(magic));
-    return magic == 0x464C457Fu;
-}
-
-// 单遍解析 maps 并分类敌意可执行区。返回敌意区数（0 = 干净）；
-// -1 = 解析异常/敌意区超限（放弃本轮审计，不引爆——怪环境不误杀，
-// 与既有原则一致）。
-// maps 升序保证"紧邻前驱"即地址低侧相邻映射；ELF 镜像判定用
-// "自身段首或紧邻前驱段首"两处
-__attribute__((noinline))
-static int collect_hostile_exec_regions(HostileExecRegion* out, int maxOut) {
-    FILE* f = fopen("/proc/self/maps", "re");
-    if (f == nullptr) return -1;
-    char line[4096];
-    int n = 0;
-    uintptr_t prevEnd = 0;
-    bool prevElf = false;
-    bool prevValid = false;
-    while (fgets(line, sizeof(line), f)) {
-        uintptr_t s = 0, e = 0;
-        char perms[8] = {0};
-        unsigned long off = 0, ino = 0;
-        unsigned dmaj = 0, dmin = 0;
-        int pos = -1;
-        if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %7s %lx %x:%x %lu %n",
-                   &s, &e, perms, &off, &dmaj, &dmin, &ino, &pos) < 7) {
-            continue;  // 坏行跳过（不误杀）
-        }
-        bool exec = perms[2] == 'x';
-        bool readable = perms[0] == 'r';
-        // 名字字段：地址/perms/offset/dev/inode 五字段后的剩余部分；
-        // 空（行尾即换行）= 无名匿名映射
-        const char* name = nullptr;
-        if (pos >= 0 && line[pos] != '\0' && line[pos] != '\n' && line[pos] != '\r') {
-            name = line + pos;
-        }
-        bool elfSelf = readable && elf_magic_at(s);
-        if (exec) {
-            bool hostile;
-            if (name == nullptr) {
-                // 无名可执行段：敌意（匿名装载的 ELF 模块或蹦床池，
-                // 二级信号武装——两个来源均为敌意）
-                hostile = true;
-            } else if (name[0] == '[') {
-                if (is_kernel_pseudo(name) ||
-                    strncmp(name, "[anon:dalvik-", 13) == 0) {
-                    hostile = false;
-                } else if (is_jit_named(name)) {
-                    // [anon:jit*] 伪段：与 memfd 名义段同规则（ELF 头分辨）
-                    hostile = elfSelf || (prevValid && prevEnd == s && prevElf);
-                } else {
-                    // 其他命名伪段可执行：正常运行时无非敌意来源
-                    // （scudo/malloc/stack 等 rw 段在 exec 过滤外）
-                    hostile = true;
-                }
-            } else if (is_jit_named(name)) {
-                // JIT 名义段：真 JIT 无 ELF 头（合法）；撞名装载的模块
-                // 有（敌意）——自身段首或紧邻前驱段首任一命中即判敌意
-                hostile = elfSelf || (prevValid && prevEnd == s && prevElf);
-            } else {
-                // 真实文件路径 → 合法
-                hostile = false;
-            }
-            if (hostile) {
-                if (n >= maxOut) {  // 敌意区超限：环境异常，放弃本轮
-                    fclose(f);
-                    return -1;
-                }
-                out[n].start = s;
-                out[n].end = e;
-                n++;
-            }
-        }
-        prevEnd = e;
-        prevElf = elfSelf;
-        prevValid = true;
-    }
-    fclose(f);
-    return n;
-}
-
-// fp 链活跃帧栈审计：任一活跃帧的返回地址落入敌意区 = true。
-// 帧布局四 ABI 同构：[fp] 保存调用者 fp、[fp + 指针宽] 保存返回地址
-// （aarch64 x29/x30、arm r7/lr、x86_64 rbp/ret、x86 ebp/ret）。
-// 终止条件全部导向"放弃"（只漏报不误报）：栈界获取失败、越界、
-// 未对齐、非严格递增（防伪造环）、帧数上限 256
-__attribute__((noinline))
-static bool audit_call_stack_native() {
-    HostileExecRegion hostile[64];
-    int n = collect_hostile_exec_regions(hostile, 64);
-    if (n <= 0) return false;  // 0 = 干净；-1 = 解析异常（不引爆）
-    pthread_attr_t attr;
-    if (pthread_getattr_np(pthread_self(), &attr) != 0) return false;
-    void* base = nullptr;
-    size_t size = 0;
-    if (pthread_attr_getstack(&attr, &base, &size) != 0) {
-        pthread_attr_destroy(&attr);
-        return false;
-    }
-    pthread_attr_destroy(&attr);
-    uintptr_t stackLo = reinterpret_cast<uintptr_t>(base);
-    uintptr_t stackHi = stackLo + size;
-    if (stackHi <= stackLo) return false;
-    uintptr_t fp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
-    uintptr_t prevFp = 0;
-    for (int frames = 0; frames < 256; frames++) {
-        if (fp < stackLo || fp >= stackHi) break;   // 越界：链终止
-        if (fp % sizeof(uintptr_t) != 0) break;     // 未对齐：链终止
-        if (fp <= prevFp) break;                    // 非严格递增（环）：链终止
-        prevFp = fp;
-        uintptr_t raSlot = fp + sizeof(uintptr_t);
-        if (raSlot >= stackHi) break;
-        uintptr_t ra = *reinterpret_cast<uintptr_t*>(raSlot);
-#if defined(__arm__)
-        ra &= ~(uintptr_t)1u;  // Thumb 返回地址 bit0
-#endif
-        for (int i = 0; i < n; i++) {
-            if (ra >= hostile[i].start && ra < hostile[i].end) return true;
-        }
-        uintptr_t next = *reinterpret_cast<uintptr_t*>(fp);
-        if (next <= fp || next >= stackHi ||
-            next % sizeof(uintptr_t) != 0) {
-            break;
-        }
-        fp = next;
-    }
-    return false;
-}
-
 // ===================== 自完整性校验（反 inline patch）=====================
 //
-// 威胁：ptrace POKE 单发 patch 本库 .text（如把 nativeConstantTimeEquals
-// 改为恒真）——序言审计只看函数入口，抓不住"改函数内部"，这是
-// 一行绕过门禁的真实路径。
+// 威胁：ptrace POKE 单发 patch 本库 .text（如把审计判定改为恒假、
+// 抹掉 detonate 内的 kill）——序言审计只看函数入口，抓不住"改函数
+// 内部"，这是废雷管的一条真实路径。
 //
 // 防御：watchdog 周期性把本库全部可执行映射与磁盘 .so 文件逐字节比对
 // （基准是加载来源文件，绕过必须同时 patch 内存与磁盘并留下持久痕迹）。
@@ -819,10 +607,20 @@ static void shred_dir(const char* path, int depth) {
 }
 
 // 引爆：密文覆写销毁 → SIGKILL（不可拦截）。全程无 Java 调用。
+// 先尽力让 vault 执行 DESTROY（跨进程第二层：vault 内存 DK 即刻清零
+// + sync_key.bin 原子改写为销毁态——门禁验证项保留，与 Java 销毁序列
+// 同语义）；确认成功则跳过该文件的粉碎（验证项已在其中保留），
+// 失败回落整文件粉碎（验证项随之消失，可接受降级：vault 不在 =
+// 无内存 DK，密文级销毁效果等同）。
 // noinline：序言审计对象（kSelfFunctions）
 __attribute__((noinline))
 static void detonate() {
+    const bool vaultDestroyed = vault_detonate_best_effort();
     for (const std::string& p : g_target_files) {
+        if (vaultDestroyed && p.size() >= 12 &&
+            p.compare(p.size() - 12, 12, "/sync_key.bin") == 0) {
+            continue;  // vault 已改写为销毁态（验证项保留），勿粉碎
+        }
         shred_file(p.c_str());
     }
     if (!g_target_dir.empty()) {
@@ -884,9 +682,6 @@ static void install_crash_chain() {
 
 // ===================== 自主 watchdog 线程 =====================
 
-// 前向声明（定义在文件尾"常量时间比较"节，先于此使用）
-static bool canary_check();
-
 static void* watchdog_main(void*) {
     int tracerHits = 0;
     int tick = 0;
@@ -896,11 +691,6 @@ static void* watchdog_main(void*) {
             // 自我 hook 审计三线（原黑名单扫描继任者）：命中 = 执行路径
             // 被劫持（驻留态非瞬态，不存在 crash 误报源）→ 立即引爆
             if (audit_execution_paths()) {
-                detonate();
-            }
-            // canary 哨兵：比较函数语义被 hook（恒真/恒假/反转/双实现分歧）
-            // → 引爆（反硬件断点 hook 的检测面）
-            if (!canary_check()) {
                 detonate();
             }
             // 自完整性：内存 .text ≠ 磁盘基准 = inline patch = 引爆。
@@ -986,116 +776,13 @@ Java_fake_screenshot_defense_GuardManager_nativeCheck(JNIEnv* /*env*/, jobject /
            ? JNI_TRUE : JNI_FALSE;
 }
 
-// 栈流审计 JNI 入口（检查点 b/c/d：DK 组装 / 敏感读写 / 密钥下发）：
-// 命中由 Kotlin 侧走 DefenseProtocol 完整销毁序列（含 Keystore 条目
-// 删除与 daemon 停止，比 native 单删文件更彻底）+ 本路径 fail-closed
-extern "C" JNIEXPORT jboolean JNICALL
-Java_fake_screenshot_defense_GuardManager_nativeAuditCallStack(JNIEnv* /*env*/, jobject /*thiz*/) {
-    return audit_call_stack_native() ? JNI_TRUE : JNI_FALSE;
-}
-
-// ===================== 常量时间比较（双实现，反硬件断点 hook）=====================
+// ===================== 常量时间比较与栈流审计的退役说明 =====================
 //
-// 硬件断点内核外挂（内核态裸写调试寄存器）可 hook 单一比较函数恒真，
-// 一行绕过门禁。对策为"断点资源耗尽"：两个结构不同的独立实现，
-// 验证方（GuardManager.constantTimeEquals）要求两者结果一致——
-// 每个关键点必须同时消耗两个断点，ARM64 有限的断点资源被成倍消耗。
-// canary 哨兵（canary_check）周期性验证两实现的语义正确性。
-
-// 实现A：逐字节累积异或
-__attribute__((noinline))
-static int ct_eq_byte(const volatile unsigned char* a,
-                      const volatile unsigned char* b, size_t n) {
-    unsigned char diff = 0;
-    for (size_t i = 0; i < n; i++) {
-        diff |= (unsigned char) (a[i] ^ b[i]);
-    }
-    return diff == 0;
-}
-
-// 实现B：结构不同（逐 8 字节拼宽比较 + 尾部逐字节），无共享代码路径，
-// hook 单个实现无效。volatile 读 + 手工拼字节：不调用 memcmp/memcpy
-// （库函数可被 hook，且 hook 它们会破坏全系统 libc 使用者）
-__attribute__((noinline))
-static int ct_eq_word(const volatile unsigned char* a,
-                      const volatile unsigned char* b, size_t n) {
-    unsigned long long diff = 0;
-    size_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        unsigned long long x = 0, y = 0;
-        for (int k = 7; k >= 0; k--) {
-            x = (x << 8) | (unsigned long long) a[i + (size_t) k];
-            y = (y << 8) | (unsigned long long) b[i + (size_t) k];
-        }
-        diff |= x ^ y;
-    }
-    for (; i < n; i++) {
-        diff |= (unsigned long long) (unsigned char) (a[i] ^ b[i]);
-    }
-    return diff == 0;
-}
-
-// canary 哨兵自检：随机数据下两实现必须语义正确且交叉一致。
-// 抓：恒真 hook（diff 期望 false 却得 true）、恒假、结果反转、
-// 单实现被 hook 导致两实现分歧。种子用地址/时间/线程 id 熵——
-// 哨兵只测函数语义，无需密码学随机。
-// noinline：序言审计对象（kSelfFunctions）
-__attribute__((noinline))
-static bool canary_check() {
-    unsigned char x[32], y[32], z[32];
-    uintptr_t entropy = (uintptr_t) &x ^ (uintptr_t) time(nullptr)
-                        ^ (uintptr_t) pthread_self();
-    for (size_t i = 0; i < sizeof(x); i++) {
-        x[i] = (unsigned char) (entropy >> ((i % sizeof(uintptr_t)) * 8));
-        y[i] = x[i];
-        z[i] = (unsigned char) (x[i] ^ (1u << (i % 8)));  // 每字节都不同
-    }
-    bool sameA = ct_eq_byte(x, y, sizeof(x)) == 1;
-    bool sameB = ct_eq_word(x, y, sizeof(x)) == 1;
-    bool diffA = ct_eq_byte(x, z, sizeof(x)) == 0;
-    bool diffB = ct_eq_word(x, z, sizeof(x)) == 0;
-    return sameA && sameB && diffA && diffB;
-}
-
-static jboolean jni_ct_eq(JNIEnv* env, jbyteArray a, jbyteArray b,
-                          int (*impl)(const volatile unsigned char*,
-                                      const volatile unsigned char*, size_t)) {
-    // 检查点(a)：门禁比较链 native 深处的栈流审计。LSPlant call-through
-    // hook 的桥帧此刻是活跃祖先帧（callback 帧的 RA 指向敌意区）；
-    // 命中直接 detonate——不可抑制的 native 兜底，Kotlin 门禁层被完全
-    // 接管仍有效（攻击者 hook 门禁函数恒返回"通过"，比较仍必经此处）。
-    // 无 hook 时敌意区为空，此处仅一次 maps 解析的开销
-    if (audit_call_stack_native()) {
-        detonate();
-    }
-    if (a == nullptr || b == nullptr) return JNI_FALSE;
-    jsize la = env->GetArrayLength(a);
-    jsize lb = env->GetArrayLength(b);
-    if (la != lb || la < 0) return JNI_FALSE;
-    jbyte* pa = env->GetByteArrayElements(a, nullptr);
-    jbyte* pb = env->GetByteArrayElements(b, nullptr);
-    if (pa == nullptr || pb == nullptr) {
-        if (pa != nullptr) env->ReleaseByteArrayElements(a, pa, JNI_ABORT);
-        if (pb != nullptr) env->ReleaseByteArrayElements(b, pb, JNI_ABORT);
-        return JNI_FALSE;
-    }
-    int r = impl((const volatile unsigned char*) pa,
-                 (const volatile unsigned char*) pb, (size_t) la);
-    env->ReleaseByteArrayElements(a, pa, JNI_ABORT);
-    env->ReleaseByteArrayElements(b, pb, JNI_ABORT);
-    return r == 1 ? JNI_TRUE : JNI_FALSE;
-}
-
-// 常量时间字节序列比较（防时序侧信道；native 化防 Java hook isEqual 绕过门禁）
-extern "C" JNIEXPORT jboolean JNICALL
-Java_fake_screenshot_defense_GuardManager_nativeConstantTimeEquals(
-        JNIEnv* env, jobject /*thiz*/, jbyteArray a, jbyteArray b) {
-    return jni_ct_eq(env, a, b, ct_eq_byte);
-}
-
-// 备用实现（结构不同）：调用方要求与主实现结果一致（交叉验证）
-extern "C" JNIEXPORT jboolean JNICALL
-Java_fake_screenshot_defense_GuardManager_nativeConstantTimeEqualsAlt(
-        JNIEnv* env, jobject /*thiz*/, jbyteArray a, jbyteArray b) {
-    return jni_ct_eq(env, a, b, ct_eq_word);
-}
+// 两机制随 vault 结构隔离退役（非撤销武装，是武器失去靶标）：
+// - 常量时间双实现比较 + canary：守护"Java 层比较点"（门禁验证器/
+//   dk_check）——验证现已收敛为 vault 进程内的 GCM tag 校验（密码学
+//   层，无可 hook 的应用层比较函数；vault 无 ART，hook 框架无处下钩）
+// - 栈流审计（fp 链 × 敌意可执行区）：守护"秘密流经主进程 Java 层的
+//   瞬间"（DK 组装/敏感读写/配置下发）——DK/CK 现已永不出 vault，
+//   主进程无秘密瞬间，无审计点可布
+// 详见 defense/README 威胁表 #23。

@@ -443,8 +443,8 @@ object ScreenShareManager {
     fun toggleScreenShare(context: Context) {
         appContext = context.applicationContext
         // 磁贴可能是冷启动进程的第一个入口（重启后未打开过 app 即点磁贴）：
-        // KeyVault/DaemonManager 的 context 是 lateinit，未初始化时
-        // SensitiveStore→KeyVault 路径直接抛 UninitializedPropertyAccessException。
+        // DaemonManager 的 context 是 lateinit，未初始化时
+        // SensitiveStore→VaultClient 路径直接抛 UninitializedPropertyAccessException。
         // 与 Screenshot/ScreenRecord 磁贴的初始化保持一致
         DaemonManager.init(context)
         DefenseProtocol.init(context)

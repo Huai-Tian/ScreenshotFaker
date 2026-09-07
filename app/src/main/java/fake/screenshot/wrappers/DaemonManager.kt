@@ -4,21 +4,16 @@ import android.content.Context
 import android.os.Environment
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
-import fake.screenshot.defense.DefenseProtocol
-import fake.screenshot.defense.GuardManager
-import fake.screenshot.defense.KeyVault
 import fake.screenshot.defense.SensitiveStore
-import kotlinx.coroutines.CoroutineScope
+import fake.screenshot.defense.VaultClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.Socket
-import javax.crypto.spec.SecretKeySpec
 import kotlin.time.Duration.Companion.milliseconds
 
 object DaemonManager {
@@ -29,13 +24,6 @@ object DaemonManager {
     /** sh 安全引用：单引号包裹，内部单引号转义为 '\''（与 ScreenShareManager 一致） */
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
-
-    // 缓存密钥（DK 由 KeyVault 经 Keystore 包裹管理，进程内复用）。
-    // @Volatile：胁迫销毁序列（DefenseProtocol 步骤 5，IO 线程）清空缓存
-    // 与其他线程 getKey() 之间需要 happens-before——否则旧信道密钥可能
-    // 跨线程可见残留（同文件 lastRenewAtMillis 已加，此处此前遗漏）
-    @Volatile
-    private var cachedKey: SecretKeySpec? = null
 
     // daemon 续期节流：touch 高频调用（10s 心跳），socket 往返约 1 次/分钟足够
     @Volatile
@@ -51,15 +39,6 @@ object DaemonManager {
             "daemon_socket_port",
             1234
         )
-    }
-
-    /** 可空：DK 拆分激活且本会话未解锁组装时无密钥可用（fail-closed） */
-    private fun getKey(): SecretKeySpec? =
-        cachedKey ?: KeyVault.getDaemonKeyOrNull()?.also { cachedKey = it }
-
-    /** 胁迫销毁后清信道密钥缓存：后续操作走重新生成的 DK，不复用已销毁密钥 */
-    fun clearCachedKey() {
-        cachedKey = null
     }
 
     suspend fun startDaemon(): Boolean = mutex.withLock {
@@ -85,14 +64,14 @@ object DaemonManager {
         }
 
         withContext(Dispatchers.IO) {
-            // 密钥经 stdin 递交（不经 argv，避免 cmdline 泄露），
-            // 命令行仅含二进制路径与端口。
-            // DK 拆分激活且未组装 → 无密钥 → 启动失败（fail-closed：
-            // 解锁一次即可恢复，绝不在无密钥状态下给出半可用语义）
-            val key = getKey() ?: return@withContext false
+            // 信道密钥 CK（vault 内 HKDF 自 DK 确定性派生）经 stdin 递交
+            // （不经 argv，避免 cmdline 泄露），命令行仅含二进制路径与端口。
+            // DK 不可用（门禁锁定态/vault 异常）→ 无 CK → 启动失败
+            // （fail-closed：解锁一次即可恢复，绝不在无密钥状态下给出半可用语义）
+            val ck = VaultClient.getChannelKey() ?: return@withContext false
             // 库名中性化（隐蔽性）：daemon 就地运行时路径进入 cmdline（ps 可见）
             val daemonPath = "${appContext.applicationInfo.nativeLibraryDir}/libnetsvc.so"
-            val (exitCode, _) = Auxiliary.execWithStdin("$daemonPath $port", key.encoded)
+            val (exitCode, _) = Auxiliary.execWithStdin("$daemonPath $port", ck)
             if (exitCode != 0) {
                 return@withContext false
             }
@@ -222,28 +201,32 @@ object DaemonManager {
 
     suspend fun isDaemonRunning() = sendCommand("status")?.startsWith("Working") ?: false
 
-    suspend fun sendCommand(command: String, retries: Int = 3): String? {
+    suspend fun sendCommand(command: String, retries: Int = 3): String? =
+        sendParts(listOf(VaultClient.Part.Literal(command.toByteArray(Charsets.UTF_8))), retries)
+
+    /**
+     * 信道收发（凭据明文不进 Java）：
+     * - 发送：parts（literal + slot）经 vault COMPOSE 拼装（敏感槽位由
+     *   vault 用 DK 解密填充）+ 时间戳 + CK 加密 → [len][nonce+ct] 帧
+     * - 接收：[len][nonce+ct] → vault OPENCH 解密 → "cmd\u001Cts" 校验
+     * DK 不可用（锁定态）→ compose 失败 → null（fail-closed，与旧实现
+     * 无密钥语义一致——锁定后合法帧也发不出）
+     */
+    private suspend fun sendParts(parts: List<VaultClient.Part>, retries: Int = 3): String? {
         var attempt = 0
         while (attempt < retries) {
             val result = withContext(Dispatchers.IO) context@{
                 try {
                     val port = getPort()
-                    // DK 拆分激活且未组装 → 无密钥 → 信道不可用（fail-closed）
-                    val key = getKey() ?: return@context null
+                    val frame = VaultClient.composeChannel(parts) ?: return@context null
                     Socket("127.0.0.1", port).use { socket ->
                         socket.soTimeout = 3000
-                        // 1. 构造并发送加密命令
-                        val timestamp = Auxiliary.getCurrentTimestampSeconds()
-                        val plaintext = "$command\u001C$timestamp"
-                        val (nonce, ciphertext) = EncryptManager.encryptByPassword(key, plaintext)
-
                         val out = DataOutputStream(socket.getOutputStream())
-                        out.writeInt(ciphertext.size + nonce.size)
-                        out.write(nonce)
-                        out.write(ciphertext)
+                        out.writeInt(frame.size)
+                        out.write(frame)
                         out.flush()
 
-                        // 2. 读取响应
+                        // 读取响应
                         val `in` = DataInputStream(socket.getInputStream())
                         val respLen = `in`.readInt()
                         // 与 daemon 侧 recv_encrypted 的 65536 上限对等：daemon
@@ -255,22 +238,15 @@ object DaemonManager {
                         val respData = ByteArray(respLen)
                         `in`.readFully(respData)
 
-                        // 3. 解密响应
-                        val respNonce = respData.sliceArray(0 until 12)
-                        val respCiphertext = respData.sliceArray(12 until respData.size)
-                        val plainResponse =
-                            EncryptManager.decryptByPassword(key, respNonce, respCiphertext)
+                        // vault 解密（信道密钥 CK）；失败/解不开 = null 重试
+                        val plainResponse = VaultClient.openChannel(respData)
+                            ?: return@context null
 
-                        // 4. 如果是错误响应，返回 null 以便重试
-                        if (plainResponse == "Decryption failed") {
-                            return@context null
-                        }
-
-                        // 5. 验证格式和时间戳
-                        val parts = plainResponse.split('\u001C')
-                        if (parts.size != 2) return@context null
-                        val responseCommand = parts[0]
-                        val responseTimestamp = parts[1].toLongOrNull()
+                        // 验证格式和时间戳（daemon 侧协议：cmd\u001Cts）
+                        val respParts = plainResponse.split('\u001C')
+                        if (respParts.size != 2) return@context null
+                        val responseCommand = respParts[0]
+                        val responseTimestamp = respParts[1].toLongOrNull()
                         if (responseTimestamp == null || !Auxiliary.isTimestampValid(
                                 responseTimestamp
                             )
@@ -297,27 +273,10 @@ object DaemonManager {
 
     suspend fun syncConfig(): Boolean {
         if (!isDaemonRunning()) return false
-        // 检查点(d)：配置下发前的栈流审计——覆盖"hook 本函数篡改下发内容"
-        // （如解除超时死线）的 call-through 路径：要篡改必须让原逻辑
-        // 执行（桥帧此刻在栈上），命中即完整销毁 + 中止下发（daemon
-        // 保留旧配置，fail-closed）
-        if (GuardManager.auditCallStack()) {
-            CoroutineScope(Dispatchers.IO).launch {
-                runCatching { DefenseProtocol.destroyForCoercion() }
-            }
-            return false
-        }
-        // fail-closed（与 ScreenShareManager 启动前检查同语义）：共享密码
-        // 已配置（_sec 密文存在）但本会话不可解（锁定态 DK 未组装，或单段
-        // DK 轮换后密文孤儿化）→ 中止整个 config 下发。静默发送无
-        // auth_password 的配置会让 daemon 侧共享在"用户以为有密码"的状态下
-        // 无认证运行（两侧行为分裂）。此时 daemon 保留旧配置（含密码），
-        // 解锁后下次 syncConfig 即恢复
-        if (SensitiveStore.isSensitiveConfigured(appContext, "screenShare_password") &&
-            SensitiveStore.getSensitive(appContext, "screenShare_password", "").isEmpty()
-        ) {
-            return false
-        }
+        // fail-closed 语义由 COMPOSE 统一承担：任何敏感槽位（_sec 密文）
+        // 在锁定态/密文孤儿化时解不开 → compose 失败 → 整体中止下发，
+        // daemon 保留旧配置。静默发送无 auth_password 的配置会让 daemon
+        // 侧共享在"用户以为有密码"的状态下无认证运行（两侧行为分裂）
         val separator = ConfigManager.getDataOnce(appContext, "daemon_config_separator", "#")
         // 消费点校验（SettingsPage 保存时已校验，此处复核）：触发配置经
         // \u001F 分段下发、daemon 侧原样拼接进 sh -c 并明言信任本侧
@@ -476,12 +435,13 @@ object DaemonManager {
                 .let { if (it) "audio_source=mic" else "" }
             // SSH 隧道模式下 server 只监听回环，防止局域网直连绕过隧道
             val tcpLocalOnly = if (sshEnabled) "tcp_local_only=true" else ""
-            // 共享认证密码：DK 第二层加密存储（防 root-as-uid 提取）；
-            // 经 env 递交（server 侧 auth_password_env=VAR 消费）——不进
-            // argv/cmdline、不进 daemon 内存中的命令快照明文
+            // 共享认证密码已配置与否的判定走密文存在性（不解密——凭据
+            // 明文只在 vault 内经 COMPOSE 槽位流向下发帧）；经 env 递交
+            // （server 侧 auth_password_env=VAR 消费）——不进 argv/cmdline、
+            // 不进 daemon 内存中的命令快照明文
             val authPassword =
-                SensitiveStore.getSensitive(appContext, "screenShare_password", "")
-                    .let { if (it.isEmpty()) "" else "auth_password_env=SF_SHARE_PWD" }
+                if (SensitiveStore.isSensitiveConfigured(appContext, "screenShare_password"))
+                    "auth_password_env=SF_SHARE_PWD" else ""
             val base =
                 "CLASSPATH=/data/local/tmp/FullRandomName app_process / vendor.entry.Main $VERSION tunnel_forward=true tcp_port=$localPort"
 
@@ -508,42 +468,44 @@ object DaemonManager {
                 authPassword
             ).filter { it.isNotEmpty() }.joinToString("\u001F")
         }
-        val sshOptions = suspend {
-            val enabled = ConfigManager.getDataOnce(
-                appContext,
-                "ssh_tunnel_enabled",
-                false
-            )
-            // 敏感凭据经 DK 第二层加密存储（防 root-as-uid 读 DataStore 提取）；
-            // syncConfig 只在 DK 可用后可达（startDaemon 依赖 DK），恒解密成功
+        // sshOptions / otherOptions 段：敏感凭据（用户名/密码/主机指纹/
+        // 共享密码）以 _sec 密文经 COMPOSE 槽位下发——vault 内 DK 解密填充，
+        // 明文不进 Java。例外：服务器地址需明文（hostkey 存储 key 的
+        // DataStore 键派生需要；且 UI/共享路径本就以明文持址——地址不是
+        // 凭据）。锁定态任何槽位解不开 → compose 失败 → daemon 保留旧配置
+        val sshOptionsParts = suspend {
+            val enabled = ConfigManager.getDataOnce(appContext, "ssh_tunnel_enabled", false)
             val address =
                 SensitiveStore.getSensitive(appContext, "ssh_tunnel_server_address", "127.0.0.1")
             val port = ConfigManager.getDataOnce(appContext, "ssh_tunnel_server_port", 22)
-            val name = SensitiveStore.getSensitive(
-                appContext, "ssh_tunnel_user_name",
-                "ScreenshotFaker"
-            )
-            val password = SensitiveStore.getSensitive(
-                appContext, "ssh_tunnel_user_password",
-                "ScreenshotFaker"
-            )
             val remotePort = ConfigManager.getDataOnce(appContext, "ssh_tunnel_remote_port", 0)
-            // 主机密钥指纹（app 侧 TOFU 采纳的 SHA-256 hex；空 = 尚未固定）：
-            // daemon 侧隧道握手时强制校验，防 MITM 伪装服务器截获共享流。
-            // 空 = 首次使用，daemon 侧自行采纳并本地持久化（纪元一致时生效）
-            val hostKey = SensitiveStore.getSensitive(
-                appContext, SensitiveStore.sshHostKeyStoreKey(address, port), ""
-            )
             // 指纹纪元（设置页"重置指纹"自增）：daemon 据此丢弃旧纪元的本地
             // 缓存条目——否则用户换钥后重置了 app 侧指纹，daemon 仍按旧指纹
             // 拒绝连接（app 重置而 daemon 不知情，行为分裂）
             val hostKeyEpoch = runCatching {
                 ConfigManager.getDataOnce(appContext, "ssh_hostkey_epoch", 0L)
             }.getOrDefault(0L)
-            listOf(enabled, address, port, name, password, remotePort, hostKey, hostKeyEpoch)
-                .joinToString("\u001F")
+            listOf<VaultClient.Part>(
+                // enabled + 分隔符 + 地址（明文，见上）
+                VaultClient.Part.Literal(
+                    "$enabled\u001F$address\u001F$port\u001F".toByteArray(Charsets.UTF_8)
+                ),
+                // SSH 用户名（密文槽位；未配置 = 旧默认值字面量）
+                sensitivePart("ssh_tunnel_user_name", "ScreenshotFaker"),
+                VaultClient.Part.Literal("\u001F".toByteArray(Charsets.UTF_8)),
+                // SSH 密码
+                sensitivePart("ssh_tunnel_user_password", "ScreenshotFaker"),
+                VaultClient.Part.Literal(
+                    "\u001F$remotePort\u001F".toByteArray(Charsets.UTF_8)
+                ),
+                // 主机密钥指纹（TOFU；空 = 未固定，daemon 侧自行采纳）
+                sensitivePart(SensitiveStore.sshHostKeyStoreKey(address, port), ""),
+                VaultClient.Part.Literal(
+                    "\u001F$hostKeyEpoch".toByteArray(Charsets.UTF_8)
+                )
+            )
         }
-        val otherOptions = suspend {
+        val otherOptionsParts = suspend {
             val relayPath =
                 "${appContext.applicationInfo.nativeLibraryDir}/libextsvr.so"
             val autoEncrypt =
@@ -567,24 +529,60 @@ object DaemonManager {
             val appDataDir = appContext.applicationInfo.dataDir ?: ""
             val appUid = appContext.applicationInfo.uid
             // 共享密码值：share_command 内只含 auth_password_env=SF_SHARE_PWD
-            // 变量名引用，值经此段下发——daemon 侧 spawn 时注入 env，全程
-            // 不进 argv/cmdline 与命令快照明文
-            val sharePwd =
-                SensitiveStore.getSensitive(appContext, "screenShare_password", "")
+            // 变量名引用，值经此密文槽位下发（vault 内解密填充）——daemon 侧
+            // spawn 时注入 env，全程不进 argv/cmdline 与命令快照明文，
+            // 也不进 Java
             listOf(
-                relayPath,
-                autoEncrypt,
-                definedTimestamp,
-                idleLimit.toString(),
-                idleDeadline.toString(),
-                appDataDir,
-                appUid.toString(),
-                sharePwd
-            ).joinToString("\u001F")
+                VaultClient.Part.Literal(
+                    (
+                            "$relayPath\u001F$autoEncrypt\u001F$definedTimestamp\u001F" +
+                                    "$idleLimit\u001F$idleDeadline\u001F$appDataDir\u001F$appUid\u001F"
+                            ).toByteArray(Charsets.UTF_8)
+                ),
+                sensitivePart("screenShare_password", "")
+            )
         }
-        val command =
-            "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D${screenshotCommand()}\u001E${screenRecordCommand()}\u001E${screenShareCommand()}\u001D${sshOptions()}\u001D${otherOptions()}"
-        return sendCommand(command) == "fine"
+        // 命令拼装（与旧版明文逐字节同构，daemon 侧解析零改动）：
+        // config<screenshot>\u001E<screenRecord>\u001E<screenShare>\u001D
+        // <screenshotCommand>\u001E<screenRecordCommand>\u001E<screenShareCommand>\u001D
+        // <sshOptions>\u001D<otherOptions>；敏感值以槽位替代明文段
+        // （suspend 段构造器先求值——buildList 块非挂起上下文）
+        val screenshotCmd = screenshotCommand()
+        val screenRecordCmd = screenRecordCommand()
+        val screenShareCmd = screenShareCommand()
+        val sshOpts = sshOptionsParts()
+        val otherOpts = otherOptionsParts()
+        val parts = buildList {
+            add(
+                VaultClient.Part.Literal(
+                    "config$screenshot\u001E$screenRecord\u001E$screenShare\u001D".toByteArray(
+                        Charsets.UTF_8
+                    )
+                )
+            )
+            add(
+                VaultClient.Part.Literal(
+                    (
+                            "$screenshotCmd\u001E$screenRecordCmd\u001E" +
+                                    "$screenShareCmd\u001D"
+                            ).toByteArray(Charsets.UTF_8)
+                )
+            )
+            addAll(sshOpts)
+            add(VaultClient.Part.Literal("\u001D".toByteArray(Charsets.UTF_8)))
+            addAll(otherOpts)
+        }
+        return sendParts(parts) == "fine"
+    }
+
+    /**
+     * 敏感字段 → COMPOSE 槽位（_sec 密文交 vault 解密）；未配置（无密文）
+     * = 旧默认值字面量——与旧版 getSensitive(default) 的未配置语义一致
+     */
+    private suspend fun sensitivePart(key: String, default: String): VaultClient.Part {
+        val cipher = SensitiveStore.sensitiveCipher(appContext, key)
+            ?: return VaultClient.Part.Literal(default.toByteArray(Charsets.UTF_8))
+        return VaultClient.Part.Slot(cipher)
     }
 
     /**

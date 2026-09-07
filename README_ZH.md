@@ -15,7 +15,7 @@
 ## ✨ 特点
 
 - **保护截屏获取到的隐私内容**  
-  防止截图服务获取到屏幕中的敏感内容，并支持用户自定义遮挡方式  
+  防止截图服务获取到屏幕中的敏感内容，并支持用户自定义遮挡方式
 
 - **屏蔽特定软件的截屏检测**  
   让用户的截图事件跳过应用的恶意截图检测
@@ -39,7 +39,7 @@
   支持页面保护防止配置被截屏泄露  
   截录屏文件支持自动高强度加密  
   文件名支持全随机  
-  端口通信全程高强度加密  
+  端口通信全程高强度加密
 
 - **极致的反胁迫保护**  
   支持应用内密码与胁迫密码，胁迫触发硬件密钥销毁，数据即刻永久失效  
@@ -61,7 +61,7 @@
 
 ## ⚙️ 权限依赖
 
-本项目功能主要依赖 **LSPosed**、**Shizuku** 实现：  
+本项目功能主要依赖 **LSPosed**、**Shizuku** 实现：
 
 **LSPosed**
 - 保护截屏获取到的隐私内容
@@ -73,7 +73,7 @@
 **Shizuku**
 - 无痕的截录屏以及屏幕共享
 - 通过匹配 系统日志 触发截录屏以及屏幕共享
-- 卸载此软件后，仍然完成截录屏以及屏幕共享功能  
+- 卸载此软件后，仍然完成截录屏以及屏幕共享功能
 
 **Root**
 - 与 Shizuku 功能一致，**但隐藏性更强**
@@ -92,7 +92,7 @@
 
 ## 🚫 非商业声明
 
-本项目由开发者出于个人兴趣和技术研究目的发起，**非商业性质**，特此声明：  
+本项目由开发者出于个人兴趣和技术研究目的发起，**非商业性质**，特此声明：
 
 - **永久免费**：  
   本项目完全免费，**不设任何付费功能、会员制度、订阅服务或内购项目**，所有用户均可无障碍使用全部功能。
@@ -140,12 +140,14 @@
 
 ## 🙏 致谢
 
-- LSPosed
-- Shizuku
-- JSch
-- scrcpy
-- libssh2
-- openssl
+- [LSPosed](https://github.com/LSPosed/LSPosed)
+- [Shizuku](https://github.com/RikkaApps/Shizuku)
+- [JSch](https://github.com/mwiede/jsch)
+- [scrcpy](https://github.com/Genymobile/scrcpy)
+- [libssh2](https://github.com/libssh2/libssh2)
+- [openssl](https://github.com/openssl/openssl)
+- [Argon2](https://github.com/P-H-C/phc-winner-argon2)
+- [apksig](https://github.com/google/apksig)
 
 ---
 

@@ -6,7 +6,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import fake.screenshot.Auxiliary
 import fake.screenshot.defense.DefenseProtocol
-import fake.screenshot.defense.KeyVault
+import fake.screenshot.defense.VaultClient
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.R
 import kotlinx.coroutines.*
@@ -253,9 +253,10 @@ class ScreenRecordTileService : TileService() {
             key = "encrypt_outputs",
             defaultValue = false
         )
-        // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
-        // screenrecord 全程向 tmp 写明文，未就绪时启动 = 明文全程暴露
-        if (encryptOutputs && !KeyVault.isDaemonKeyReady()) {
+        // vault DK 不可用（门禁锁定态/无门禁首建失败）：直接放弃
+        // （fail-closed）。screenrecord 全程向 tmp 写明文，未就绪时
+        // 启动 = 明文全程暴露
+        if (encryptOutputs && !VaultClient.isKeyReady()) {
             withContext(Dispatchers.Main) {
                 android.widget.Toast.makeText(
                     this@ScreenRecordTileService,
@@ -364,7 +365,7 @@ class ScreenRecordTileService : TileService() {
                         // shell/root 写 + app 读的跨 uid 链路）
                         Auxiliary.exec("chmod 444 '$tempPath$temp'")
                         val encrypted = File("$save/$file")
-                        KeyVault.encryptFileByKeystore(tempFile, encrypted)
+                        VaultClient.sealFile(tempFile, encrypted)
                     }
                 } catch (_: Exception) {
                 } finally {
@@ -422,7 +423,7 @@ class ScreenRecordTileService : TileService() {
                         Auxiliary.exec("chmod 444 '$tempPath$temp'")
                         File(tempPath + temp).apply {
                             val encrypted = File("$save/$file")
-                            KeyVault.encryptFileByKeystore(this, encrypted)
+                            VaultClient.sealFile(this, encrypted)
                         }
                     } catch (_: Exception) {
                     } finally {

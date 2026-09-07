@@ -3,7 +3,6 @@ package fake.screenshot.defense
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import java.io.File
-import java.security.MessageDigest
 
 /**
  * L0 执行路径劫持检测雷管（Java 侧编排，检测与兜底引爆在 libmemsys.so）。
@@ -14,10 +13,11 @@ import java.security.MessageDigest
  * - GOT/PLT 解析劫持（dlsym 感知面符号越出预期系统模块）
  * - inline hook/蹦床（关键 libc 函数与本库雷管函数入口指令异常）
  * - 驻留信号 handler（SIGTRAP/BUS/SEGV/ILL 指向匿名映射）
+ * - 自完整性校验（本库 .text vs 磁盘基准，反函数内部 patch）
  * 以及 ptrace 型内存扫描器（GG 修改器类——扫描必须 attach，TracerPid
  * 1s 快轮询；PR_SET_DUMPABLE=0 同时令非 root 攻击者完全无法 attach）。
- * root 经 /proc/mem 的静默直读原理上不可检测，由会话自动锁定缩小
- * DK 驻留窗口缓解（见包 README 威胁模型）。
+ * root 经 /proc/mem 的静默直读原理上不可检测，由结构隔离（vault 进程）
+ * 与会话自动锁定缩小 DK 驻留窗口缓解（见包 README 威胁模型）。
  *
  * 防绕过分层：
  * 1. native 自主线程（nativeInit 启动，不依赖 Java 调用驱动）——
@@ -27,16 +27,24 @@ import java.security.MessageDigest
  *    命中走 [DefenseProtocol.destroyForCoercion] 完整销毁序列
  *    （含 Keystore 条目删除与 daemon 停止，比 native 单删文件更彻底）。
  *
- * native 引爆的文件清单与胁迫销毁序列严格对齐（hw_key.bin 及其备份/
- * 临时文件、tink keyset、datastore 目录），sync_preferences（验证器）
- * 保留——门禁行为前后一致，不暴露"引爆发生过"。
+ * 栈流审计/常量时间双实现比较已随 vault 结构隔离退役：其守护对象
+ * （DK 组装/敏感读写/门禁比较/配置下发的 Java 执行路径）全部移入
+ * 无 ART 的 vault 进程——LSPlant/自研框架对不存在的运行时无处下钩，
+ * 检测对象消失（非撤销武装，是武器失去靶标；详见 README 威胁表 #23）。
+ *
+ * native 引爆的文件清单与销毁序列严格对齐（sync_key.bin 及 tmp、
+ * WK 包裹文件、tink keyset、datastore 目录），sync_check
+ * 语义由 sync_key.bin 内嵌验证项承载并保留——门禁行为前后一致，
+ * 不暴露"引爆发生过"。
  *
  * debug build 不启动（开发调试需要 jdwp/ptrace）。
  * 库加载失败不引爆（正常 ROM 不会失败；失败本身不构成劫持证据）。
  *
- * JNI 符号（guard.cpp）：Java_fake_screenshot_defense_GuardManager_*
- * ——本类的包名/类名是 JNI 契约的一部分，重命名必须同步 guard.cpp。
- * 库文件名 libmemsys.so（CMake OUTPUT_NAME，中性化——maps 可见，勿改回"guard"）。
+ * JNI 符号（guard.cpp / vault_client.cpp）：
+ * Java_fake_screenshot_defense_GuardManager_* 与
+ * Java_fake_screenshot_defense_VaultClient_*——本包的类名是 JNI 契约
+ * 的一部分，重命名必须同步 native 侧。库文件名 libmemsys.so
+ * （CMake OUTPUT_NAME，中性化——maps 可见，勿改回"guard"）。
  */
 object GuardManager {
 
@@ -52,9 +60,12 @@ object GuardManager {
             val app = context.applicationContext
             val filesDir = app.filesDir
             val targets = arrayListOf(
-                File(filesDir, "hw_key.bin").absolutePath,
-                File(filesDir, "hw_key.bin.bak").absolutePath,
-                File(filesDir, "hw_key.bin.tmp").absolutePath,
+                // vault 密钥文件（DK 包裹；验证项内嵌其中按状态字节保留）
+                File(filesDir, "sync_key.bin").absolutePath,
+                File(filesDir, "sync_key.bin.tmp").absolutePath,
+                // WK 包裹文件（无门禁模式的 DK 通道）
+                File(filesDir, "sync_wrap.bin").absolutePath,
+                File(filesDir, "sync_wrap.bin.tmp").absolutePath,
                 // tink keyset（SharedPreferences xml；删除后即使 master key
                 // 条目残留于 Keystore 也无密文可解）
                 File(app.filesDir.parentFile, "shared_prefs/tink_prefs.xml").absolutePath
@@ -71,52 +82,6 @@ object GuardManager {
     fun checkNow(): Boolean =
         nativeReady && runCatching { nativeCheck() }.getOrDefault(false)
 
-    /**
-     * 栈流审计（检查点 b/c/d 用，命中处置由调用方决定）：
-     * 对当前线程的活跃调用链（fp 链）做敌意可执行区归属检查——
-     * LSPlant call-through hook 的桥帧是安全链路执行期间的活跃
-     * 祖先帧，其返回地址物理落在注入模块的匿名映射里。
-     *
-     * 调用方约定（KeyVault.assembleDaemonKey / SensitiveStore 读写 /
-     * DaemonManager.syncConfig）：命中即启动 [DefenseProtocol.destroyForCoercion]
-     * 完整销毁 + 本路径 fail-closed 返回（false/默认值/中止下发）。
-     * 门禁链的检查点 (a) 在 native（jni_ct_eq 内嵌，命中直接引爆），
-     * 不经本方法。
-     *
-     * @return true = 活跃栈上存在敌意帧（Java hook 正在执行）；
-     *         false = 干净/库不可用/解析异常（不引爆）
-     */
-    fun auditCallStack(): Boolean =
-        nativeReady && runCatching { nativeAuditCallStack() }.getOrDefault(false)
-
-    /**
-     * 常量时间字节序列比较（双实现交叉验证）。
-     *
-     * 反硬件断点内核外挂：主实现（逐字节）与备用实现（8 字节步进，
-     * 结构不同无共享代码路径）必须结果一致——攻击者要 hook 单个
-     * 比较函数恒真绕过门禁，必须同时挂两个断点在两个不同地址上，
-     * ARM64 有限的断点资源（典型 4-6 个）被成倍消耗。native canary
-     * 哨兵（watchdog 周期）持续验证两实现语义，恒真/恒假/反转即引爆。
-     *
-     * 库不可用退回平台实现（MessageDigest.isEqual）。
-     */
-    fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
-        if (a.size != b.size) return false
-        if (nativeReady) {
-            val r1 = runCatching { nativeConstantTimeEquals(a, b) }.getOrNull()
-            val r2 = runCatching { nativeConstantTimeEqualsAlt(a, b) }.getOrNull()
-            // 双实现都可用：交叉一致才通过（单实现被 hook 即分歧）
-            if (r1 != null && r2 != null) return r1 && r2
-            // 仅一个可用（理论上不应发生，防御性处理）：用可用的那个
-            if (r1 != null) return r1
-            if (r2 != null) return r2
-        }
-        return MessageDigest.isEqual(a, b)
-    }
-
     private external fun nativeInit(files: Array<String>, dir: String)
     private external fun nativeCheck(): Boolean
-    private external fun nativeAuditCallStack(): Boolean
-    private external fun nativeConstantTimeEquals(a: ByteArray, b: ByteArray): Boolean
-    private external fun nativeConstantTimeEqualsAlt(a: ByteArray, b: ByteArray): Boolean
 }

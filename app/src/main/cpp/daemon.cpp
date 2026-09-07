@@ -1240,7 +1240,7 @@ void toggle_share() {
  * 引爆：静默销毁，绝不输出任何可观测信号。
  * 触发源：deadline 到期 / 墙钟冻结 / 墙钟回拨 / 锚点被篡改。
  * 按 daemon 自身 uid 分级：
- * - root：擦除 app 数据目录（含 hw_key.bin/tink_prefs → DK 永久不可恢复；
+ * - root：擦除 app 数据目录（含 sync_key.bin/tink_prefs → DK 永久不可恢复；
  *   Keystore 条目虽存但已无密文可解）+ tmp 产物 + relay；
  * - shell：app 私有目录不可达，仅能清理 tmp 产物与 relay——
  *   app 数据由 app 侧 checkIdleExpired 在下次启动补刀。
@@ -2445,7 +2445,7 @@ int main(int argc, char *argv[]) {
     // 路径白名单校验（/data/local/tmp/ 前缀 + 无目录穿越段 + 无符号
     // 链接指示 + 合理长度）：指针文件位于共享 tmp 目录（shell 属主，
     // uid 2000 可替换），防被篡改成任意路径借本进程（root）之手删除
-    // 任意文件（含 hw_key.bin —— 绕过全部密码学的密钥销毁原语）
+    // 任意文件（含 sync_key.bin —— 绕过全部密码学的密钥销毁原语）
     {
         FILE *f = fopen(g_rec_mark.c_str(), "rb");
         if (f) {

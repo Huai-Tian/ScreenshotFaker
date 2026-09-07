@@ -53,7 +53,7 @@
     <!--Idle timeout destroy-->
     <string name="idle_timeout_destroy">Auto-destroy if unused</string>
     <string name="idle_timeout_destroy_description">Destroy all keys and data if this app stays unused</string>
-    <string name="idle_timeout_destroy_warning">Once enabled, this cannot be turned off. If the app is not used within the selected period, all keys and data will be permanently destroyed and cannot be recovered</string>
+    <string name="idle_timeout_destroy_warning">Always on and cannot be disabled. If the app is not used within the selected period, all keys and data will be permanently destroyed and cannot be recovered</string>
     <string name="idle_option_5_minutes">5 minutes</string>
     <string name="idle_option_30_minutes">30 minutes</string>
     <string name="idle_option_1_hour">1 hour</string>

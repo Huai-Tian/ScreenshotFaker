@@ -85,9 +85,9 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
     private var heartbeatJob: Job? = null
 
     // ---- 会话自动锁定（DK 驻留窗口收窄）----
-    // SIGSTOP 先手 dump 的可利用窗口 = DK 在内存的时间。锁定触发：
+    // root dump vault 进程的可利用窗口 = DK 在 vault 内存的时间。锁定触发：
     // 息屏立即（进程级注册，见 LSPosedServiceManager）/ 后台 30s 宽限 /
-    // 前台无操作 5min。锁定后磁贴与敏感功能经 isDaemonKeyReady/
+    // 前台无操作 5min。锁定后磁贴与敏感功能经 VaultClient.isKeyReady/
     // isSensitiveConfigured fail-closed，超时计时不受影响
     companion object {
         private const val LOCK_FOREGROUND_IDLE_MS = 5 * 60_000L
@@ -156,7 +156,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
             if (!unlocked) {
                 GateCompose(
                     onUnlocked = {
-                        GateManager.markUnlocked()
+                        // 会话解锁状态由 VaultClient.unlock 的 RPC 结果镜像维护
                         unlocked = true
                         everUnlocked = true
                         // 解锁动作重置无操作基准（门禁页停留时间不得计入）
@@ -279,7 +279,7 @@ class MainActivity : ComponentActivity(), LSPosedServiceManager.ServiceStateList
         // 分享/权限页）在宽限内返回不锁
         lockJob?.cancel()
         lockJob = lifecycleScope.launch {
-            delay(LOCK_BACKGROUND_MS)
+            delay(LOCK_BACKGROUND_MS.milliseconds)
             GateManager.lockSession()
         }
     }
@@ -417,8 +417,12 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         super.onCreate()
         XposedServiceHelper.registerListener(this)
         AeadConfig.register()
+        // defense 组件初始化必须先行（幂等）：下方兜底要经 VaultClient
+        // RPC（旧实现 KeyVault 未初始化，此处的冷启动兜底从未真正
+        // 成功过——vault 时代修复，注释所述语义首次成立）
+        DefenseProtocol.init(this)
         // 首装默认共享密码兜底（详见 SensitiveStore.ensureDefaultSharePassword）：
-        // 冷启动时无门禁/未拆分用户（DK 可用）即成功落库；有门禁用户处于
+        // 冷启动时无门禁用户（vault 就绪）即成功落库；有门禁用户处于
         // 锁定态（DK 不可用）→ fail-closed 失败，由 GatePage 解锁后补跑
         CoroutineScope(Dispatchers.IO).launch {
             runCatching { SensitiveStore.ensureDefaultSharePassword(this@LSPosedServiceManager) }

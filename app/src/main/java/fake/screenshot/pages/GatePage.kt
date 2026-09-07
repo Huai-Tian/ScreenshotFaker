@@ -34,8 +34,8 @@ import androidx.compose.ui.unit.dp
 import fake.screenshot.R
 import fake.screenshot.defense.DefenseProtocol
 import fake.screenshot.defense.GateManager
-import fake.screenshot.defense.GateResult
 import fake.screenshot.defense.SensitiveStore
+import fake.screenshot.defense.VaultClient
 import kotlinx.coroutines.launch
 
 /**
@@ -94,24 +94,27 @@ fun GateCompose(onUnlocked: () -> Unit) {
                     scope.launch {
                         // 兜底：验证链任何意外异常按"密码错误"处理——
                         // 不捕获会让 verifying 永久为 true（按钮卡死在
-                        // 加载态且无提示）或直接崩溃进程
-                        val result = runCatching { GateManager.verifyGate(password) }
+                        // 加载态且无提示）或直接崩溃进程。
+                        // 解锁 = vault 内一次 Argon2id + GCM tag 校验
+                        //（验证与 DK 组装原子完成，无 Java 层比较点）
+                        val result = runCatching { GateManager.unlock(password) }
                             .getOrNull()
                         when (result) {
-                            GateResult.SECURITY -> {
-                                // 组装/激活 DK 拆分（失败不阻断解锁，DK 功能 fail-closed）
-                                runCatching { GateManager.onSecurityUnlock(password) }
+                            VaultClient.UnlockResult.SECURITY -> {
                                 // 首装共享密码兜底补跑：冷启动锁定态 DK 不可用
                                 // 失败的那次在此重试（幂等，详见其 KDoc）
                                 runCatching { SensitiveStore.ensureDefaultSharePassword(context) }
                                 onUnlocked()
                             }
-                            GateResult.COERCION -> {
+                            VaultClient.UnlockResult.COERCION -> {
+                                // vault 已就地销毁 DK（双层引爆第一层）；
                                 // NonCancellable 在 DefenseProtocol 内部包裹：
                                 // 本协程随 Activity 重建被取消也不中断销毁序列
                                 runCatching { DefenseProtocol.destroyForCoercion() }
                                 onUnlocked()
                             }
+                            // BAD / RATE_LIMITED（限速窗内连正确密码也拒）/
+                            // 意外异常：与密码错误同 UX（不暴露限速存在）
                             else -> {
                                 failed = true
                                 verifying = false

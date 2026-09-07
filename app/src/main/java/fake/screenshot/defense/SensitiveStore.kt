@@ -7,29 +7,23 @@ import androidx.compose.runtime.State
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import fake.screenshot.Auxiliary
 import fake.screenshot.wrappers.ConfigManager
-import fake.screenshot.wrappers.EncryptManager
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * L1 敏感字段层：SSH 凭据/共享密码等基础设施凭据的 DK 第二层加密。
  *
  * 威胁：root 冒充 app uid 可用 Keystore 主密钥解密 DataStore（Tink 层对
  * root-as-uid 无防护），凭据全文暴露。本层将敏感字段以 DK 包裹后再入
- * DataStore：root 拿到密文也缺 B（安全密码派生份），与 DK 拆分的防护
- * 语义一致。
+ * DataStore：root 拿到密文也缺 DK（门禁用户 = 密码派生包裹，vault 进程
+ * 内持有——Java 层/被 hook 进程均不可达）。
  *
- * 存储：DataStore "<key>_sec" = Base64(nonce + ciphertext)；旧明文 key
- * 保留读取兼容并在首次有 DK 的读取时迁移（迁移后旧值清空）。
- * 已知窗口：升级后用户解锁一次之前，旧明文值仍以原样存在（与升级前
- * 的暴露面一致，不劣化）。
+ * 加解密经 [VaultClient] RPC 在 vault 进程执行（DK 不进 Java）：
+ * - getSensitive 返回明文（T3 边界：与用户主动查看同级）
+ * - syncConfig 走 COMPOSE 槽位（凭据明文不进 Java，见 DaemonManager）
  *
- * 无状态组件：DK 经 [KeyVault]（已 init）获取，存储经 [ConfigManager]
- * （调用方传 context），自身无需 init。
+ * 存储：DataStore "<key>_sec" = Base64(nonce + ciphertext)。
+ * 无旧明文兼容路径（无存量迁移政策——开发期格式定版）。
  */
 object SensitiveStore {
     private const val SEC_SUFFIX = "_sec"
@@ -46,94 +40,56 @@ object SensitiveStore {
     fun sshHostKeyStoreKey(address: String, port: Int): String =
         "ssh_host_key_" + address + "_" + port
 
-
     /** DK 可用时解密敏感字段；不可用（锁定态）或密文损坏 → null */
-    private fun decryptSensitiveOrNull(blob: String): String? {
-        val dk = KeyVault.getDaemonKeyOrNull() ?: return null
-        return runCatching {
-            val data = Base64.decode(blob, Base64.NO_WRAP)
-            if (data.size <= NONCE_LENGTH) return@runCatching null
-            val plain = EncryptManager.decryptBytesByPassword(
-                dk, data.copyOfRange(0, NONCE_LENGTH),
-                data.copyOfRange(NONCE_LENGTH, data.size)
-            )
-            String(plain, Charsets.UTF_8)
-        }.getOrNull()
+    private suspend fun decryptSensitiveOrNull(blob: String): String? {
+        val data = runCatching { Base64.decode(blob, Base64.NO_WRAP) }.getOrNull()
+            ?: return null
+        if (data.size <= NONCE_LENGTH) return null
+        return VaultClient.open(data)?.let { String(it, Charsets.UTF_8) }
     }
 
-    /**
-     * 一次性读取敏感字段：
-     * - _sec 存在 → DK 解密（失败回退 default，fail-closed）
-     * - _sec 不存在且旧明文存在 → 有 DK 则就地迁移（写 _sec + 清旧值），
-     *   无 DK（锁定态/升级后未解锁）返回旧明文——兼容窗口，暴露面与升级前一致
-     */
-    suspend fun getSensitive(context: Context, key: String, default: String): String {
-        // 检查点(c)：敏感字段读取的栈流审计——要读到真凭据必须让原逻辑
-        // 执行（call-through hook 桥帧此刻在栈上），命中即完整销毁 +
-        // fail-closed 返回 default（与解密失败同语义，不暴露审计命中）
-        if (GuardManager.auditCallStack()) {
-            CoroutineScope(Dispatchers.IO).launch {
-                runCatching { DefenseProtocol.destroyForCoercion() }
-            }
-            return default
-        }
+    /** 敏感字段密文（_sec 的 Base64 解码形态）——COMPOSE 槽位原料 */
+    suspend fun sensitiveCipher(context: Context, key: String): ByteArray? {
         val sec = runCatching {
             ConfigManager.getDataOnce(context, key + SEC_SUFFIX, "")
         }.getOrDefault("")
-        if (sec.isNotEmpty()) {
-            // 部分迁移兜底：_sec 已就位但旧明文因中途崩溃残留 → 顺手清除
-            val legacyLeft = runCatching {
-                ConfigManager.getDataOnce(context, key, "")
-            }.getOrDefault("")
-            if (legacyLeft.isNotEmpty()) {
-                runCatching { ConfigManager.saveData(context, key, "") }
-            }
-            return decryptSensitiveOrNull(sec) ?: default
-        }
-        val legacy = runCatching {
-            ConfigManager.getDataOnce(context, key, default)
-        }.getOrDefault(default)
-        if (legacy.isNotEmpty() && legacy != default &&
-            KeyVault.getDaemonKeyOrNull() != null
-        ) {
-            runCatching { putSensitive(context, key, legacy) }
-        }
-        return legacy
+        if (sec.isEmpty()) return null
+        return runCatching { Base64.decode(sec, Base64.NO_WRAP) }.getOrNull()
     }
 
     /**
-     * 写入敏感字段（DK 包裹）。DK 不可用（锁定/组装失败）→ false（fail-closed，
-     * 不降级为明文）。调用方均在解锁后的 UI 上下文，正常路径恒可用
+     * 读取敏感字段：_sec 存在 → vault 解密（失败/锁定态回退 default，
+     * fail-closed——锁定与密文损坏同语义，不暴露原因）
+     */
+    suspend fun getSensitive(context: Context, key: String, default: String): String {
+        val sec = runCatching {
+            ConfigManager.getDataOnce(context, key + SEC_SUFFIX, "")
+        }.getOrDefault("")
+        if (sec.isEmpty()) return default
+        return decryptSensitiveOrNull(sec) ?: default
+    }
+
+    /**
+     * 写入敏感字段（DK 包裹）。DK 不可用（锁定/ vault 异常）→ false
+     * （fail-closed，不降级为明文）。调用方均在解锁后的 UI 上下文，
+     * 正常路径恒可用
      */
     suspend fun putSensitive(context: Context, key: String, value: String): Boolean {
-        // 检查点(c)：写入路径同审计（防篡改写入内容——如把 _sec 换成
-        // 攻击者可控密文）。命中完整销毁 + fail-closed false（不落盘）
-        if (GuardManager.auditCallStack()) {
-            CoroutineScope(Dispatchers.IO).launch {
-                runCatching { DefenseProtocol.destroyForCoercion() }
-            }
-            return false
-        }
-        val dk: SecretKeySpec = KeyVault.getDaemonKeyOrNull() ?: return false
-        return runCatching {
-            if (value.isEmpty()) {
-                // 清空 = 未配置语义：直接写空串（而非加密空 blob——密文空串
-                // 非空，isSensitiveConfigured 会误判"已配置"，app 侧共享
-                // fail-closed 永久拒绝、daemon 侧无鉴权启动，两侧行为分裂）
+        if (value.isEmpty()) {
+            // 清空 = 未配置语义：直接写空串（而非加密空 blob——密文空串
+            // 非空，isSensitiveConfigured 会误判"已配置"，app 侧共享
+            // fail-closed 永久拒绝、daemon 侧无鉴权启动，两侧行为分裂）
+            return runCatching {
                 ConfigManager.saveData(context, key + SEC_SUFFIX, "")
-            } else {
-                val (nonce, ct) = EncryptManager.encryptBytesByPassword(
-                    dk, value.toByteArray(Charsets.UTF_8)
-                )
-                ConfigManager.saveData(
-                    context, key + SEC_SUFFIX,
-                    Base64.encodeToString(nonce + ct, Base64.NO_WRAP)
-                )
-            }
-            // 旧明文清空（DataStore 无删除单键 API，写空即抹除明文值）
-            ConfigManager.saveData(context, key, "")
-            true
-        }.getOrDefault(false)
+            }.isSuccess
+        }
+        val blob = VaultClient.seal(value.toByteArray(Charsets.UTF_8)) ?: return false
+        return runCatching {
+            ConfigManager.saveData(
+                context, key + SEC_SUFFIX,
+                Base64.encodeToString(blob, Base64.NO_WRAP)
+            )
+        }.isSuccess
     }
 
     /**
@@ -144,23 +100,19 @@ object SensitiveStore {
      * "有密码"；允许无密码是用户的显式决策。
      *
      * 调用点（两处互补）：
-     * - LSPosedServiceManager.onCreate：无门禁/未拆分用户冷启动即成功；
-     *   有门禁用户冷启动处于锁定态（DK 不可用，putSensitive fail-closed
-     *   失败）
-     * - GatePage 安全密码解锁后：DK 已组装，锁定态失败的那次在此补跑
+     * - LSPosedServiceManager.onCreate：无门禁用户冷启动（vault 就绪）即
+     *   成功；有门禁用户处于锁定态（DK 不可用，putSensitive fail-closed）
+     * - GatePage 安全密码解锁后：DK 已就绪，锁定态失败的那次在此补跑
      *
-     * 三重防覆盖（任一命中即不生成）：
-     * - _sec 已配置（非空密文）：既有密码（含显式设置/迁移完成态）
-     * - 旧明文仍有值：升级用户既存密码（DK 可用时 getSensitive 顺手
-     *   完成迁移）——随机密码静默覆盖会让既有连接全部认证失败
+     * 双重防覆盖（任一命中即不生成）：
+     * - _sec 已配置（非空密文）：既有密码（含显式设置态）
      * - 生成标记为 true：首次成功生成后写入；用户此后显式清空密码
-     *   （putSensitive("") 抹掉 _sec = isConfigured 归零）是主动选择
-     *   无密码，重启/解锁不得复活随机密码（重新上密码走 UI 手输）
+     *   （putSensitive("") = isConfigured 归零）是主动选择无密码，
+     *   重启/解锁不得复活随机密码（重新上密码走 UI 手输）
      */
     suspend fun ensureDefaultSharePassword(context: Context) {
         runCatching {
             if (isSensitiveConfigured(context, "screenShare_password")) return
-            if (getSensitive(context, "screenShare_password", "").isNotEmpty()) return
             if (ConfigManager.getDataOnce(context, "screenShare_password_generated", false)) return
             val pwd = Auxiliary.getStrongPassword(Auxiliary.getSecureRandomInt(14..18))
             if (putSensitive(context, "screenShare_password", pwd)) {
@@ -180,15 +132,13 @@ object SensitiveStore {
             ConfigManager.getDataOnce(context, key + SEC_SUFFIX, "")
         }.getOrDefault("").isNotEmpty()
 
-    /** 敏感字段响应式流（与 ConfigManager.rememberValue 同形：初值 default，异步发射解密值） */
+    /** 敏感字段响应式流（初值 default，异步发射解密值/锁定态回退 default） */
     fun sensitiveFlow(context: Context, key: String, default: String): Flow<String> =
         ConfigManager.getData(context, key + SEC_SUFFIX, "").map { sec ->
             if (sec.isNotEmpty()) {
                 decryptSensitiveOrNull(sec) ?: default
             } else {
-                // 未迁移：回退旧明文保显示连续性（迁移由 getSensitive/putSensitive 完成）
-                runCatching { ConfigManager.getDataOnce(context, key, default) }
-                    .getOrDefault(default)
+                default
             }
         }
 

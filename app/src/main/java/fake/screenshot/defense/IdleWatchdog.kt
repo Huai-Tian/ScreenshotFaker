@@ -15,17 +15,23 @@ import fake.screenshot.wrappers.DaemonManager
 /**
  * L2 未使用自动销毁（TG 账号超时销毁式，独立于门禁验证）。
  *
+ * 始终武装（always-armed）：不存在"未启用"态——装机即武装，默认 6 个
+ * 月，用户只能选时长（[idleTimeoutOptions]）。armed 哨兵概念整体退役：
+ * 旧设计 armed 是用户选择的一次性提交标志，"验证器存在而 armed 消失 =
+ * 定向篡改 = 自毁"；新语义下武装是默认事实，标志位消失只剩两种状态——
+ * limit>0（武装，任意触发点就地补齐锚点）与 limit 缺失（首启/销毁后，
+ * 就地武装为默认档）。写入时序锚点先于 limit：任何崩溃窗口落在
+ * limit 缺失区间 → 下次触发重新武装（保留用户已选时长由
+ * [setIdleTimeout] 落地后的 limit 本身承载），不产生不可达引爆态。
+ *
  * 状态存储：
- * - armed 哨兵：明文 prefs "sync_preferences"（与验证器同文件，中性命名），
- *   永不清除。由 [GateManager.setPasswords]（随验证器同一次 commit——
- *   验证器存在而 armed 消失 = 定向篡改 = 自毁）与本类 [setIdleTimeout]
- *   共写；键名 "armed" 是冻结不变量，两处定义必须一致
  * - idle_limit / idle_ts：密文 DataStore（Tink 保护）
+ * - sync_cycle：单调活性凭证（明文 prefs，见 KEY_TOUCH）
  *
  * 计时锚点（反回拨）：三段式 "boot,elapsedRealtime,currentTimeMillis"。
  * boot 取 Settings.Global.BOOT_COUNT（system_server 维护，用户态不可
  * 回拨）：同开机走 er 单调 + 双锚点交叉校验；跨开机走墙钟判定；
- * boot 减小 = 篡改。旧版两段式锚点按旧规则评估一次后迁移。
+ * boot 减小 = 篡改。
  *
  * 销毁执行不在本类：判定命中后委托 [DefenseProtocol]（共享同一把
  * 检查/销毁互斥锁，read-judge-destroy 整体串行）。
@@ -36,11 +42,9 @@ import fake.screenshot.wrappers.DaemonManager
  * 不跨重启（重启由 BootCompletedReceiver 接管）。
  */
 object IdleWatchdog {
-    // prefs 文件名是隐蔽性设计（与验证器/KeyVault 同文件），冻结不变量
+    // prefs 文件名是隐蔽性设计（与 data_ref/活性凭证同文件），冻结不变量
     private const val PREFS_NAME = "sync_preferences"
 
-    // armed 哨兵：GateManager.setPasswords 与本类共写（见类注释），勿改键名
-    private const val KEY_ARMED = "armed"
     private const val CONFIG_KEY_IDLE_LIMIT = "idle_limit"
     private const val CONFIG_KEY_IDLE_TS = "idle_ts"
 
@@ -102,13 +106,11 @@ object IdleWatchdog {
 
     private fun prefs() = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /** 可选档位（分钟）：5分钟 ~ 12个月，无禁用项 */
+    /** 可选档位（分钟）：5分钟 ~ 12个月（始终武装，无禁用项） */
     val idleTimeoutOptions: List<Long> = listOf(
         5L, 30L, 60L, 360L, 1440L, 10080L,
         43200L, 129600L, 259200L, 525600L
     )
-
-    fun isIdleArmed(): Boolean = prefs().getBoolean(KEY_ARMED, false)
 
     /**
      * idle 密文状态快照。
@@ -186,12 +188,11 @@ object IdleWatchdog {
     }
 
     /**
-     * 超时销毁是否真正启用过（区别于 armed-only 的门禁态）。
-     * 判定只看 limit：limit>0 即启用，ts 是否存在不参与
+     * 超时销毁是否处于武装态（始终武装设计：limit>0 即武装；首启/销毁后
+     * 由首次检查就地补齐）。判定只看 limit，ts 是否存在不参与
      * （写入时序为 ts 先 limit 后，limit>0 而 ts 缺失 = 篡改，交给雷管处理）。
      */
     suspend fun isIdleActivated(): Boolean {
-        if (!isIdleArmed()) return false
         return readIdleState().let { it.readable && it.limit > 0 }
     }
 
@@ -229,14 +230,6 @@ object IdleWatchdog {
     }
 
     private suspend fun checkIdleExpiredLocked(): Boolean {
-        // 验证器存在而 armed 消失 = sync_preferences 被定向篡改 = 自毁
-        if (GateManager.isGateEnabled() && !isIdleArmed()) {
-            DefenseProtocol.destroyForCoercionLocked()
-            return true
-        }
-        // 未 armed 且未设门禁 = 从未启用（全新安装/存量未使用用户），正常流程
-        if (!isIdleArmed()) return false
-
         val st = readIdleState()
         // 基础设施异常（DataStore 构造竞态/scope 状态错）：绝非密文损坏，
         // 引爆判定推迟到下一触发点（不引爆、不 touch、不布防——防误毁
@@ -248,8 +241,20 @@ object IdleWatchdog {
             DefenseProtocol.destroyForCoercionLocked()
             return true
         }
-        // limit<=0：未启用。ts 残留视为垃圾忽略（修复：旧版会把 (0, ts≠"") 引爆）
-        if (st.limit <= 0L) return false
+        // limit<=0：首启/销毁复位后的未武装窗口——就地武装默认档
+        //（始终武装：不存在用户关闭路径）。锚点先行（与"ts 先 limit 后"
+        // 不变量一致）：锚点落盘失败（错钟/IO）则本轮放弃，下个触发点重试
+        //（宁可不武装，不制造 (limit>0, ts="") 引爆态）
+        if (st.limit <= 0L) {
+            if (writeAnchor()) {
+                runCatching {
+                    ConfigManager.saveData(
+                        appContext, CONFIG_KEY_IDLE_LIMIT, DEFAULT_IDLE_LIMIT_MINUTES
+                    )
+                }
+            }
+            return false
+        }
         // 注：旧版对 limit 不在档位表即引爆——该值存于 GCM 加密的
         // DataStore，攻击者无法在不持密钥的情况下写入任意值（密文一旦
         // 被改写，解密直接失败走 readable=false 路径）；"表外值"的唯一
@@ -640,7 +645,6 @@ object IdleWatchdog {
      * 锚点写入后顺带向守护进程续期（daemon 不在线则静默跳过）。
      */
     suspend fun touchIdle() {
-        if (!isIdleArmed()) return
         if (GateManager.isGateEnabled() && !GateManager.sessionUnlocked) return
         val st = readIdleState()
         if (!st.readable || st.limit <= 0) return
@@ -656,36 +660,28 @@ object IdleWatchdog {
     }
 
     /**
-     * 首次启用/修改档位。写入时序严格：
-     * ① armed 哨兵（明文，先立于不败）→ ② 锚点（无生效意义）→ ③ limit（提交标志）。
-     * 任意步骤间崩溃产生的部分状态均为合法态：
-     * (armed, 0, "") / (armed, 0, ts) → 未启用；(armed, limit>0, ts) → 完整启用。
-     * "limit>0 而 ts 空"不可达，出现即篡改（雷管覆盖）。
+     * 修改档位（始终武装：无启用/禁用概念，仅时长选择）。
+     * 写入时序：① 锚点 → ② limit（提交标志）。任何崩溃窗口落在
+     * limit 旧值区间 = 保持旧档位（合法态）；"limit>0 而 ts 空"不可达
+     * （锚点先行），出现即篡改（雷管覆盖）。
      *
-     * B1 修复：writeAnchor 在墙钟不可信（< WC0_MIN）时拒绝落盘——若此处
-     * 无视失败继续写 limit，会产生 (armed, limit>0, ts="") 的"不可达"状态，
-     * 下一次检查（ts 空检查先于错钟守卫执行）即判篡改引爆。错钟期间整体
-     * 中止启用（本次设置不生效，时钟恢复后用户重新启用即可）；
-     * 锚点 IO 失败同理——宁可不启用，不制造引爆态
+     * B1 语义保留：writeAnchor 在墙钟不可信（< WC0_MIN）时拒绝落盘——
+     * 无视失败继续写 limit 会制造 (limit>0, ts="") 引爆态。错钟期间
+     * 整体中止（本次设置不生效，时钟恢复后重设即可）
      *
-     * @return false = 启用中止（锚点落盘失败），本次设置未生效——调用方
-     * 不得按已生效反馈（UI 回填新档位），否则用户看到"已启用 X 分钟
-     * 销毁"而实际防护仍是旧值/未启用（虚假安全感）
+     * @return false = 设置中止（锚点落盘失败），本次选择未生效——调用方
+     * 不得按已生效反馈（UI 回填新档位），否则用户看到"X 分钟"而实际
+     * 防护仍是旧值（虚假安全感）
      */
     suspend fun setIdleTimeout(minutes: Long): Boolean {
-        // commit（同步落盘）：与注释"先立于不败"的时序声明一致——
-        // apply 异步落盘在写入后数毫秒内进程死亡会丢失哨兵（无门禁
-        // 用户启用超时后 app 侧超时静默失效）
-        prefs().edit(commit = true) { putBoolean(KEY_ARMED, true) }
         if (!writeAnchor()) return false
         ConfigManager.saveData(appContext, CONFIG_KEY_IDLE_LIMIT, minutes)
         DaemonManager.renewIdleDeadline(minutes)
         return true
     }
 
-    /** 当前档位（未启用返回 null，用于设置页副标题） */
+    /** 当前档位（密文不可读返回 null，用于设置页副标题） */
     suspend fun getCurrentIdleTimeout(): Long? {
-        if (!isIdleArmed()) return null
         val st = readIdleState()
         if (!st.readable) return null
         return if (st.limit > 0 && st.limit in idleTimeoutOptions) st.limit else null
@@ -693,18 +689,14 @@ object IdleWatchdog {
 
     /**
      * 销毁后复位（由 [DefenseProtocol] 在销毁序列内调用）：防连环雷管
-     * 自毁循环（销毁清空 DataStore → 读默认 0 → 再引爆）。
-     * 激活态由调用方在 wipe 之前快照传入（wipe 后读取恒为未启用，
-     * 旧实现因此恒为 no-op）。仅"真正启用过"（limit>0）时写默认档 +
-     * 当前锚点，计时器自愈；armed-only（只设过门禁未启用超时）销毁后
-     * 回到未启用态 = 全新状态语义。armed 永不清除。
+     * 自毁循环（销毁清空 DataStore → 读默认 0 → 检查又判未武装 → 引爆
+     * 销毁……）。始终武装：无条件复位默认档（6 个月）+ 当前锚点。
      *
-     * B1 同源修复：锚点先行（与"ts 先 limit 后"不变量一致）——锚点
-     * 落盘失败（错钟/IO）则不写 limit，保持销毁后的未启用态
-     * （limit 已被 wipe 清零），绝不制造 (limit>0, ts="") 引爆态
+     * B1 同源语义：锚点先行——落盘失败（错钟/IO）则不写 limit，保持
+     * 未武装窗口（下次检查的就地武装路径收敛），绝不制造
+     * (limit>0, ts="") 引爆态
      */
-    internal suspend fun resetIdleAfterDestroy(wasActivated: Boolean) {
-        if (!wasActivated) return
+    internal suspend fun resetIdleAfterDestroy() {
         if (!writeAnchor()) return
         ConfigManager.saveData(
             appContext, CONFIG_KEY_IDLE_LIMIT, DEFAULT_IDLE_LIMIT_MINUTES

@@ -7,7 +7,7 @@ import android.service.quicksettings.TileService
 import fake.screenshot.R
 import fake.screenshot.Auxiliary
 import fake.screenshot.defense.DefenseProtocol
-import fake.screenshot.defense.KeyVault
+import fake.screenshot.defense.VaultClient
 import fake.screenshot.wrappers.ConfigManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -89,9 +89,9 @@ class ScreenshotTileService : TileService() {
                     key = "encrypt_outputs",
                     defaultValue = false
                 )
-                // DK 拆分激活且本会话未解锁组装：直接放弃（fail-closed）。
+                // vault DK 不可用（门禁锁定态等）：直接放弃（fail-closed）。
                 // 此时若继续，明文会先落 /data/local/tmp 再删——绝不给这个窗口
-                if (encryptOutputs && !KeyVault.isDaemonKeyReady()) {
+                if (encryptOutputs && !VaultClient.isKeyReady()) {
                     withContext(Dispatchers.Main) {
                         android.widget.Toast.makeText(
                             this@ScreenshotTileService,
@@ -142,7 +142,7 @@ class ScreenshotTileService : TileService() {
                     try {
                         File(tempPath + tempName).apply {
                             val encrypted = File("$savePath/$fileName")
-                            KeyVault.encryptFileByKeystore(this, encrypted)
+                            VaultClient.sealFile(this, encrypted)
                         }
                     } catch (_: Exception) {
                     } finally {

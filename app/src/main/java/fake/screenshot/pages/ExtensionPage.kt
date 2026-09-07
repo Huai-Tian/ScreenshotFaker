@@ -39,8 +39,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.core.net.toUri
 import androidx.core.text.isDigitsOnly
 import fake.screenshot.Auxiliary
-import fake.screenshot.defense.KeyVault
 import fake.screenshot.defense.SensitiveStore
+import fake.screenshot.defense.VaultClient
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.wrappers.EncryptManager
@@ -465,16 +465,19 @@ fun ExtensionCompose() {
                         return@forEach
                     }
                     val processedBytes = if (encrypt) {
-                        val (nonce, ciphertext) = KeyVault.encryptByKeystore(originalBytes)
-                        nonce + ciphertext
-                    } else {
-                        if (originalBytes.size < 12) {
+                        VaultClient.seal(originalBytes) ?: run {
                             failCount++
                             return@forEach
                         }
-                        val nonce = originalBytes.copyOfRange(0, 12)
-                        val ciphertext = originalBytes.copyOfRange(12, originalBytes.size)
-                        KeyVault.decryptByKeystore(nonce, ciphertext)
+                    } else {
+                        if (originalBytes.size < 12 + 16) {
+                            failCount++
+                            return@forEach
+                        }
+                        VaultClient.open(originalBytes) ?: run {
+                            failCount++
+                            return@forEach
+                        }
                     }
                     resolver.openOutputStream(uri, "rwt")?.use { outputStream ->
                         outputStream.write(processedBytes)

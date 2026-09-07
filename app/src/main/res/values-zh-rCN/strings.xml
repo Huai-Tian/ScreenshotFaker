@@ -52,7 +52,7 @@
     <!--Idle timeout destroy-->
     <string name="idle_timeout_destroy">未使用自动销毁</string>
     <string name="idle_timeout_destroy_description">长时间未使用应用时自动销毁全部密钥与数据</string>
-    <string name="idle_timeout_destroy_warning">启用后无法关闭。超过所选时长未使用应用，将永久销毁全部密钥与数据且无法恢复</string>
+    <string name="idle_timeout_destroy_warning">始终启用，无法关闭。超过所选时长未使用应用，将永久销毁全部密钥与数据且无法恢复</string>
     <string name="idle_option_5_minutes">5 分钟</string>
     <string name="idle_option_30_minutes">30 分钟</string>
     <string name="idle_option_1_hour">1 小时</string>

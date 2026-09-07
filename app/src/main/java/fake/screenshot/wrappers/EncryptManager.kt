@@ -11,10 +11,10 @@ import javax.crypto.spec.SecretKeySpec
  * 纯软件密码学原语（无状态、无 Android 依赖、无密钥落盘）：
  * PBKDF2 派生 + AES-GCM 加解密（String 与 ByteArray 两种形态）。
  *
- * 防御语义（密钥拆分/迁移事务/pepper/敏感字段）已迁至 defense 包：
- * - fake.screenshot.defense.KeyVault（DK 拆分、迁移事务、Keystore pepper）
- * - fake.screenshot.defense.SensitiveStore（敏感字段 DK 二次加密）
- * 本类不再持有 appContext 与任何初始化状态。
+ * 消费面（vault 时代）：备份导出/恢复与扩展页批量加密——两者均为
+ * 用户手输备份密码派生（与 DK 无关）。DK 相关加解密已全部下沉
+ * vault 进程（fake.screenshot.defense.VaultClient）。
+ * 本类不持有 appContext 与任何初始化状态。
  */
 object EncryptManager {
     //Software

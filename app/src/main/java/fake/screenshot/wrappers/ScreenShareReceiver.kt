@@ -468,7 +468,7 @@ class ScreenShareReceiver(
         // config 中的真实 sshPassword 并窃听流经隧道的屏幕流。DK 未就绪
         //（拆分锁定/文件不可解）一律拒绝建立会话（抛出由 runLoop 按普通
         // 失败重试/终止，连接从未建立，无泄露窗口；解锁后重试即恢复）
-        if (!fake.screenshot.defense.KeyVault.isDaemonKeyReady()) {
+        if (!fake.screenshot.defense.VaultClient.isKeyReady()) {
             throw IOException("locked_no_credentials")
         }
         val storedFingerprint = SensitiveStore.getSensitive(appContext, hostKeyStoreKey, "")
