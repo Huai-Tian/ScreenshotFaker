@@ -315,12 +315,18 @@ object ScreenShareManager {
             if (authPassword.isEmpty() &&
                 SensitiveStore.isSensitiveConfigured(appContext, "screenShare_password")
             ) {
+                // 本会话自身启动失败：relayRunning/initialized/sshSession
+                // 由本协程唯一持有，无条件回退；lastError/磁贴刷新仅纪元
+                // 未变时执行——销毁已发生时本会话是过代快照，反馈无
+                // 意义且污染销毁后的磁贴状态
                 relayRunning = false
                 initialized = false
                 sshSession?.disconnect()
                 sshSession = null
-                lastError = "locked_no_credentials"
-                notifyStateChanged()
+                if (destroyEpoch == myEpoch) {
+                    lastError = "locked_no_credentials"
+                    notifyStateChanged()
+                }
                 return@launch
             }
             // 入口类用中性名 vendor.entry.Main：ps/pgrep 的进程 cmdline
@@ -447,13 +453,22 @@ object ScreenShareManager {
                 notifyStateChanged()
                 return@launch
             }
-            // 守护脚本正常退出（STOP 标记 / 连续 3 次快速退出）
-            if (relayRunning) {
-                lastError = "server_exited_repeatedly"
+            // 守护脚本正常退出（STOP 标记 / 连续 3 次快速退出）。
+            // 会话归属复查：本协程仍是当前会话且纪元未变才回写共享状态
+            // ——销毁后台清理（stopSessionForDestroy）击杀旧会话守护
+            // 脚本时，本协程持旧快照退出，不得砸掉重生新会话的
+            // relayRunning/initialized（磁贴熄灭 + 下次 toggle 误判 =
+            // 演出穿帮），也不得把 stale lastError 覆盖到新会话上
+            if (destroyEpoch == myEpoch &&
+                ::relayName.isInitialized && sessionName == relayName
+            ) {
+                if (relayRunning) {
+                    lastError = "server_exited_repeatedly"
+                }
+                relayRunning = false
+                initialized = false
+                notifyStateChanged()
             }
-            relayRunning = false
-            initialized = false
-            notifyStateChanged()
         }
         return true
     }
@@ -523,37 +538,84 @@ object ScreenShareManager {
     private fun isServerActuallyRunning(): Boolean =
         Auxiliary.exec("pgrep -f vendor.entry.Main").first == 0
 
+    /** 当前共享会话名（无会话返回 null）——销毁序列快照定向清理目标用 */
+    fun currentSessionName(): String? = if (::relayName.isInitialized) relayName else null
+
     fun stopScreenShare() {
         // 先清标志再杀进程，确保守护循环不会在杀进程的间隙重新拉起 server
         relayRunning = false
+        // 当前会话的停止标记先行（体面退出路径），随后通配清扫全部守护
+        // 循环/标记/脚本——relayName 可能已过时（在途 initializeInternal
+        // 改名后启动被闩锁拦下、或历史残留），只清当前名会漏掉旧守护
+        // 循环：其 server 被 pkill 后 1s 内复活，磁贴显示已停止而推流
+        // 仍在继续（虚假安全感）。本 app 任一时刻至多一个合法会话
+        //（toggle 串行 + relayRunning 互斥），通配清扫不伤及无辜
         if (::relayName.isInitialized) {
-            val stopFlag = "/data/local/tmp/.s_$relayName"
-            val watchPath = "/data/local/tmp/.w_$relayName.sh"
-            // 1) 写停止标记：守护循环醒来后退出，不再重启 server
-            Auxiliary.exec("touch $stopFlag")
-            // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
-            //    必须按 app_process 的实际命令行（含入口类名）匹配。
-            //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
-            Auxiliary.exec(
-                "pkill -INT -f vendor.entry.Main; sleep 1; pkill -KILL -f vendor.entry.Main"
-            )
-            // 3) 兜底杀守护 sh（停止标记因异常未生效时），并清理脚本与标记文件
-            Auxiliary.exec("pkill -f $watchPath; rm -f $stopFlag $watchPath")
-        } else {
-            // app 进程被杀重启后名称已丢失：按通配模式清理所有守护脚本与 server。
-            // 守护循环用固定 $STOP 文件名判断退出，脚本被杀即不再拉起，标记文件可删
-            Auxiliary.exec(
-                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f vendor.entry.Main; sleep 1; " +
-                        "pkill -KILL -f vendor.entry.Main; " +
-                        "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
-            )
+            Auxiliary.exec("touch /data/local/tmp/.s_$relayName")
         }
+        // 1) 杀全部守护 sh（先于 server：循环不死则 server 秒级复活）
+        Auxiliary.exec("pkill -f /data/local/tmp/.w_")
+        // 2) 杀 server 进程。注意：CLASSPATH 是环境变量，不会出现在进程 cmdline 中，
+        //    必须按 app_process 的实际命令行（含入口类名）匹配。
+        //    先 SIGINT 让 server 走 CleanUp 正常收尾，1s 后仍存活则 SIGKILL 兜底
+        Auxiliary.exec(
+            "pkill -INT -f vendor.entry.Main; sleep 1; pkill -KILL -f vendor.entry.Main"
+        )
+        // 3) 清理所有停止标记与守护脚本
+        Auxiliary.exec("rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh")
         if (::relayJob.isInitialized) {
             relayJob.cancel()
         }
         sshSession?.disconnect()
         sshSession = null
         initialized = false
+    }
+
+    /**
+     * 定向停止指定会话（销毁序列专用；目标名取自销毁起始时的快照——
+     * [markCoercionDestroyed] 只拦新启动，拦不住已越过入口检查的在途
+     * toggle 改名 relayName，故清理时全局名不可信，见 DefenseProtocol
+     * 步骤 -0）。三段清理：
+     * 1) 目标会话停止标记 + 守护 sh 精准击杀（按 .w_<name>.sh 路径）；
+     * 2) server 进程全量 pkill——cmdline 不含会话名（CLASSPATH 是环境
+     *    变量）无法定向；并发的重生新会话由其自身守护循环 1s 内重新
+     *    拉起（瞬时闪断，代价远低于旧凭据复活推流）；
+     * 3) 目标标记/脚本清除。
+     * 进程内状态（relayRunning/sshSession 等）仅当仍指向目标会话时才
+     * 回退——已被新会话接管时它们属于新会话，触碰即误停/穿帮。
+     * target 为 null（无会话/进程重启名已失）：退化为通配清扫。
+     */
+    fun stopSessionForDestroy(target: String?) {
+        if (target != null) {
+            val stopFlag = "/data/local/tmp/.s_$target"
+            val watchPath = "/data/local/tmp/.w_$target.sh"
+            // 1) 停止标记 + 击杀目标守护循环（STOP 标记供其体面退出，
+            // pkill 兜底——循环可能正阻塞在 server 运行中，标记要等
+            // server 退出后才被检查）
+            Auxiliary.exec("touch $stopFlag; pkill -f $watchPath")
+            // 2) 全量杀 server（含目标会话的；无法定向，见 KDoc）
+            Auxiliary.exec(
+                "pkill -INT -f vendor.entry.Main; sleep 1; pkill -KILL -f vendor.entry.Main"
+            )
+            // 3) 清目标残留
+            Auxiliary.exec("rm -f $stopFlag $watchPath")
+        } else {
+            Auxiliary.exec(
+                "pkill -f /data/local/tmp/.w_ ; pkill -INT -f vendor.entry.Main; sleep 1; " +
+                        "pkill -KILL -f vendor.entry.Main; " +
+                        "rm -f /data/local/tmp/.s_* /data/local/tmp/.w_*.sh"
+            )
+        }
+        // 进程内状态：仅当仍指向目标会话（未被重生新会话接管）才回退
+        if (target == null || (::relayName.isInitialized && relayName == target)) {
+            relayRunning = false
+            if (::relayJob.isInitialized) {
+                relayJob.cancel()
+            }
+            sshSession?.disconnect()
+            sshSession = null
+            initialized = false
+        }
     }
 
     /** sh 安全引用：单引号包裹，内部单引号转义为 '\'' */

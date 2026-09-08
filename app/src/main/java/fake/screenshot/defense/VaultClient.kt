@@ -63,12 +63,9 @@ object VaultClient {
     private const val VR_BAD_CURRENT = 1
     private const val VR_ERROR = 2
 
-    // ---- 磁盘态 mode（vault.cpp DiskState 低 7 位）----
+    // ---- 磁盘态 mode（vault.cpp DiskState 低 7 位；仅本类消费的子集）----
     private const val MODE_NOTHING = 0
-    private const val MODE_LIVE_PW = 1
     private const val MODE_LIVE_WK = 2
-    private const val MODE_DEAD_PW = 3
-    private const val MODE_CORRUPT = 4
 
     // ---- 文件名（vault 拥有 sync_key.bin；本类拥有 sync_wrap.bin）----
     private const val WRAP_FILE = "sync_wrap.bin"
@@ -258,23 +255,13 @@ object VaultClient {
 
     /** DK 是否可用（解锁会话内 / 无门禁模式）——磁贴与敏感功能 fail-closed 判定 */
     suspend fun isKeyReady(): Boolean {
-        val st = status() ?: return false
-        return st.dkReady
+        val r = request(FrameBuilder().u8(OP_PING).build()) ?: return false
+        return r.size == 3 && r[2].toInt() == 1
     }
-
-    data class VaultStatus(val mode: Int, val gateOn: Boolean, val dkReady: Boolean)
-
-    suspend fun status(): VaultStatus? {
-        val r = request(FrameBuilder().u8(OP_PING).build()) ?: return null
-        if (r.size != 3) return null
-        return VaultStatus(r[1].toInt() and 0x7F, (r[1].toInt() and 0x80) != 0, r[2].toInt() == 1)
-    }
-
-    /** 门禁是否启用（同步缓存——RPC 后刷新；进程启动后首次访问可能为 false） */
-    fun isGateEnabledSync(): Boolean = gateEnabled
 
     /**
-     * 解锁（验证 + DK 组装，一次 Argon2id）：
+     * 解锁（验证 + DK 组装；vault 内恒定 2 次 Argon2id——安全/错误/
+     * 胁迫三路径等时，见 vault.cpp"解锁时序零差"）：
      * SECURITY = DK 就绪；COERCION = vault 已就地重生（旧 DK 孤儿化，
      * 会话以新随机 DK 全功能就绪——演出：该密码正常解锁），调用方执行
      * 完整销毁序列（keepVaultSession，勿再 OP_DESTROY）后照常进入；

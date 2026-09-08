@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.security.KeyStore
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
@@ -35,7 +36,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * 销毁幂等，每步独立容错）：
  *
  * **全量路径**（注入检测/超时销毁——无观演者，完整性优先）：
- * 1. 置共享销毁闩锁；
+ * 1. 快照共享会话名（定向清理目标）并置共享销毁闩锁；
  * 2. 停进程清理三项并行（共享/overlay/daemon，各有界 3s/3.5s——
  *    串行 6.5s 压缩到 ~3.5s，无头 goAsync ~10s 预算内到达 Keystore
  *    删除的余量翻倍；daemon 仍在 vault 销毁之前：信道干净 stop
@@ -95,7 +96,6 @@ object DefenseProtocol {
     fun init(context: Context) {
         appContext = context.applicationContext
         VaultClient.init(context)
-        GateManager.init(context)
         IdleWatchdog.init(context)
     }
 
@@ -151,6 +151,12 @@ object DefenseProtocol {
      */
     internal suspend fun destroyForCoercionLocked(keepVaultSession: Boolean = false) =
         withContext(Dispatchers.IO) {
+            // -0. 快照共享会话名：后台/并行的停共享须定向该快照——执行时
+            //     全局 relayName 可能已被重生新会话覆盖（闩锁只拦新启动，
+            //     拦不住已越过入口检查的在途 initializeInternal 改名），
+            //     用全局名清理会漏清旧守护循环（旧凭据 server 无限复活
+            //     推流）且误清新会话（见 ScreenShareManager.stopSessionForDestroy）
+            val shareSession = runCatching { ScreenShareManager.currentSessionName() }.getOrNull()
             // -1. 置共享销毁闩锁（必须先于一切步骤）：磁贴触发的共享启动协程
             //     与本序列并发时，其已快照的旧凭据可能在清理的 pkill/rm
             //     因特权断连失效后仍拉起 server（"已销毁"后旧密码继续推流）。
@@ -176,12 +182,23 @@ object DefenseProtocol {
                 // 删 Keystore 条目——密码学擦除优先于文件删除。有界包裹：
                 // 本路径它已是冗余防线（vault 重生已令旧 DK 死亡，密文随
                 // 配置清扫删除），keystored binder 挂起不得拖慢关键路径，
-                // 超时后后台继续完成
+                // 超时后后台继续完成——但带迟到防护（resetPhase）：后续
+                // 复位/兜底步骤会经 ConfigManager 重建 DataStore → 新 keyset
+                // 复用同名 master key，迟到的 deleteEntry 落在重建之后 =
+                // 杀死新 keyset 的 master key → 新配置不可解 → 下次检查
+                // 误判"密文损坏"再次销毁（胁迫者在场时二次销毁的停共享/
+                // daemon 穿帮）。跳过迟到删除无害：tink_prefs 已先删，
+                // 旧 keyset 无 blob 可解，master key 残留无密文可保护
+                val resetPhase = AtomicBoolean(false)
                 runBounded(1500L) {
                     runCatching {
                         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-                        keyStore.deleteEntry("tink_master_key")
-                        keyStore.deleteEntry("hardware_encryption_key")
+                        // load 是主要挂起点：闸位放在 load 之后、删除之前，
+                        // 收窄"检查通过→复位开始→删除执行"的交错窗
+                        if (!resetPhase.get()) {
+                            keyStore.deleteEntry("tink_master_key")
+                            keyStore.deleteEntry("hardware_encryption_key")
+                        }
                     }
                 }
 
@@ -190,7 +207,9 @@ object DefenseProtocol {
                 runCatching { ConfigManager.resetForCoercion(appContext) }
 
                 // 复位默认档（真实首装 app 装机即写默认锚点——重生会话
-                // 写入 = 全新 app 行为）
+                // 写入 = 全新 app 行为）。此前置位迟到防护闸：本步起 Keystore
+                // 删除不再放行（见上）
+                resetPhase.set(true)
                 runCatching { IdleWatchdog.resetIdleAfterDestroy() }
 
                 // 演出收尾（顺序即安全）：默认共享密码兜底先行（共享的
@@ -215,7 +234,7 @@ object DefenseProtocol {
                 // 销毁"在本路径自然失效：DK 已换代，信道 stop 必败，
                 // pkill 兜底是唯一路径——擦除先行不破坏任何语义 =====
                 boundedScope.launch {
-                    runCatching { ScreenShareManager.stopScreenShare() }
+                    runCatching { ScreenShareManager.stopSessionForDestroy(shareSession) }
                 }
                 boundedScope.launch {
                     runCatching { DaemonManager.stopDaemon(purge = true) }
@@ -235,8 +254,9 @@ object DefenseProtocol {
             // 窗口减半）。停 daemon 仍在 vault 销毁之前：全量路径 DK 尚在，
             // 信道干净 stop 优先于 pkill 兜底
             coroutineScope {
-                // 停 app 侧共享（有界：内部 exec 在 root 授权弹窗等情形会挂起）
-                launch { runBounded(3000L) { runCatching { ScreenShareManager.stopScreenShare() } } }
+                // 停 app 侧共享（定向销毁起始时快照的会话；有界：内部 exec
+                // 在 root 授权弹窗等情形会挂起）
+                launch { runBounded(3000L) { runCatching { ScreenShareManager.stopSessionForDestroy(shareSession) } } }
                 // 停 overlay：root 路线宿主进程独立于 app 进程存续；binder/
                 // stopService 无 exec 挂起面，无需有界包装；未启动时幂等 no-op
                 launch { runCatching { OverlayServiceManager.stop(appContext) } }

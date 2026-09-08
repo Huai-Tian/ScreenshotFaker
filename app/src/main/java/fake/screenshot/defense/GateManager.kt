@@ -1,6 +1,5 @@
 package fake.screenshot.defense
 
-import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -23,17 +22,10 @@ import kotlinx.coroutines.launch
  *
  * sessionUnlocked / gateEnabled 是 VaultClient 状态镜像的同步视图：
  * - gateEnabled：RPC 后刷新的缓存（init 后首次访问前可能为 false；
- *   冷启动判定以文件级事实为准的调用方见 [VaultClient.status]）
+ *   冷启动判定以文件级事实为准，见 VaultClient.refreshGateStateFromDisk）
  * - sessionUnlocked：解锁置位、锁定/vault 死亡复位
  */
 object GateManager {
-
-    lateinit var appContext: Context
-        private set
-
-    fun init(context: Context) {
-        appContext = context.applicationContext
-    }
 
     /** 会话是否已解锁（vault DK 就绪的镜像；无门禁用户恒 false 但无意义） */
     val sessionUnlocked: Boolean
@@ -42,11 +34,9 @@ object GateManager {
     /** 门禁是否启用（同步缓存视图） */
     fun isGateEnabled(): Boolean = VaultClient.gateEnabled
 
-    /** 挂起版（刷新缓存；冷启动判定等精确场景用） */
-    suspend fun isGateEnabledFresh(): Boolean = VaultClient.status()?.gateOn ?: VaultClient.gateEnabled
-
     /**
-     * 解锁（= 验证 + DK 组装，一次 Argon2id 在 vault 内完成）。
+     * 解锁（= 验证 + DK 组装；vault 内恒定 2 次 Argon2id——安全/错误/
+     * 胁迫三路径等时，见 vault.cpp"解锁时序零差"）。
      * 成功（含胁迫路径）即会话解锁——DK 就绪是 vault 侧事实。
      */
     suspend fun unlock(password: String): VaultClient.UnlockResult =

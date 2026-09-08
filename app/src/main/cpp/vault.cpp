@@ -29,26 +29,42 @@
 // 随机、ct 为 GCM 密文，哑项三段皆均匀随机）。文件不编码"是否配置
 // 胁迫密码"：无标志字节、长度恒定、解析严格（r.left==0 否则
 // CORRUPT）——COE 存在性只存在于用户记忆中，拖库者读文件与读
-// 随机数等价。时序抹平随之自然成立：错误密码验证成本恒为 2 次
-// Argon2id（DK 包裹解开失败 + 胁迫项实测，哑项必败 2^-128），
-// 无需哑计算补偿。
+// 随机数等价。时序抹平配套（见"解锁时序零差"）：哑项使错误密码
+// 验证成本恒为 2 次 Argon2id（DK 包裹解开失败 + 胁迫项实测，哑项
+// 必败 2^-128），安全/胁迫路径由陪跑与缓存键对齐到同值。
 //
 // 验证哲学（消灭比较点）：密码正确性 = GCM 解密 tag 校验（ARMv8 密码学
 // 层），vault 内不存在可被 hook 的应用层比较函数。LIVE_PW 下 DK 包裹的
-// 解开本身即安全密码验证（happy path 单次 Argon2id）；验证项仅在
+// 解开本身即安全密码验证；验证项仅在
 //   a) 胁迫密码判定（解开安全包裹失败后）
 //   b) DEAD_PW 状态下的密码判定（DK 包裹已随销毁删除——sec/coe
 //      任一命中即以该密码重生）
 // 时参与。
 //
+// 解锁时序零差（v2 配套）：LIVE_PW 三路径（安全/错误/胁迫）恒定
+// 2 次 Argon2id——
+//   安全：unwrap（1）+ 验证项等时陪跑（2，结果不参与判定——unwrap
+//         的 GCM tag 已是权威，验证项 bit-rot 不应拒绝正确密码）
+//   错误：unwrap 失败（1）+ 胁迫项实测（2，哑项必败 2^-128）
+//   胁迫：unwrap 失败（1，派生键缓存）+ 胁迫项实测（2）→ 重生复用
+//         缓存键（见 rebirth），零额外派生
+// 退避拒绝同样 2 次哑派生陪跑（返回码已与 BAD 同码，时序不应成为
+// 旁路信道）。残余差仅胁迫路径多一次 185B 原子写（fsync 百 ms 级，
+// 处于 UI 渲染噪声内）。DEAD_PW：错误/胁迫同为 2 次；sec 首解 3 次
+// （仅合法用户可见——销毁后回归的本人，无演出对象）。LIVE_WK/
+// NOTHING/CORRUPT 即时返回（门禁模式本身已由 UI 显现，非秘密）。
+//
 // 胁迫语义（重生式）：UNLOCK 命中胁迫项 → 就地重生——新随机 DK 以
-// 胁迫密码包裹改写文件（旧 DK 包裹被覆盖 = 密钥立即死亡，历史密文
-// 永久孤儿化），会话以新 DK 全功能继续（演出：该密码正常解锁；同
-// 会话新建凭据/启动共享不穿帮——若清场后功能全废，胁迫者当场试用
-// 即识破）+ 返回 COERCION 由 Java 侧执行完整销毁序列（DataStore/
-// daemon/Keystore；vault 层已完成换钥，Java 侧须跳过 OP_DESTROY，
-// 见 DefenseProtocol.keepVaultSession）。双层独立引爆保持：Java 被
-// 拦截时 vault 侧已先完成换钥（旧数据已死）。
+// 缓存的 unwrap 派生键包裹改写文件（keySalt 原样保留：缓存键本就
+// 派生自 keySalt，复用后文件三 salt 依旧互异、无重生痕迹，且省第
+// 3 次 Argon2id——与错误密码路径等时，见"解锁时序零差"；旧 DK
+// 包裹被覆盖 = 密钥立即死亡，历史密文永久孤儿化），会话以新 DK
+// 全功能继续（演出：该密码正常解锁；同会话新建凭据/启动共享不穿帮
+// ——若清场后功能全废，胁迫者当场试用即识破）+ 返回 COERCION 由
+// Java 侧执行完整销毁序列（DataStore/daemon/Keystore；vault 层已
+// 完成换钥，Java 侧须跳过 OP_DESTROY，见 DefenseProtocol.
+// keepVaultSession）。双层独立引爆保持：Java 被拦截时 vault 侧已
+// 先完成换钥（旧数据已死）。
 // 代价（声明）：重生后原安全密码失效（DK 包裹已易主胁迫密码）；设备
 // 归胁迫密码所有，用户获释后以胁迫密码进入并 MIGRATE 重设——与
 // "烧毁设备纪律"一致，被胁迫过的设备本就不应再信任。
@@ -547,16 +563,47 @@ struct VaultCore {
         return true;
     }
 
+    // 写 LIVE_PW：DK 以外部提供的键包裹，keySalt 原样保留（LIVE_PW
+    // 胁迫重生专用：缓存键派生自 keySalt 本身——复用后文件三 salt
+    // 依旧互异、无重生痕迹；仅 fresh nonce + 新密文）
+    bool writeLivePwWrapCached(const uint8_t key[32], const uint8_t dkIn[32]) {
+        uint8_t nonce[12], ct[DK_LEN + 16];
+        if (!rand_bytes(nonce, 12)) return false;
+        if (!gcm_encrypt(key, nonce, dkIn, DK_LEN, ct, nullptr)) return false;
+        Writer w;
+        w.u8('K'); w.u8(2); w.u8((uint8_t) ST_LIVE_PW);
+        putEntry(w, secSalt, secNonce, secCt);
+        putEntry(w, coeSalt, coeNonce, coeCt);
+        w.bytes(keySalt, 16); w.bytes(nonce, 12); w.bytes(ct, DK_LEN + 16);
+        if (!write_file_atomic(kpath(), w.buf.data(), w.buf.size())) return false;
+        memcpy(wrapNonce, nonce, 12);
+        memcpy(wrapCt, ct, DK_LEN + 16);
+        state = ST_LIVE_PW;
+        return true;
+    }
+
     // ---- 验证原语 ----
 
     bool tryUnwrapDk(const uint8_t* pw, size_t pwLen, uint8_t dkOut[32]) {
-        if (state != ST_LIVE_PW) return false;
         uint8_t k[32];
-        if (!argon_derive(pw, pwLen, keySalt, k)) { wipe(k, sizeof(k)); return false; }
-        size_t n = 0;
-        bool ok = gcm_decrypt(k, wrapNonce, wrapCt, DK_LEN + 16, dkOut, &n) && n == DK_LEN;
+        bool derived = false;
+        bool ok = tryUnwrapDkKey(pw, pwLen, dkOut, k, &derived);
         wipe(k, sizeof(k));
         return ok;
+    }
+
+    // tryUnwrapDk 扩展：派生键与"派生是否成功"外传——LIVE_PW 胁迫
+    // 路径复用该键作重生包裹键（该键派生自 keySalt，对正确的胁迫
+    // 密码即合法包裹键；GCM 失败只说明密码非当前包裹密码，键本身与
+    // 任何 Argon2id 输出同分布），省第 3 次 Argon2id（解锁时序零差）
+    bool tryUnwrapDkKey(const uint8_t* pw, size_t pwLen, uint8_t dkOut[32],
+                        uint8_t kOut[32], bool* derived) {
+        *derived = false;
+        if (state != ST_LIVE_PW) return false;
+        if (!argon_derive(pw, pwLen, keySalt, kOut)) return false;
+        *derived = true;
+        size_t n = 0;
+        return gcm_decrypt(kOut, wrapNonce, wrapCt, DK_LEN + 16, dkOut, &n) && n == DK_LEN;
     }
 
     bool checkEntry(const uint8_t* pw, size_t pwLen, const uint8_t salt[16],
@@ -597,17 +644,27 @@ struct VaultCore {
         blockedUntilSec = 0;
     }
 
-    // 重生：新随机 DK 以 pw 包裹就地改写（验证项照抄——恒定结构不变，
-    // 状态字节与文件长度前后一致），会话即刻以新 DK 全功能可用。旧 DK
+    // 重生：新随机 DK 就地改写包裹（验证项照抄——恒定结构不变，状态
+    // 字节与文件长度前后一致），会话即刻以新 DK 全功能可用。旧 DK
     // 包裹被覆盖 = 历史密文立即孤儿化（DK 是唯一解路径，与"删包裹"
-    // 等强度的密钥死亡）。三个调用点语义同源：
+    // 等强度的密钥死亡）。包裹键两种来源：
+    // - cachedKey（LIVE_PW 胁迫命中）：复用 unwrap 已派生的键
+    //   Argon2id(pw, keySalt)，keySalt 原样保留——省第 3 次派生，与
+    //   错误密码路径等时（解锁时序零差）
+    // - 现派生（DEAD_PW 安全/胁迫命中）：销毁态无包裹盐缓存，
+    //   fresh salt + Argon2id(pw, salt)
+    // 三个调用点语义同源：
     // - LIVE_PW 胁迫命中：旧钥死亡 + 会话无缝续演（同会话新建凭据/
     //   启动共享照常——封堵"销毁后功能全废"的演出穿帮）
     // - DEAD_PW 安全密码首解：销毁后的正常恢复（原有语义）
     // - DEAD_PW 胁迫命中：与 LIVE_PW 路径演出一致
-    bool rebirth(const uint8_t* pw, size_t pwLen) {
+    bool rebirth(const uint8_t* pw, size_t pwLen, const uint8_t* cachedKey = nullptr) {
         uint8_t ndk[DK_LEN];
-        if (!rand_bytes(ndk, DK_LEN) || !writeLivePwPreserving(pw, pwLen, ndk)) {
+        if (!rand_bytes(ndk, DK_LEN)) return false;
+        bool ok = cachedKey != nullptr
+                  ? writeLivePwWrapCached(cachedKey, ndk)
+                  : writeLivePwPreserving(pw, pwLen, ndk);
+        if (!ok) {
             wipe(ndk, DK_LEN);
             return false;
         }
@@ -633,16 +690,29 @@ struct VaultCore {
 
     void opUnlock(const uint8_t* pw, size_t pwLen, Writer& out) {
         if ((int64_t) time(nullptr) < blockedUntilSec) {
+            // 等时陪跑（2 次哑派生，与 BAD 路径同成本）：返回码已与
+            // BAD 同码，快速返回会让"处于限速窗"从时序侧信道泄露
+            uint8_t sink[32], salt[16];
+            if (rand_bytes(salt, 16)) argon_derive(pw, pwLen, salt, sink);
+            if (rand_bytes(salt, 16)) argon_derive(pw, pwLen, salt, sink);
+            wipe(sink, sizeof(sink));
+            wipe(salt, sizeof(salt));
             out.u8(UR_RATE);
             return;
         }
         if (state == ST_LIVE_PW) {
-            uint8_t cand[32];
-            if (tryUnwrapDk(pw, pwLen, cand)) {
+            uint8_t cand[32], k[32];
+            bool keyDerived = false;
+            if (tryUnwrapDkKey(pw, pwLen, cand, k, &keyDerived)) {
                 memcpy(dk, cand, DK_LEN);
                 wipe(cand, sizeof(cand));
+                wipe(k, sizeof(k));
                 dkValid = true;
                 resetFailure();
+                // 等时陪跑（第 2 次 Argon2id，结果不参与判定）：安全
+                // 路径与错误/胁迫路径同成本——否则解锁耗时本身即
+                // "密码类型"信道（胁迫者可计时区分正常解锁与胁迫解锁）
+                checkEntry(pw, pwLen, secSalt, secNonce, secCt);
                 out.u8(UR_SECURITY);
                 return;
             }
@@ -653,10 +723,15 @@ struct VaultCore {
                 //（演出：用该密码正常解锁）。交 Java 跑完整序列
                 //（DataStore/daemon/Keystore；vault 层已完成，Java 侧须
                 // 跳过 OP_DESTROY——见 DefenseProtocol keepVaultSession）。
-                // 写盘失败不暴露命中（与密码错同响应，销毁不发生）
-                out.u8(rebirth(pw, pwLen) ? UR_COERCION : UR_BAD);
+                // 包裹键复用 unwrap 缓存（keySalt 不变，见 rebirth）——
+                // 零额外 Argon2id，与错误密码路径时序一致。写盘失败不
+                // 暴露命中（与密码错同响应，销毁不发生）
+                bool rb = keyDerived ? rebirth(pw, pwLen, k) : rebirth(pw, pwLen);
+                wipe(k, sizeof(k));
+                out.u8(rb ? UR_COERCION : UR_BAD);
                 return;
             }
+            wipe(k, sizeof(k));
             recordFailure();
             out.u8(UR_BAD);
             return;

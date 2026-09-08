@@ -205,6 +205,9 @@
     <string name="install_failed">安装失败：</string>
     <string name="install_timeout">安装确认超时，未完成安装</string>
     <string name="initialize_failed">初始化失败</string>
+    <string name="share_error_hostkey">SSH 主机密钥已变更——请在设置中核对</string>
+    <string name="share_error_server">服务异常退出</string>
+    <string name="share_error_ssh">SSH 连接失败</string>
     <string name="crop_icon">裁剪图标</string>
     <string name="delete">删除</string>
     <string name="add_receiver">添加接收端</string>

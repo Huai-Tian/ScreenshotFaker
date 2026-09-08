@@ -96,8 +96,9 @@ fun GateCompose(onUnlocked: () -> Unit) {
                         // 兜底：验证链任何意外异常按"密码错误"处理——
                         // 不捕获会让 verifying 永久为 true（按钮卡死在
                         // 加载态且无提示）或直接崩溃进程。
-                        // 解锁 = vault 内一次 Argon2id + GCM tag 校验
-                        //（验证与 DK 组装原子完成，无 Java 层比较点）
+                        // 解锁 = vault 内恒定两次 Argon2id + GCM tag 校验
+                        //（安全/错误/胁迫三路径等时——无 Java 层比较点，
+                        // 也无按解锁耗时区分密码类型的时序信道）
                         val result = runCatching { GateManager.unlock(password) }
                             .getOrNull()
                         when (result) {
