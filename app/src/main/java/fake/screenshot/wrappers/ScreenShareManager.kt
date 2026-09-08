@@ -44,21 +44,43 @@ object ScreenShareManager {
     // 再清理文件"的顺序保证与本协程 setup 段的交错安全（见拉起前复查）
     private val toggleMutex = Mutex()
 
-    // 胁迫销毁闩锁（进程生命周期内不复位）：销毁序列开始（任何步骤之前）
-    // 置位。封堵销毁↔磁贴启动 TOCTOU：relay 协程在挂起点间已快照完
+    // 胁迫销毁闩锁（布尔 + 纪元双轨）：销毁序列开始（任何步骤之前）
+    // 置位/递增。封堵销毁↔磁贴启动 TOCTOU：relay 协程在挂起点间已快照完
     // 旧凭据/配置，销毁若落在"拉起前复查已通过→exec 拉起"之后或
     // stopScreenShare 的 pkill/rm 因 Shizuku 断连失效时，协程会以
     // 销毁前的密码拉起 server 继续推流（隐私在"已销毁"后持续泄露）。
     // 闩锁在 relay 协程的拉起前复查点强制短路（先于闩锁置位通过复查、
     // 其后 exec 与销毁并发的微小残余窗口由销毁步骤 1/2 的清理兜底）。
-    // 不复位是刻意语义：销毁已清空全部凭据与配置，此后本进程内的共享
-    // 启动一律 fail-closed（重启 app 后自然恢复）
+    //
+    // 双轨语义：
+    // - coercionDestroyed（布尔）：入口闸（toggle/直调）。注入/超时销毁
+    //   后进程内共享启动一律 fail-closed（会话已死，DK 不可用），重启
+    //   app 后自然恢复——不复位是刻意语义
+    // - destroyEpoch（纪元）：relay 协程在快照凭据前捕获，拉起前复查
+    //   纪元未变。胁迫重生路径（演出）在销毁序列完成后解除布尔闩锁，
+    //   新会话照常启动；旧纪元协程持旧凭据，无论 relayRunning 被新会话
+    //   重新置位与否，纪元失配即永久放弃——比单布尔更严：清闩锁不会
+    //   复活"销毁前已快照旧密码"的滞留协程
     @Volatile
     private var coercionDestroyed = false
 
-    /** DefenseProtocol 销毁序列第一动作：置闩锁（先于停共享/擦密钥） */
+    @Volatile
+    private var destroyEpoch = 0
+
+    /** DefenseProtocol 销毁序列第一动作：置闩锁 + 纪元递增（先于停共享/擦密钥） */
     fun markCoercionDestroyed() {
         coercionDestroyed = true
+        destroyEpoch++
+    }
+
+    /**
+     * 胁迫重生路径专用（DefenseProtocol 销毁序列步骤 9）：销毁已全部
+     * 完成、vault 内是重生会话（新 DK + 全新空配置），解除入口闸让本
+     * 进程内的共享启动恢复为"全新空 app"的合法行为——不解除则胁迫者
+     * 当场试用共享功能即穿帮（销毁演出失效）。注入/超时路径不得调用。
+     */
+    fun clearCoercionDestroyedForRebirth() {
+        coercionDestroyed = false
     }
 
     @Volatile
@@ -207,6 +229,10 @@ object ScreenShareManager {
         // 已就位（launch 后置存在体先跑的理论窗口）
         relayRunning = true
         relayJob = scope.launch {
+            // 销毁纪元快照（先于一切凭据/配置读取）：拉起前复查纪元未变
+            // ——期间发生过销毁（含重生路径的清闩锁）即本协程持旧快照，
+            // 永久放弃（见闩锁双轨注释）
+            val myEpoch = destroyEpoch
             // 会话名快照：本协程的守护脚本/停止标记与自身会话绑定——
             // 共享 relayName 被后续会话覆盖的极端交错下，本会话自引用
             // 仍一致，停止清理不脱钩
@@ -391,10 +417,11 @@ object ScreenShareManager {
             // 挂起点上——若停止恰好落在该段内，此处复查可见 false，放弃
             // 拉起并清除刚写入的脚本。不复查则守护循环在 STOP 标记已被
             // 删除的状态下执行 while 循环，无限续命（"停止"后推流复活）。
-            // coercionDestroyed：销毁序列已启动（哪怕步骤 1 的 pkill 因
-            // 特权断连失效）——本协程持的是销毁前快照的旧凭据，拉起 =
-            // "已销毁"后旧密码继续推流，必须放弃
-            if (!relayRunning || coercionDestroyed) {
+            // destroyEpoch 失配：本协程快照凭据后发生过销毁序列（哪怕
+            // 步骤 1 的 pkill 因特权断连失效、哪怕重生路径已清布尔闩锁）
+            // ——持的是销毁前快照的旧凭据，拉起 = "已销毁"后旧密码继续
+            // 推流，必须放弃
+            if (!relayRunning || destroyEpoch != myEpoch) {
                 Auxiliary.exec("rm -f $watchPath")
                 return@launch
             }
@@ -463,8 +490,9 @@ object ScreenShareManager {
                     notifyStateChanged()
                     return@launch
                 }
-                // 销毁闩锁：本进程已执行过胁迫销毁（凭据/配置已全部擦除）
-                // → 拒绝新会话（fail-closed，见闩锁注释；重启 app 后恢复）
+                // 销毁闩锁：本进程已执行过销毁且会话未重生（凭据/配置已
+                // 全部擦除）→ 拒绝新会话（fail-closed；重生路径由
+                // DefenseProtocol 步骤 9 解除，重启 app 后自然恢复）
                 lastError = if (coercionDestroyed) {
                     "destroyed"
                 } else if (!Auxiliary.isShellActivated && !Auxiliary.isRootActivated) {

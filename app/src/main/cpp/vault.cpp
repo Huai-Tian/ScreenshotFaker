@@ -12,28 +12,51 @@
 //
 // 磁盘格式（filesDir/sync_key.bin，单文件=tmp+rename 原子写，状态机内
 // 无跨文件窗口；键名沿用 sync_* 中性命名族）：
-//   [0]'K' [1]ver=1 [2]state
-//   state 1 LIVE_PW （有门禁）:
-//     [1B hasCoe]
+//   [0]'K' [1]ver=2 [2]state
+//   state 1 LIVE_PW （有门禁，恒 185B）:
 //     安全验证项 [16B salt][12B nonce][GCM_{Argon2id(sec,salt)}(MARK_SEC)]
-//     胁迫验证项（hasCoe 时）[16B salt][12B nonce][GCM_{Argon2id(coe,salt)}(MARK_COE)]
+//     胁迫验证项 [16B salt][12B nonce][GCM_{Argon2id(coe,salt)}(MARK_COE)]
 //     DK 包裹 [16B keySalt][12B nonce][GCM_{Argon2id(pw,keySalt)}(DK 32B)]
-//   state 2 LIVE_WK （无门禁）:
+//   state 2 LIVE_WK （无门禁，恒 79B）:
 //     DK 包裹 [16B keySalt][12B nonce][GCM_WK(DK 32B)]
-//   state 3 DEAD_PW （销毁后，验证器保留——门禁行为前后一致，不暴露
-//     "销毁发生过"）：与 LIVE_PW 相同的验证项，无 DK 包裹
+//   state 3 DEAD_PW （OP_DESTROY 销毁态，恒 109B，验证器保留——门禁
+//     行为前后一致）：仅经 OP_DESTROY 产生（注入检测/超时销毁等非演出
+//     路径；胁迫解锁不再进入此态——见下"胁迫语义"）；与 LIVE_PW 相同的
+//     双验证项，无 DK 包裹。任一验证项命中即以该密码重生回 LIVE_PW
+//
+// 恒定结构（v2 存在理由）：胁迫验证项恒写——未设置胁迫密码时为
+// rand_bytes 直填的哑项（与真项计算不可区分：真项 salt/nonce 本就
+// 随机、ct 为 GCM 密文，哑项三段皆均匀随机）。文件不编码"是否配置
+// 胁迫密码"：无标志字节、长度恒定、解析严格（r.left==0 否则
+// CORRUPT）——COE 存在性只存在于用户记忆中，拖库者读文件与读
+// 随机数等价。时序抹平随之自然成立：错误密码验证成本恒为 2 次
+// Argon2id（DK 包裹解开失败 + 胁迫项实测，哑项必败 2^-128），
+// 无需哑计算补偿。
 //
 // 验证哲学（消灭比较点）：密码正确性 = GCM 解密 tag 校验（ARMv8 密码学
 // 层），vault 内不存在可被 hook 的应用层比较函数。LIVE_PW 下 DK 包裹的
 // 解开本身即安全密码验证（happy path 单次 Argon2id）；验证项仅在
 //   a) 胁迫密码判定（解开安全包裹失败后）
-//   b) DEAD_PW 状态下安全密码判定（DK 包裹已随销毁删除）
+//   b) DEAD_PW 状态下的密码判定（DK 包裹已随销毁删除——sec/coe
+//      任一命中即以该密码重生）
 // 时参与。
 //
-// 胁迫语义（与旧 resplit/deactivateSplit 一致）：UNLOCK 命中胁迫项 →
-// 就地改写文件为 DEAD_PW（DK 立即密码学死亡，历史密文永久孤儿化）+
-// 返回 COERCION 由 Java 侧执行完整销毁序列（DataStore/daemon/Keystore）。
-// 双层独立引爆：Java 被拦截时 vault 侧已先完成密钥销毁。
+// 胁迫语义（重生式）：UNLOCK 命中胁迫项 → 就地重生——新随机 DK 以
+// 胁迫密码包裹改写文件（旧 DK 包裹被覆盖 = 密钥立即死亡，历史密文
+// 永久孤儿化），会话以新 DK 全功能继续（演出：该密码正常解锁；同
+// 会话新建凭据/启动共享不穿帮——若清场后功能全废，胁迫者当场试用
+// 即识破）+ 返回 COERCION 由 Java 侧执行完整销毁序列（DataStore/
+// daemon/Keystore；vault 层已完成换钥，Java 侧须跳过 OP_DESTROY，
+// 见 DefenseProtocol.keepVaultSession）。双层独立引爆保持：Java 被
+// 拦截时 vault 侧已先完成换钥（旧数据已死）。
+// 代价（声明）：重生后原安全密码失效（DK 包裹已易主胁迫密码）；设备
+// 归胁迫密码所有，用户获释后以胁迫密码进入并 MIGRATE 重设——与
+// "烧毁设备纪律"一致，被胁迫过的设备本就不应再信任。
+// 取证边界（诚实声明）：重生改写 DK 包裹段而验证项照抄——持有前后
+// 快照的实时 root 可识别"换钥未换验证器"。旧实现同样暴露（文件长度
+// 185→109 跳变，且销毁后功能全废更易识破）；Java 侧 DataStore 清扫
+// 对实时 root 本就不可隐藏。演出针对的是无快照能力的现场胁迫者：
+// 事后取证者只见 LIVE_PW 185B，与从未被胁迫的设备不可区分。
 //
 // 信道密钥：CK = HMAC-SHA256(DK, "ScreenshotFaker/channel/v1")，确定性
 // 派生——锁定/解锁循环后 daemon 仍持旧 CK，信道自动恢复（与旧实现
@@ -334,9 +357,9 @@ struct VaultCore {
     int failCount;
     int64_t blockedUntilSec;
 
-    // 磁盘态缓存（loadState 解析；写操作后同步更新）
+    // 磁盘态缓存（loadState 解析；写操作后同步更新）。
+    // 双验证项恒缓存——vault 不感知第二项是真是假（恒定结构）
     int state;
-    bool hasCoe;
     uint8_t secSalt[16], secNonce[12], secCt[MARK_LEN + 16];
     uint8_t coeSalt[16], coeNonce[12], coeCt[MARK_LEN + 16];
     uint8_t keySalt[16], wrapNonce[12], wrapCt[DK_LEN + 16];
@@ -347,7 +370,7 @@ struct VaultCore {
 
     std::string kpath() const { return dir + "/" + KFILE_NAME; }
 
-    VaultCore() : state(ST_NOTHING), hasCoe(false), dkValid(false), failCount(0),
+    VaultCore() : state(ST_NOTHING), dkValid(false), failCount(0),
                   blockedUntilSec(0), fsCtx(nullptr), fsActive(false) {
         memset(dk, 0, sizeof(dk));
         memset(secSalt, 0, sizeof(secSalt)); memset(secNonce, 0, sizeof(secNonce));
@@ -374,7 +397,6 @@ struct VaultCore {
 
     void loadState() {
         state = ST_NOTHING;
-        hasCoe = false;
         std::vector<uint8_t> data;
         if (!read_file_all(kpath(), data)) {
             // 文件不存在 → NOTHING；读失败（IO）按 CORRUPT 处理（fail-closed）
@@ -382,7 +404,7 @@ struct VaultCore {
             state = (stat(kpath().c_str(), &st) == 0) ? ST_CORRUPT : ST_NOTHING;
             return;
         }
-        if (data.size() < 3 || data[0] != 'K' || data[1] != 1) {
+        if (data.size() < 3 || data[0] != 'K' || data[1] != 2) {
             state = ST_CORRUPT;
             return;
         }
@@ -392,7 +414,8 @@ struct VaultCore {
             const uint8_t* salt = r.take(16);
             const uint8_t* nonce = r.take(12);
             const uint8_t* ct = r.take(DK_LEN + 16);
-            if (!salt || !nonce || !ct) { state = ST_CORRUPT; return; }
+            // 严格解析（恒定结构配套）：长度必须精确——截断/追加均 CORRUPT
+            if (!salt || !nonce || !ct || r.left != 0) { state = ST_CORRUPT; return; }
             memcpy(keySalt, salt, 16);
             memcpy(wrapNonce, nonce, 12);
             memcpy(wrapCt, ct, DK_LEN + 16);
@@ -403,21 +426,19 @@ struct VaultCore {
             state = ST_CORRUPT;
             return;
         }
-        hasCoe = r.u8() != 0;
+        // 双验证项恒在读入（真项或哑项——vault 不感知、不区分）
         const uint8_t* ss = r.take(16), *sn = r.take(12), *sc = r.take(MARK_LEN + 16);
-        if (!ss || !sn || !sc) { state = ST_CORRUPT; return; }
+        const uint8_t* cs = r.take(16), *cn = r.take(12), *cc = r.take(MARK_LEN + 16);
+        if (!ss || !sn || !sc || !cs || !cn || !cc) { state = ST_CORRUPT; return; }
         memcpy(secSalt, ss, 16); memcpy(secNonce, sn, 12); memcpy(secCt, sc, MARK_LEN + 16);
-        if (hasCoe) {
-            const uint8_t* cs = r.take(16), *cn = r.take(12), *cc = r.take(MARK_LEN + 16);
-            if (!cs || !cn || !cc) { state = ST_CORRUPT; return; }
-            memcpy(coeSalt, cs, 16); memcpy(coeNonce, cn, 12); memcpy(coeCt, cc, MARK_LEN + 16);
-        }
+        memcpy(coeSalt, cs, 16); memcpy(coeNonce, cn, 12); memcpy(coeCt, cc, MARK_LEN + 16);
         if (st == ST_DEAD_PW) {
+            if (r.left != 0) { state = ST_CORRUPT; return; }
             state = ST_DEAD_PW;
             return;
         }
         const uint8_t* ks = r.take(16), *wn = r.take(12), *wc = r.take(DK_LEN + 16);
-        if (!ks || !wn || !wc) { state = ST_CORRUPT; return; }
+        if (!ks || !wn || !wc || r.left != 0) { state = ST_CORRUPT; return; }
         memcpy(keySalt, ks, 16); memcpy(wrapNonce, wn, 12); memcpy(wrapCt, wc, DK_LEN + 16);
         state = ST_LIVE_PW;
     }
@@ -448,25 +469,31 @@ struct VaultCore {
         if (!rand_bytes(salt, 16) || !rand_bytes(nonce, 12)) return false;
         if (!gcm_encrypt(wkRaw, nonce, dkIn, DK_LEN, ct, nullptr)) return false;
         Writer w;
-        w.u8('K'); w.u8(1); w.u8((uint8_t) ST_LIVE_WK);
+        w.u8('K'); w.u8(2); w.u8((uint8_t) ST_LIVE_WK);
         w.bytes(salt, 16); w.bytes(nonce, 12); w.bytes(ct, DK_LEN + 16);
         if (!write_file_atomic(kpath(), w.buf.data(), w.buf.size())) return false;
         memcpy(keySalt, salt, 16); memcpy(wrapNonce, nonce, 12);
         memcpy(wrapCt, ct, DK_LEN + 16);
         state = ST_LIVE_WK;
-        hasCoe = false;
         return true;
     }
 
-    // 写 LIVE_PW：验证项(sec,coe) + DK 以 Argon2id(secPw) 包裹
+    // 写 LIVE_PW：验证项(sec,coe) + DK 以 Argon2id(secPw) 包裹。
+    // 恒定结构：胁迫验证项恒写——未设置胁迫密码（coeLen==0）时为
+    // rand_bytes 直填的哑项（salt/nonce/ct 三段皆均匀随机，与真项
+    // 计算不可区分；对任何密码 GCM tag 必然失败 2^-128）。文件长度
+    // 与内容分布均不编码"是否配置胁迫密码"
     bool writeLivePw(const uint8_t* secPw, size_t secLen, const uint8_t* coePw, size_t coeLen,
                      const uint8_t dkIn[32]) {
         if (coeLen > 0 && coePw == nullptr) return false;
         uint8_t sSalt[16], sNonce[12], sCt[MARK_LEN + 16];
         uint8_t cSalt[16], cNonce[12], cCt[MARK_LEN + 16];
-        bool coe = coeLen > 0;
         if (!makeEntry(secPw, secLen, MARK_SEC, sSalt, sNonce, sCt)) return false;
-        if (coe && !makeEntry(coePw, coeLen, MARK_COE, cSalt, cNonce, cCt)) return false;
+        bool coeOk = coeLen > 0
+                     ? makeEntry(coePw, coeLen, MARK_COE, cSalt, cNonce, cCt)
+                     : (rand_bytes(cSalt, 16) && rand_bytes(cNonce, 12) &&
+                        rand_bytes(cCt, MARK_LEN + 16));
+        if (!coeOk) return false;
         uint8_t k[32], salt[16], nonce[12], ct[DK_LEN + 16];
         bool ok = rand_bytes(salt, 16) && rand_bytes(nonce, 12) &&
                   argon_derive(secPw, secLen, salt, k) &&
@@ -474,22 +501,22 @@ struct VaultCore {
         wipe(k, sizeof(k));
         if (!ok) return false;
         Writer w;
-        w.u8('K'); w.u8(1); w.u8((uint8_t) ST_LIVE_PW);
-        w.u8(coe ? 1 : 0);
+        w.u8('K'); w.u8(2); w.u8((uint8_t) ST_LIVE_PW);
         putEntry(w, sSalt, sNonce, sCt);
-        if (coe) putEntry(w, cSalt, cNonce, cCt);
+        putEntry(w, cSalt, cNonce, cCt);
         w.bytes(salt, 16); w.bytes(nonce, 12); w.bytes(ct, DK_LEN + 16);
         if (!write_file_atomic(kpath(), w.buf.data(), w.buf.size())) return false;
         memcpy(secSalt, sSalt, 16); memcpy(secNonce, sNonce, 12); memcpy(secCt, sCt, MARK_LEN + 16);
-        hasCoe = coe;
-        if (coe) { memcpy(coeSalt, cSalt, 16); memcpy(coeNonce, cNonce, 12); memcpy(coeCt, cCt, MARK_LEN + 16); }
+        memcpy(coeSalt, cSalt, 16); memcpy(coeNonce, cNonce, 12); memcpy(coeCt, cCt, MARK_LEN + 16);
         memcpy(keySalt, salt, 16); memcpy(wrapNonce, nonce, 12); memcpy(wrapCt, ct, DK_LEN + 16);
         state = ST_LIVE_PW;
         return true;
     }
 
     // 写 LIVE_PW：保留现有验证项（DEAD_PW → 销毁后首解的 DK 重生路径——
-    // 验证项含胁迫密码，随重生丢失会让胁迫保护静默失效）
+    // 验证项含胁迫密码，随重生丢失会让胁迫保护静默失效）。
+    // 双验证项按字节照抄缓存（哑照哑、真照真）——本路径必须对第二项
+    // 真假无感知（恒定结构），否则重生即泄露 COE 配置差异
     bool writeLivePwPreserving(const uint8_t* secPw, size_t secLen, const uint8_t dkIn[32]) {
         uint8_t k[32], salt[16], nonce[12], ct[DK_LEN + 16];
         bool ok = rand_bytes(salt, 16) && rand_bytes(nonce, 12) &&
@@ -498,10 +525,9 @@ struct VaultCore {
         wipe(k, sizeof(k));
         if (!ok) return false;
         Writer w;
-        w.u8('K'); w.u8(1); w.u8((uint8_t) ST_LIVE_PW);
-        w.u8(hasCoe ? 1 : 0);
+        w.u8('K'); w.u8(2); w.u8((uint8_t) ST_LIVE_PW);
         putEntry(w, secSalt, secNonce, secCt);
-        if (hasCoe) putEntry(w, coeSalt, coeNonce, coeCt);
+        putEntry(w, coeSalt, coeNonce, coeCt);
         w.bytes(salt, 16); w.bytes(nonce, 12); w.bytes(ct, DK_LEN + 16);
         if (!write_file_atomic(kpath(), w.buf.data(), w.buf.size())) return false;
         memcpy(keySalt, salt, 16); memcpy(wrapNonce, nonce, 12); memcpy(wrapCt, ct, DK_LEN + 16);
@@ -509,13 +535,13 @@ struct VaultCore {
         return true;
     }
 
-    // 写 DEAD_PW：保留现有验证项（就地取缓存——coercion 路径与销毁路径共用）
+    // 写 DEAD_PW：保留现有验证项（就地取缓存——coercion 路径与销毁路径
+    // 共用；双项照抄，哑照哑真照真）
     bool writeDeadPw() {
         Writer w;
-        w.u8('K'); w.u8(1); w.u8((uint8_t) ST_DEAD_PW);
-        w.u8(hasCoe ? 1 : 0);
+        w.u8('K'); w.u8(2); w.u8((uint8_t) ST_DEAD_PW);
         putEntry(w, secSalt, secNonce, secCt);
-        if (hasCoe) putEntry(w, coeSalt, coeNonce, coeCt);
+        putEntry(w, coeSalt, coeNonce, coeCt);
         if (!write_file_atomic(kpath(), w.buf.data(), w.buf.size())) return false;
         state = ST_DEAD_PW;
         return true;
@@ -544,18 +570,11 @@ struct VaultCore {
         return ok;
     }
 
+    // 恒定结构下胁迫验证项恒在（真项或哑项）：直接实测。哑项对任何
+    // 密码 GCM tag 必然失败（2^-128）——错误密码验证成本恒为 2 次
+    // Argon2id（unwrap 失败 + 本实测），时序抹平由文件内哑项天然
+    // 承继；vault 永远不知道第二项是真是假
     bool tryCoe(const uint8_t* pw, size_t pwLen) {
-        if (!hasCoe) {
-            // 时序抹平：无胁迫项时对哑参数跑同款计算（全零密文的 GCM
-            // tag 校验必然失败，结果恒 false）——有无胁迫项的错误密码
-            // 验证成本一致（各 2 次 Argon2id），封堵"是否配置胁迫密码"
-            // 的在线时序探测
-            static const uint8_t zeroSalt[16] = {0};
-            static const uint8_t zeroNonce[12] = {0};
-            static const uint8_t zeroCt[MARK_LEN + 16] = {0};
-            checkEntry(pw, pwLen, zeroSalt, zeroNonce, zeroCt);
-            return false;
-        }
         return checkEntry(pw, pwLen, coeSalt, coeNonce, coeCt);
     }
 
@@ -576,6 +595,27 @@ struct VaultCore {
     void resetFailure() {
         failCount = 0;
         blockedUntilSec = 0;
+    }
+
+    // 重生：新随机 DK 以 pw 包裹就地改写（验证项照抄——恒定结构不变，
+    // 状态字节与文件长度前后一致），会话即刻以新 DK 全功能可用。旧 DK
+    // 包裹被覆盖 = 历史密文立即孤儿化（DK 是唯一解路径，与"删包裹"
+    // 等强度的密钥死亡）。三个调用点语义同源：
+    // - LIVE_PW 胁迫命中：旧钥死亡 + 会话无缝续演（同会话新建凭据/
+    //   启动共享照常——封堵"销毁后功能全废"的演出穿帮）
+    // - DEAD_PW 安全密码首解：销毁后的正常恢复（原有语义）
+    // - DEAD_PW 胁迫命中：与 LIVE_PW 路径演出一致
+    bool rebirth(const uint8_t* pw, size_t pwLen) {
+        uint8_t ndk[DK_LEN];
+        if (!rand_bytes(ndk, DK_LEN) || !writeLivePwPreserving(pw, pwLen, ndk)) {
+            wipe(ndk, DK_LEN);
+            return false;
+        }
+        memcpy(dk, ndk, DK_LEN);
+        wipe(ndk, DK_LEN);
+        dkValid = true;
+        resetFailure();
+        return true;
     }
 
     // ---- 操作实现（resp 写入 out；返回 false = 致命错误应退出）----
@@ -608,14 +648,13 @@ struct VaultCore {
             }
             wipe(cand, sizeof(cand));
             if (tryCoe(pw, pwLen)) {
-                // 胁迫命中：先就地销毁 DK（Java 被拦截也已完成密钥死亡），
-                // 再交 Java 跑完整序列（DataStore/daemon/Keystore）
-                if (writeDeadPw()) {
-                    resetSession();
-                    out.u8(UR_COERCION);
-                } else {
-                    out.u8(UR_BAD);  // 写盘失败：不暴露命中，按失败处理
-                }
+                // 胁迫命中：就地重生——旧 DK 包裹被新随机 DK 覆盖（Java
+                // 被拦截时密钥死亡同样已完成），会话以新 DK 全功能继续
+                //（演出：用该密码正常解锁）。交 Java 跑完整序列
+                //（DataStore/daemon/Keystore；vault 层已完成，Java 侧须
+                // 跳过 OP_DESTROY——见 DefenseProtocol keepVaultSession）。
+                // 写盘失败不暴露命中（与密码错同响应，销毁不发生）
+                out.u8(rebirth(pw, pwLen) ? UR_COERCION : UR_BAD);
                 return;
             }
             recordFailure();
@@ -624,21 +663,17 @@ struct VaultCore {
         }
         if (state == ST_DEAD_PW) {
             if (tryCoe(pw, pwLen)) {
-                out.u8(UR_COERCION);  // 已销毁态：幂等，无需再写
+                // 销毁态胁迫命中：同样以胁迫密码重生（演出与 LIVE_PW 路径
+                // 一致——销毁后首输胁迫密码 = 正常进入全新空 app）
+                out.u8(rebirth(pw, pwLen) ? UR_COERCION : UR_BAD);
                 return;
             }
             if (trySec(pw, pwLen)) {
                 // 销毁后首解：新生 DK（历史密文已孤儿化，新会话全新密钥），
                 // 验证项原样保留（含胁迫密码——胁迫保护跨销毁存活）
-                uint8_t ndk[32];
-                if (rand_bytes(ndk, DK_LEN) && writeLivePwPreserving(pw, pwLen, ndk)) {
-                    memcpy(dk, ndk, DK_LEN);
-                    wipe(ndk, sizeof(ndk));
-                    dkValid = true;
-                    resetFailure();
+                if (rebirth(pw, pwLen)) {
                     out.u8(UR_SECURITY);
                 } else {
-                    wipe(ndk, sizeof(ndk));
                     recordFailure();
                     out.u8(UR_BAD);
                 }

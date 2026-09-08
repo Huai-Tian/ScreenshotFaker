@@ -129,7 +129,7 @@ object VaultClient {
                 if (got < 3) return@runCatching true  // 截断 = 不可解析
                 b
             }
-            !(head[0] == 'K'.code.toByte() && head[1] == 1.toByte() &&
+            !(head[0] == 'K'.code.toByte() && head[1] == 2.toByte() &&
                     head[2] == MODE_LIVE_WK.toByte())
         }.getOrDefault(true)  // 读异常 = 不可解析（fail-closed）
     }
@@ -275,8 +275,10 @@ object VaultClient {
 
     /**
      * 解锁（验证 + DK 组装，一次 Argon2id）：
-     * SECURITY = DK 就绪；COERCION = vault 已就地销毁 DK，调用方执行
-     * 完整销毁序列后照常进入（界面行为前后一致）；BAD/RATE = 失败。
+     * SECURITY = DK 就绪；COERCION = vault 已就地重生（旧 DK 孤儿化，
+     * 会话以新随机 DK 全功能就绪——演出：该密码正常解锁），调用方执行
+     * 完整销毁序列（keepVaultSession，勿再 OP_DESTROY）后照常进入；
+     * BAD/RATE = 失败。
      */
     suspend fun unlock(password: String): UnlockResult {
         val r = request(FrameBuilder().u8(OP_UNLOCK).str(password).build())
@@ -459,6 +461,21 @@ object VaultClient {
         runCatching {
             File(appContext.filesDir, "sync_wrap.bin").delete()
             File(appContext.filesDir, "sync_wrap.bin.tmp").delete()
+        }
+    }
+
+    /**
+     * 胁迫重生路径的 app 侧清扫（销毁序列步骤 2.5 的演出变体，由
+     * DefenseProtocol.keepVaultSession 调用）：vault 已在解锁命中时就地
+     * 重生（新 DK 会话），OP_DESTROY 会杀死重生会话（回到"销毁后功能
+     * 全废"的穿帮态）——仅删本类拥有的 sync_wrap.bin（WK 包裹；门禁态
+     * 不应存在，防早期无门禁时代的残留），不动 vault 进程与状态镜像。
+     */
+    fun destroyWrapFileOnly() {
+        if (!::appContext.isInitialized) return
+        runCatching {
+            File(appContext.filesDir, "$WRAP_FILE.tmp").delete()
+            File(appContext.filesDir, WRAP_FILE).delete()
         }
     }
 

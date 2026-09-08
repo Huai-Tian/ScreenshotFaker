@@ -14,9 +14,12 @@ import kotlinx.coroutines.launch
  * 校验（密码学层，无可 hook 比较点），离线试密码无 oracle（拖库后
  * 既无验证器可算，也无 DK 包裹可离线解开——Argon2id 是唯一成本）。
  *
- * 胁迫语义（vault 内执行）：命中胁迫验证项 → vault 就地改写 sync_key.bin
- * 为销毁态（DK 立即密码学死亡，Java 层被拦截也已完成）→ 返回 COERCION
- * 由 GatePage 触发完整销毁序列。验证项跨销毁保留——门禁行为前后一致。
+ * 胁迫语义（vault 内执行）：命中胁迫验证项 → vault 就地重生（旧 DK
+ * 包裹被新随机 DK 覆盖 = 密钥立即死亡，Java 层被拦截也已完成；会话以
+ * 新 DK 全功能续演——演出：该密码正常解锁）→ 返回 COERCION 由
+ * GatePage 触发完整销毁序列（演出路径 keepVaultSession）。验证项跨
+ * 重生保留——门禁行为前后一致；重生后原安全密码失效（DK 包裹已易主
+ * 胁迫密码，用户经 MIGRATE 重设——与烧毁设备纪律一致）。
  *
  * sessionUnlocked / gateEnabled 是 VaultClient 状态镜像的同步视图：
  * - gateEnabled：RPC 后刷新的缓存（init 后首次访问前可能为 false；

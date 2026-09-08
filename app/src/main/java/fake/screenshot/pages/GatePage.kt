@@ -40,7 +40,8 @@ import kotlinx.coroutines.launch
 
 /**
  * 启动门禁：安全密码与胁迫密码共用同一入口，界面不做任何区分。
- * 胁迫密码命中时在进入主界面前完成销毁，随后呈现全新默认状态。
+ * 胁迫密码命中时在进入主界面前完成销毁（vault 就地重生：旧密钥死亡、
+ * 会话以新密钥全功能续演），随后呈现全新默认状态——功能全部可用。
  */
 @Composable
 fun GateCompose(onUnlocked: () -> Unit) {
@@ -107,10 +108,21 @@ fun GateCompose(onUnlocked: () -> Unit) {
                                 onUnlocked()
                             }
                             VaultClient.UnlockResult.COERCION -> {
-                                // vault 已就地销毁 DK（双层引爆第一层）；
-                                // NonCancellable 在 DefenseProtocol 内部包裹：
-                                // 本协程随 Activity 重建被取消也不中断销毁序列
-                                runCatching { DefenseProtocol.destroyForCoercion() }
+                                // vault 已就地重生（旧 DK 孤儿化 = 双层引爆
+                                // 第一层；会话以新 DK 全功能就绪）。销毁序列
+                                // 走演出路径（keepVaultSession，两阶段）：
+                                // 擦除关键路径（~0.5s 本地操作：默认共享
+                                // 密码兜底先于闩锁解除——顺序即安全，缺位
+                                // 窗口内竞态 toggle 会以"未配置=无鉴权"拉起
+                                // server）同步完成后即进入主界面——解锁
+                                // 耗时与正常解锁不可区分（慢解锁本身即
+                                // 穿帮信号）；停共享/停 daemon 等慢速清理
+                                // 后台并行。NonCancellable 在 DefenseProtocol
+                                // 内部包裹：本协程随 Activity 重建被取消也
+                                // 不中断销毁
+                                runCatching {
+                                    DefenseProtocol.destroyForCoercion(keepVaultSession = true)
+                                }
                                 onUnlocked()
                             }
                             // BAD / RATE_LIMITED（限速窗内连正确密码也拒）/
