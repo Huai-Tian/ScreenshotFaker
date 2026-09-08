@@ -34,9 +34,10 @@ class ScreenshotTileService : TileService() {
         private const val COLLAPSE_INTENT_FRESH_MS = 2000L
     }
 
-    // 回调串行化 + exec 离开主线程：refreshShellState 含同步 exec（Shizuku
-    // binder 存活但服务端假死时 binder 调用无超时——主线程直接执行是
-    // 无界的 ANR 面，与 ScreenShareManager 的同类修复同语义）。串行锁
+    // 回调串行化 + exec 离开主线程：refreshShellState 含 Shizuku binder
+    // 检查（服务端假死时 binder 调用无超时——主线程直接执行是
+    // 无界的 ANR 面，与 ScreenShareManager 的同类修复同语义；原经
+    // refreshShellState 级联的 su 探测 exec 已随 root 态派生化移除）。串行锁
     // 保持 click/collapse 快速连击的处理顺序：后者等前者完成后才读状态，
     // 等价于原主线程同步串行语义
     private val handlerMutex = Mutex()

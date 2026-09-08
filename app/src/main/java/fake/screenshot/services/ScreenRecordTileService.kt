@@ -39,8 +39,9 @@ class ScreenRecordTileService : TileService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // 回调串行化 + exec 离开主线程（与 ScreenshotTileService 同语义）：
-    // refreshShellState / isProcessAlive 含同步 exec，Shizuku binder 假死
-    // 时无超时——主线程直接执行是 ANR 面。串行锁保持快速连击的处理顺序
+    // refreshShellState（binder 检查）/ isProcessAlive（同步 exec），Shizuku
+    // binder 假死时无超时——主线程直接执行是 ANR 面。串行锁保持快速
+    // 连击的处理顺序
     private val handlerMutex = Mutex()
 
     companion object {

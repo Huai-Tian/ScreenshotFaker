@@ -92,6 +92,20 @@ object ConfigManager {
                     }
                     def.delete()
                     File(def.path + ".tmp").delete()
+                } else {
+                    // 首次运行（无可迁移的默认名文件）：立即持久化随机 ref。
+                    // 原实现仅内存持有（下方 dataStoreRef 赋值），进程结束即
+                    // 失——每次启动都生成新随机名、读到全新空 DataStore，一切
+                    // 设置表现为"重启即回默认"（曾误判为每次启动自毁；且每次
+                    // 启动遗留一个孤儿密文文件，恰好制造 sweep 设计要消除的
+                    // "多文件并存"销毁侧信道）。持久化失败回落默认名：本次
+                    // 会话读写落在有名文件上，下次启动经上方迁移路径接管，
+                    // 绝不静默丢配置
+                    val committed = prefs.edit().putString(KEY_DATA_REF, ref).commit()
+                    if (!committed) {
+                        dataStoreRef = DATA_REF_DEFAULT
+                        return DATA_REF_DEFAULT
+                    }
                 }
             }
             dataStoreRef = ref

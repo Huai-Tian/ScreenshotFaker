@@ -49,20 +49,23 @@ object Auxiliary {
             shellActivatedState.value = value
         }
 
-    private val rootActivatedState by lazy {
-        mutableStateOf(
-            try {
-                (isShellActivated && Shizuku.getUid() == 0) || suPaths.any { File(it).exists() }
-            } catch (_: Exception) {
-                false
-            }
-        )
-    }
-    var isRootActivated: Boolean
-        get() = rootActivatedState.value
-        set(value) {
-            rootActivatedState.value = value
-        }
+    // su 二进制可见性：app 视角的挂载命名空间进程内恒定，lazy 缓存
+    private val suBinaryPresent by lazy { suPaths.any { File(it).exists() } }
+
+    // Root 态是派生值而非 lazy state：原实现首访求值一次即冻结——未授权
+    // 状态下首访冻结为 false，授权回调只更新 isShellActivated，root 态
+    // 永不刷新（Shizuku root 模式授权后仍显示 Shell，重启才恢复）；
+    // refreshRootState 的手动刷新从未接入授权/binder 回调。改为实时
+    // 求值：读取方对 isShellActivated 的 state 订阅触发重组，重组中
+    // 重算本属性即得最新值。轻量（stat 已缓存 + binder IPC 被 shell 态
+    // 短路），可安全处于组合路径。原 refreshRootState 的
+    // exec("command -v su") 探测分支随派生版退役：组合路径禁同步子
+    // 进程，且该语义（Shizuku shell 模式下探得 su 即标 Root）与执行
+    // 路径不符——exec 特权通道走 Shizuku shell uid 而非 su，标 Shell
+    // 更诚实
+    val isRootActivated: Boolean
+        get() = suBinaryPresent ||
+                (isShellActivated && runCatching { Shizuku.getUid() == 0 }.getOrDefault(false))
 
     fun hasSuBinary(): Boolean = suPaths.any { File(it).exists() }
 
@@ -232,6 +235,8 @@ object Auxiliary {
     fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
+    // 仅刷新 shell 态：root 态已是派生属性（isRootActivated），随
+    // isShellActivated 的 state 变化自动对读取方生效，无需手动级联
     fun refreshShellState() {
         isShellActivated = try {
             val binder = Shizuku.getBinder()
@@ -240,15 +245,6 @@ object Auxiliary {
             result
         } catch (_: Exception) {
             false
-        }
-        refreshRootState()
-    }
-
-    fun refreshRootState() {
-        isRootActivated = when {
-            isShellActivated && runCatching { Shizuku.getUid() == 0 }.getOrDefault(false) -> true
-            isShellActivated -> exec("command -v su").first == 0
-            else -> suPaths.any { File(it).exists() }
         }
     }
 

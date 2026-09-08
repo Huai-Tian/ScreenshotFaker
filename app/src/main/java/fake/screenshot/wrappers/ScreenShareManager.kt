@@ -491,8 +491,9 @@ object ScreenShareManager {
         DaemonManager.init(context)
         DefenseProtocol.init(context)
         scope.launch {
-            // refreshShellState 调 exec("command -v su")（binder 阻塞时可感知
-            // 卡顿）——挪进 IO 协程避免主线程 ANR（之前在 launch 之外同步执行）
+            // refreshShellState 含 Shizuku binder 检查（binder 阻塞时可感知
+            // 卡顿）——留在 IO 协程避免主线程 ANR（root 态已是派生属性，
+            // 原经 exec 的 su 探测级联已随派生版移除）
             Auxiliary.refreshShellState()
             toggleMutex.withLock {
                 if (relayRunning || isServerActuallyRunning()) {
