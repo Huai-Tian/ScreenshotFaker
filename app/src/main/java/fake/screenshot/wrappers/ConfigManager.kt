@@ -177,6 +177,10 @@ object ConfigManager {
             dataStoreCache.remove(appContext)
             sweepDatastoreDirLocked(appContext)
         }
+        // hook 配置的远端投递（RemotePreferences）落在 LSPosed 托管区，
+        // 不在上方的 datastore 目录清扫范围内——销毁序列必须显式中和，
+        // 否则密文配置作为永久残留对抗取证（见 TemplateManager 中和注释）
+        TemplateManager.neutralizeRemoteForCoercion()
     }
 
     /**

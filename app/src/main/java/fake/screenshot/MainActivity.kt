@@ -43,6 +43,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isShellActivated
+import fake.screenshot.wrappers.TemplateManager
 import fake.screenshot.pages.AboutCompose
 import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
@@ -469,6 +470,9 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
     override fun onServiceBind(service: XposedService) {
         mService = service
         notifyServiceStateChanged(mService)
+        // hook 配置导出 catch-up：补发服务未连接期间的全部配置变更
+        //（TemplateManager 导出管道的时序闭环，详见其类注释）
+        TemplateManager.onServiceBound(this)
     }
 
     override fun onServiceDied(service: XposedService) {
