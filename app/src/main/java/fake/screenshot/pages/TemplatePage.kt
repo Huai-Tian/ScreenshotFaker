@@ -9,6 +9,6 @@ import fake.screenshot.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GalleryCompose() {
-    TopAppBar(title = { Text(stringResource(R.string.gallery)) })
+fun TemplateCompose() {
+    TopAppBar(title = { Text(stringResource(R.string.template)) })
 }

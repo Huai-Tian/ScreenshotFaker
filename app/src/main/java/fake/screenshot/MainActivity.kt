@@ -22,7 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -47,7 +47,7 @@ import fake.screenshot.pages.AboutCompose
 import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
-import fake.screenshot.pages.GalleryCompose
+import fake.screenshot.pages.TemplateCompose
 import fake.screenshot.pages.GateCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.ReceiveScreenSharingCompose
@@ -311,7 +311,7 @@ fun MainContent() {
     // 动态过滤需要显示在底部导航栏的目标
     val visibleDestinations = AppDestinations.entries.filter { destination ->
         when (destination) {
-            AppDestinations.GALLERY, AppDestinations.APPLICATION -> isModuleActivated
+            AppDestinations.TEMPLATE, AppDestinations.APPLICATION -> isModuleActivated
             else -> true
         }
     }
@@ -329,7 +329,7 @@ fun MainContent() {
                                     when (destination.label) {
                                         "Home" -> stringResource(R.string.home)
                                         "Settings" -> stringResource(R.string.settings)
-                                        "Gallery" -> stringResource(R.string.gallery)
+                                        "Template" -> stringResource(R.string.template)
                                         "Application" -> stringResource(R.string.application)
                                         "Extension" -> stringResource(R.string.extension)
                                         else -> stringResource(R.string.unknown)
@@ -361,7 +361,7 @@ fun MainContent() {
         ) {
             composable(AppDestinations.HOME.route) { HomeCompose() }
             composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
-            composable(AppDestinations.GALLERY.route) { GalleryCompose() }
+            composable(AppDestinations.TEMPLATE.route) { TemplateCompose() }
             composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
             composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
             composable("daemon_status") { DaemonStatusCompose() }
@@ -480,7 +480,7 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
 enum class AppDestinations(val label: String, val icon: ImageVector, val route: String) {
     HOME("Home", Icons.Default.Home, "home"),
     APPLICATION("Application", Icons.Default.Apps, "application"),
-    GALLERY("Gallery", Icons.Default.Photo, "gallery"),
+    TEMPLATE("Template", Icons.Default.Layers, "template"),
     EXTENSION("Extension", Icons.Default.Extension, "extension"),
     SETTINGS("Settings", Icons.Default.Settings, "settings")
 }

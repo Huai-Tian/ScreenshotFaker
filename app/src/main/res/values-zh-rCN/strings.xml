@@ -3,7 +3,7 @@
     <string name="app_name">截图伪装</string>
     <string name="application_description">防止个人隐私被不信任的应用恶意获取</string>
     <string name="settings">设置</string>
-    <string name="gallery">图库</string>
+    <string name="template">模板</string>
     <string name="application">应用</string>
     <string name="home">概览</string>
     <string name="extension">拓展</string>
