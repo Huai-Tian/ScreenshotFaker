@@ -146,10 +146,12 @@ This project is initiated by the developer out of personal interest and for tech
 - [LSPosed](https://github.com/LSPosed/LSPosed)
 - [Shizuku](https://github.com/RikkaApps/Shizuku)
 - [JSch](https://github.com/mwiede/jsch)
+- [Argon2](https://github.com/P-H-C/phc-winner-argon2)
+- [DisableFlagSecure](https://github.com/lsposed/DisableFlagSecure)
+- [Transparent_screenshot](https://github.com/Dszsu/Transparent_screenshot)
 - [scrcpy](https://github.com/Genymobile/scrcpy)
 - [libssh2](https://github.com/libssh2/libssh2)
 - [openssl](https://github.com/openssl/openssl)
-- [Argon2](https://github.com/P-H-C/phc-winner-argon2)
 - [apksig](https://github.com/google/apksig)
 
 ---
