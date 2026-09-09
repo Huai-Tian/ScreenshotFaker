@@ -18,8 +18,8 @@ It allows you to customize how your personal information is protected during scr
   Prevents the screenshot service from capturing sensitive content on the screen, with support for user‑defined redaction.  
   Supports disabling screenshots for sensitive apps that allow them.
 
-- **Neutralizes screenshot detection in specific applications**  
-  Bypasses malicious screenshot detection in apps.
+- **Block screenshot and screen recording detection by specific apps**  
+  Bypass malicious app detection of user screenshots and screen recordings.
 
 - **Enables stealthy screen capture, recording, and sharing**  
   Bypasses application-layer malicious detection via direct system-level calls.
@@ -40,7 +40,7 @@ It allows you to customize how your personal information is protected during scr
   All configuration data is stored with strong encryption;  
   Page protection against screenshot‑based configuration leakage;  
   Supports automatic high‑strength encryption for screenshot and screen recording files;  
-  Filenames support full randomization;  
+  Filenames support full randomization (Random characters and length);  
   All port communications are secured with high‑strength encryption;
 
 - **Ultimate duress protection**  
