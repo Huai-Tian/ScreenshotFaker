@@ -17,14 +17,14 @@ import javax.crypto.spec.SecretKeySpec
  * 双映射结构（HMA-OSS 心智）：templates 定义命名配置组（全部由用户创建，
  * 不预置任何现成模板），scope 把包名映射到模板（多对一）。同一包名在
  * 不同引擎中扮演不同角色，模板把全部角色字段捆绑为一个配置组：
- * - 截屏管控 [securePolicy]：角色=被截者（该应用窗口在屏时整个屏幕的可截性）
+ * - 截屏限制 [securePolicy]：角色=被截者（该应用窗口在屏时整个屏幕的可截性）
  * - 检测屏蔽 ×3：角色=检测者（该应用注册的对抗性侦听回调是否被吞）
  * - [imageId]：角色=前台者（截图瞬间该应用前台时使用的替换图，E3 消费）
  */
 data class HookTemplate(
     val id: String,
     val name: String,
-    /** E1：截屏管控三态，见 [HookConfig.SECURE_*] 常量 */
+    /** E1：截屏限制三态，见 [HookConfig.SECURE_*] 常量 */
     val securePolicy: Int,
     /** E2a：屏蔽截屏检测（ScreenCaptureCallback 派发吞噬） */
     val maskCaptureDetection: Boolean,
@@ -32,21 +32,35 @@ data class HookTemplate(
     val maskRecordDetection: Boolean,
     /** E2d：屏蔽悬浮窗检测（obscured 遮挡参与位 + TrustedPresentation） */
     val maskOverlayDetection: Boolean,
+    /**
+     * E4：自由浮窗穿透——小窗（WINDOWING_MODE_FREEFORM，含 OEM 小窗）
+     * 模式下该应用窗口对截图/录屏隐身（skipScreenshot，露出下层内容）
+     */
+    val pierceFreeform: Boolean = false,
     /** E3：内容替换绑定图（中性文件 id，图片本体经 openRemoteFile 传输） */
     val imageId: String?,
 )
 
 data class HookConfig(
-    /** 总开关：false 时一切查询返回原生行为（fail-open，绝不干扰系统） */
-    val masterEnabled: Boolean = false,
     /**
-     * E1 全局三态：未配置应用（scope 未命中）的截屏管控，与
+     * E1 全局三态：未配置应用（scope 未命中）的截屏限制，与
      * [HookTemplate.securePolicy] 同一取值域，显式模板覆盖之。
-     * 对应需求"截屏限制…同时也支持全局的启用和禁用"——全局层只有
-     * E1 一个轴（检测屏蔽/替换图均为 per-app），刻意不做 HMA 式
-     * "默认模板"隐式应用：未配置应用除 E1 外一律原生行为
+     * 对应需求"截屏限制…同时也支持全局的启用和禁用"。
+     * 模块总闸由 LSPosed 模块启停承担，App 内不设总开关
      */
     val globalSecurePolicy: Int = SECURE_FOLLOW,
+    /**
+     * E3 全局截图替换开关（纯 UI 阶段，hook 侧暂不消费，E3 落地接入）。
+     * 关闭时配置状态静默保留（图片文件与 [globalReplaceImage] 不清除），
+     * 再开启时"已配置"直接恢复
+     */
+    val globalReplaceEnabled: Boolean = false,
+    /**
+     * E3 全局替换图：App 私有 files/replace/ 下的中性文件名（本体拷贝
+     * 进私有目录，规避相册 Uri 权限过期/原图被删导致配置虚标）。
+     * null = 未配置
+     */
+    val globalReplaceImage: String? = null,
     val templates: List<HookTemplate> = emptyList(),
     /** 包名 → 模板 id（显式映射；悬空引用按未配置处理） */
     val scope: Map<String, String> = emptyMap(),
@@ -109,8 +123,9 @@ object HookConfigCodec {
     fun encode(config: HookConfig): String {
         val json = JSONObject().apply {
             put("v", 1)
-            put("m", config.masterEnabled)
             put("gp", config.globalSecurePolicy)
+            put("re", config.globalReplaceEnabled)
+            config.globalReplaceImage?.let { put("ri", it) }
             put("t", JSONArray().apply {
                 config.templates.forEach { tpl ->
                     put(JSONObject().apply {
@@ -120,6 +135,7 @@ object HookConfigCodec {
                         put("c", tpl.maskCaptureDetection)
                         put("b", tpl.maskRecordDetection)
                         put("o", tpl.maskOverlayDetection)
+                        put("f", tpl.pierceFreeform)
                         tpl.imageId?.let { img -> put("g", img) }
                     })
                 }
@@ -169,6 +185,7 @@ object HookConfigCodec {
                         maskCaptureDetection = o.optBoolean("c"),
                         maskRecordDetection = o.optBoolean("b"),
                         maskOverlayDetection = o.optBoolean("o"),
+                        pierceFreeform = o.optBoolean("f"),
                         imageId = o.optString("g").ifEmpty { null },
                     )
                 )
@@ -179,8 +196,9 @@ object HookConfigCodec {
             o.keys().forEach { pkg -> o.optString(pkg).ifEmpty { return@forEach }.let { put(pkg, it) } }
         }
         return HookConfig(
-            masterEnabled = json.optBoolean("m"),
             globalSecurePolicy = json.optInt("gp", HookConfig.SECURE_FOLLOW).coerceIn(0, 2),
+            globalReplaceEnabled = json.optBoolean("re"),
+            globalReplaceImage = json.optString("ri").ifEmpty { null },
             templates = templates,
             scope = scope,
         )

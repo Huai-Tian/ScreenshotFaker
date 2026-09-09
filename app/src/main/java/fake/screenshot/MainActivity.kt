@@ -49,6 +49,8 @@ import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
 import fake.screenshot.pages.TemplateCompose
+import fake.screenshot.pages.TemplateAppsCompose
+import fake.screenshot.pages.TemplateEditCompose
 import fake.screenshot.pages.GateCompose
 import fake.screenshot.pages.HomeCompose
 import fake.screenshot.pages.ReceiveScreenSharingCompose
@@ -362,8 +364,14 @@ fun MainContent() {
         ) {
             composable(AppDestinations.HOME.route) { HomeCompose() }
             composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
-            composable(AppDestinations.TEMPLATE.route) { TemplateCompose() }
+            composable(AppDestinations.TEMPLATE.route) { TemplateCompose(navController) }
             composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
+            composable("template_edit/{id}") { entry ->
+                TemplateEditCompose(navController, entry.arguments?.getString("id") ?: "")
+            }
+            composable("template_apps/{id}") { entry ->
+                TemplateAppsCompose(navController, entry.arguments?.getString("id") ?: "")
+            }
             composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
             composable("daemon_status") { DaemonStatusCompose() }
             composable("about") { AboutCompose() }

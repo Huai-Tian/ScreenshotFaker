@@ -1,8 +1,14 @@
 package fake.screenshot
 
 import android.util.Log
+import android.util.Pair as AndroidPair
+import fake.screenshot.hooks.CaptureDetectionHook
+import fake.screenshot.hooks.FreeformPierceHook
 import fake.screenshot.hooks.HookContext
 import fake.screenshot.hooks.HookContext.ProcessKind
+import fake.screenshot.hooks.OverlayStealthHook
+import fake.screenshot.hooks.RecordDetectionHook
+import fake.screenshot.hooks.SecurePolicyHook
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
 import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam
@@ -40,10 +46,13 @@ class ScreenshotFaker : XposedModule() {
 
     /**
      * 热重载跨代状态（DFS 同款）：当前进程的 hook 装配参数。
-     * ClassLoader 是框架对象（classloader-neutral），经 savedInstanceState
-     * 传递合法；模块自建对象禁止传递（会钉住旧代 classloader）。
+     * 必须 android.util.Pair（boot classloader 类）：kotlin.Pair 由模块
+     * 自身 classloader 加载（设备 BOOTCLASSPATH 无 kotlin-stdlib），框架
+     * 的 setSavedInstanceState 检测器会抛 IllegalArgumentException 导致
+     * 热重载失败（实测 ColorOS 15 / LSPosed 2.2.0）。ClassLoader 本体是
+     * 框架对象，classloader-neutral，可安全跨代。
      */
-    private var hookParam: Pair<String, ClassLoader>? = null
+    private var hookParam: AndroidPair<String, ClassLoader>? = null
 
     override fun onModuleLoaded(param: ModuleLoadedParam) {
         super.onModuleLoaded(param)
@@ -52,7 +61,7 @@ class ScreenshotFaker : XposedModule() {
 
     override fun onSystemServerStarting(param: SystemServerStartingParam) {
         super.onSystemServerStarting(param)
-        hookParam = "system" to param.classLoader
+        hookParam = AndroidPair.create("system", param.classLoader)
         HookContext.init(this, ProcessKind.SYSTEM_SERVER)
         installHooks()
     }
@@ -61,7 +70,7 @@ class ScreenshotFaker : XposedModule() {
         super.onPackageReady(param)
         if (!param.isFirstPackage) return
         if (param.packageName !in SCREENSHOT_PACKAGES) return
-        hookParam = param.packageName to param.classLoader
+        hookParam = AndroidPair.create(param.packageName, param.classLoader)
         HookContext.init(this, ProcessKind.SCREENSHOT_APP)
         installHooks()
     }
@@ -76,13 +85,30 @@ class ScreenshotFaker : XposedModule() {
         when (HookContext.kind) {
             ProcessKind.SYSTEM_SERVER -> {
                 // E1 SecurePolicyHook      —— isSecureLocked 三态（被截者）
-                // E2a CaptureDetectionHook —— ScreenCaptureCallback 派发吞噬（检测者）
-                // E2b RecordDetectionHook  —— ScreenRecordingCallback 派发吞噬（检测者）
-                // E2c/2d OverlayStealthHook—— TrustedPresentation + 遮挡参与位（检测者）
+                runCatching { SecurePolicyHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E1 install failed", it) }
+                // E4 FreeformPierceHook —— 被配置 app 自由小窗截图穿透（纯
+                // system_server，skipScreenshot 双层标记，被穿透 app 零注入）
+                runCatching { FreeformPierceHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E4 install failed", it) }
+                // E2a CaptureDetectionHook —— 截屏感知吞噬：ScreenCaptureCallback
+                // 注册/派发 + 媒体库 ContentObserver（检测者，视频子域兼护 E2b）
+                runCatching { CaptureDetectionHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E2a install failed", it) }
+                // E2b RecordDetectionHook —— 录屏感知吞噬：ScreenRecordingCallback
+                // + 虚拟显示器存在性隐身（检测者）
+                runCatching { RecordDetectionHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E2b install failed", it) }
+                // E2d OverlayStealthHook —— 遮挡感知隐身：焦点丢失隐瞒 +
+                // TrustedPresentation 注册点探测（检测者）
+                runCatching { OverlayStealthHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E2d install failed", it) }
                 // E3b ProjectionReplaceHook—— MediaProjection 虚拟屏假图层（全局）
-                // E4 FreeformStealthHook   —— 被配置 app 自由小窗截图隐身
             }
             ProcessKind.SCREENSHOT_APP -> {
+                // E1 SecurePolicyHook（捕获管线放行腿，仅 ALLOW 态激活）
+                runCatching { SecurePolicyHook.installScreenshotApp(p.first, p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E1 install failed for ${p.first}", it) }
                 // E3a ScreenshotReplaceHook —— 截图族 API 拦截返回模板图（前台者选图）
             }
             ProcessKind.OTHER -> return
@@ -109,8 +135,8 @@ class ScreenshotFaker : XposedModule() {
     override fun onHotReloaded(param: HotReloadedParam) {
         HookContext.resetForHotReload(this, param.isSystemServer)
         val saved = param.savedInstanceState
-        if (saved is Pair<*, *> && saved.first is String && saved.second is ClassLoader) {
-            hookParam = saved.first as String to saved.second as ClassLoader
+        if (saved is AndroidPair<*, *> && saved.first is String && saved.second is ClassLoader) {
+            hookParam = AndroidPair.create(saved.first as String, saved.second as ClassLoader)
             installHooks()
         }
         param.oldHookHandles.forEach { h ->
