@@ -15,7 +15,8 @@ It allows you to customize how your personal information is protected during scr
 ## ✨ Features
 
 - **Protect private content from being captured in screenshots**  
-  Prevents the screenshot service from capturing sensitive content on the screen, with support for user‑defined redaction.
+  Prevents the screenshot service from capturing sensitive content on the screen, with support for user‑defined redaction.  
+  Supports disabling screenshots for sensitive apps that allow them.
 
 - **Neutralizes screenshot detection in specific applications**  
   Bypasses malicious screenshot detection in apps.
@@ -25,7 +26,8 @@ It allows you to customize how your personal information is protected during scr
 
 - **Custom trigger methods**  
   Most configurations are user‑customizable;  
-  Supports system-log-based triggering for screen capture, recording, and sharing — not limited to conventional gestures.
+  Supports system-log-based triggering for screen capture, recording, and sharing — not limited to conventional gestures.  
+  Efficiently configure and manage each app using configuration templates.
 
 - **Extreme stealth support**  
   Supports viewing screenshot and screen recording files in a floating window without being captured by screenshots.  
@@ -66,7 +68,8 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 **LSPosed**
 - Protects private content from being captured in screenshots.
 - Supports taking screenshots on pages where screenshots are not allowed.
-- Bypasses screenshot detection by specific apps.
+- Disable screenshots on pages that allow them.
+- Block screenshot and screen recording detection by specific apps.
 - Supports preventing specific apps from detecting floating windows.
 - Supports setting floating windows for specific apps to enable screen capture passthrough.
 
