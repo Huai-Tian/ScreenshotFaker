@@ -104,24 +104,29 @@
     <string name="mask_capture_detection">Block screenshot detection</string>
     <string name="mask_record_detection">Block screen recording detection</string>
     <string name="mask_overlay_detection">Block overlay detection</string>
+    <string name="mask_focus_detection">Block focus detection</string>
     <string name="freeform_pierce">Freeform window pierce</string>
     <string name="template_settings_title">Template settings</string>
     <string name="template_usage_hint">Create templates for apps that need screenshot restrictions, then assign templates to apps on the Application page.\n\nEach template controls: screenshot restrictions (follow / force allow / force deny), detection masking, and freeform window pierce. Unassigned apps fall back to the global screenshot restrictions.</string>
     <string name="template_applied_count">Applied to %d apps</string>
     <string name="template_apps_edit">Edit list</string>
     <string name="template_applied_title">Applied apps</string>
+    <string name="template_apps_empty">No apps assigned to this template yet. Assign one from its app detail page.</string>
     <string name="global_settings">Global</string>
     <string name="global_secure_policy">Screenshot restrictions for unconfigured apps</string>
     <string name="screenshot_replace">Screenshot replacement</string>
     <string name="replace_state_disabled">Disabled</string>
     <string name="replace_state_not_configured">Not configured</string>
     <string name="replace_state_configured">Configured</string>
+    <string name="replace_template_hint">Uses this image when an app assigned to this template is in the foreground</string>
     <string name="save">Save</string>
     <string name="template_apps_hint">Assign apps to templates on the Application page</string>
     <string name="search_apps">Search apps</string>
+    <string name="show_system_apps">Show system apps</string>
     <string name="not_assigned">Not assigned</string>
     <string name="assigned_to">Assigned: %1$s</string>
     <string name="remove_mapping">Remove assignment</string>
+    <string name="app_settings">App settings</string>
     <!--Custom application features-->
     <string name="custom_application_features">Customize application features</string>
     <string name="custom_application_features_description">Customize application features to bypass detection</string>
@@ -241,6 +246,7 @@
     <string name="share_error_ssh">SSH connection failed</string>
     <!--Style-->
     <string name="crop_icon">Crop icon</string>
+    <string name="crop_replace_image">Crop image</string>
     <string name="crop_icon_hint">Drag to reposition, pinch to zoom.</string>
     <!--Common-->
     <string name="start">Start</string>

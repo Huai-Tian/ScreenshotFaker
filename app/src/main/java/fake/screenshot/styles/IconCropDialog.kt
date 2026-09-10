@@ -32,11 +32,19 @@ import fake.screenshot.R
 import kotlin.math.max
 import kotlin.math.min
 
+/**
+ * 通用手势裁剪对话框：拖拽定位 + 双指缩放，裁剪框必须被图片完整覆盖
+ * （无透明边）。裁剪框比例可指定——图标 1:1（默认）、替换图屏幕比例。
+ * titleRes 供不同用例定制标题（裁剪图标 / 裁剪替换图）
+ */
 @Composable
 fun IconCropDialog(
     image: Bitmap,
     onConfirm: (Bitmap) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    /** 裁剪框宽高比（宽/高）；1f = 正方形（图标） */
+    aspectRatio: Float = 1f,
+    titleRes: Int = R.string.crop_icon,
 ) {
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     // fitScale：等比适配裁剪框的初始缩放；minScale：覆盖裁剪框所需最小用户缩放
@@ -48,17 +56,17 @@ fun IconCropDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.crop_icon)) },
+        title = { Text(stringResource(titleRes)) },
         text = {
             Column {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1f)
+                        .aspectRatio(aspectRatio)
                         .onSizeChanged { size ->
                             boxSize = size
                             if (!initialized && size.width > 0) {
-                                // 初始：等比适配后放大到恰好覆盖正方形裁剪框，居中
+                                // 初始：等比适配后放大到恰好覆盖裁剪框，居中
                                 fitScale = min(
                                     size.width.toFloat() / image.width,
                                     size.height.toFloat() / image.height
@@ -93,7 +101,7 @@ fun IconCropDialog(
                                 // 缩放围绕手势中心，再叠加平移
                                 var newTopLeft = centroid -
                                         (centroid - topLeft) * (newScale / scale) + pan
-                                // 约束：图片必须完整覆盖正方形裁剪框
+                                // 约束：图片必须完整覆盖裁剪框
                                 val w = drawW * newScale
                                 val h = drawH * newScale
                                 newTopLeft = Offset(
@@ -105,7 +113,7 @@ fun IconCropDialog(
                             }
                         }
                 ) {
-                    Canvas(modifier = Modifier.fillMaxWidth().aspectRatio(1f)) {
+                    Canvas(modifier = Modifier.fillMaxWidth().aspectRatio(aspectRatio)) {
                         if (boxSize.width <= 0) return@Canvas
                         // 图片（fit + 用户变换）
                         withTransform({
@@ -147,18 +155,20 @@ fun IconCropDialog(
                 onClick = {
                     val box = boxSize
                     if (box.width <= 0) return@TextButton
-                    // 裁剪框（整个正方形）映射回源图坐标
+                    // 裁剪框（整个框体）映射回源图坐标，宽高独立按框比例取
                     val totalScale = scale * fitScale
                     val left = (-topLeft.x / totalScale).toInt()
                     val top = (-topLeft.y / totalScale).toInt()
-                    // 极小源图（最小边 <12px）在高缩放下 cropSize 可能截断为 0，
+                    // 极小源图（最小边 <12px）在高缩放下裁剪宽/高可能截断为 0，
                     // createBitmap(宽=0) 抛 IllegalArgumentException——下限钳到 1
-                    val cropSize = (box.width / totalScale).toInt()
-                        .coerceIn(1, min(image.width, image.height))
-                    val safeLeft = left.coerceIn(0, image.width - cropSize)
-                    val safeTop = top.coerceIn(0, image.height - cropSize)
+                    val cropW = (box.width / totalScale).toInt()
+                        .coerceIn(1, image.width)
+                    val cropH = (box.height / totalScale).toInt()
+                        .coerceIn(1, image.height)
+                    val safeLeft = left.coerceIn(0, image.width - cropW)
+                    val safeTop = top.coerceIn(0, image.height - cropH)
                     val cropped = Bitmap.createBitmap(
-                        image, safeLeft, safeTop, cropSize, cropSize
+                        image, safeLeft, safeTop, cropW, cropH
                     )
                     onConfirm(cropped)
                 }

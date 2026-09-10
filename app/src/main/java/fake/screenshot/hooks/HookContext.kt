@@ -25,6 +25,18 @@ object HookContext {
 
     private const val TAG = "SF"
 
+    /**
+     * 截屏应用白名单（scope 泛滥防御 + E3a 前台判定的"自己人"排除集）。
+     * 入口类装配与引擎前台解析共用同一来源，防双份漂移
+     */
+    val SCREENSHOT_PACKAGES = setOf(
+        "com.android.systemui",
+        "com.flyme.systemuiex",
+        "com.miui.screenshot",
+        "com.oplus.appplatform",
+        "com.oplus.screenshot",
+    )
+
     @Volatile
     private var config: HookConfig = HookConfig.DEFAULT
 
@@ -103,6 +115,17 @@ object HookContext {
     fun maskOverlayDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskOverlayDetection ?: false
 
+    /** E2d：检测者的窗口焦点丢失信号是否隐瞒（与悬浮窗归因共享信号源） */
+    fun maskFocusDetection(pkg: String?): Boolean =
+        config.templateFor(pkg)?.maskFocusDetection ?: false
+
+    /**
+     * E2a：激进检测过滤（媒体域 ContentObserver 注册全吞）。
+     * per-app 独立开关，不依赖模板分配（应用详情页设置）
+     */
+    fun aggressiveFilter(pkg: String?): Boolean =
+        pkg != null && config.aggressiveFilter.contains(pkg)
+
     /** E4：被配置应用的自由浮窗是否穿透（对截图/录屏隐身） */
     fun piercesFreeform(pkg: String?): Boolean =
         config.templateFor(pkg)?.pierceFreeform ?: false
@@ -126,13 +149,39 @@ object HookContext {
 
     /**
      * E3：前台者的替换图 id。null = 不替换（原生截图）。
-     * 替换的适用域即"模板绑定了图的显式配置应用"，"无论如何都会替换
-     * （全局）"由 E3a+E3b 覆盖全部截屏路径达成（实现性质）。图片本体
-     * 的远程文件加载由 E3 引擎自管；globalReplace* 全局字段目前纯 UI
-     * 阶段，E3 落地时统一接入。
+     * 优先级：前台者的显式模板图 > 全局替换（开关开启且已配置图）。
+     * 图片本体的远程密文加载/解码/缓存由 [ReplaceImageStore] 负责，
+     * 引擎装配时 ensureInstalled。
      */
-    fun replacementImageId(fgPkg: String?): String? =
-        config.templateFor(fgPkg)?.imageId
+    fun replacementImageId(fgPkg: String?): String? {
+        val c = config
+        c.templateFor(fgPkg)?.imageId?.let { return it }
+        if (c.globalReplaceEnabled && c.globalReplaceImage != null) return c.globalReplaceImage
+        return null
+    }
+
+    /** E3b 门控：任何替换配置存在（聚合口径，与 hasAllowPolicy 同模式） */
+    fun hasReplacePolicy(): Boolean {
+        val c = config
+        return (c.globalReplaceEnabled && c.globalReplaceImage != null) ||
+                c.templates.any { it.imageId != null }
+    }
+
+    /**
+     * E3 图片远程文件读取（[ReplaceImageStore] 消费，包内可见）。
+     * fd 由框架托管区派发，直接读流即得密文，无 binder 1MB 限制
+     */
+    fun openRemoteImage(name: String): android.os.ParcelFileDescriptor? =
+        runCatching { module?.openRemoteFile(name) }.getOrNull()
+
+    /** E3：配置内全部替换图 id（预热/失效口径，[ReplaceImageStore] 消费） */
+    fun activeImageIds(): Set<String> {
+        val c = config
+        return buildSet {
+            c.templates.forEach { it.imageId?.let { id -> add(id) } }
+            if (c.globalReplaceEnabled && c.globalReplaceImage != null) add(c.globalReplaceImage)
+        }
+    }
 
     // ==================== uid 解析（E2 检测者引擎共用） ====================
 

@@ -181,6 +181,11 @@ object ConfigManager {
         // 不在上方的 datastore 目录清扫范围内——销毁序列必须显式中和，
         // 否则密文配置作为永久残留对抗取证（见 TemplateManager 中和注释）
         TemplateManager.neutralizeRemoteForCoercion()
+        // E3 替换图双区中和：本地明文 PNG（files/replace/，明文假图本身
+        // 即取证信号）+ 托管区全部 sf_img_* 密文远程文件（配置键已随
+        // 上行清除，此处清图片本体；服务未连接时留密文残片，语义不可
+        // 扫描，下次绑定时全量删除覆盖）
+        ReplaceImageManager.neutralizeForCoercion(appContext)
     }
 
     /**

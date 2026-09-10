@@ -11,11 +11,12 @@ import java.lang.reflect.Method
  * 检测者的录屏/投屏感知通道（对照 ScreenshotDetector 实测源码）：
  *
  * 【通道 1：ScreenRecordingCallback（API 34+）】
- * WindowManager.addScreenRecordingCallback → binder →
- * com.android.server.wm.ScreenRecordingCallbacks#registerScreenRecordingCallback
- * (uid, callback)（注册即回调当前状态）。hook：uid 对应包名 masked →
- * 跳过注册——回调永不触发，检测者永远认为"无录屏"。A13- 无此类（CNFE
- * 容错静默，原生无该检测面）。
+ * 检测者（WindowManager.addScreenRecordingCallback）→ binder →
+ * WindowManagerService#registerScreenRecordingCallback（IWindowManager
+ * 协议入口，注册必经；AOSP 内部转发给 ScreenRecordingCallbacks 处理类，
+ * ColorOS 15 该类被 OEM 删除但 binder 入口同名保留——实测命中）。
+ * hook：uid 对应包名 masked → 跳过注册——回调永不触发，检测者永远
+ * 认为"无录屏"。A13- 无此 API（检测者自身不走该路径）。
  *
  * 【通道 2：虚拟显示器存在性（MediaProjection / 投屏 / 镜像）】
  * 检测者扫描 DisplayManager.getDisplays() + DisplayListener——三方录屏
@@ -55,23 +56,24 @@ object RecordDetectionHook {
 
     fun installSystemServer(classLoader: ClassLoader) {
         installScreenRecordingLeg(classLoader)
-        installDisplayLeg()
+        installDisplayLeg(classLoader)
     }
 
     // ==================== 通道 1：ScreenRecordingCallback ====================
 
     private fun installScreenRecordingLeg(classLoader: ClassLoader) {
         runCatching {
-            val srClass = classLoader.loadClass("com.android.server.wm.ScreenRecordingCallbacks")
+            val wmsClass = classLoader.loadClass("com.android.server.wm.WindowManagerService")
             var hooked = 0
-            srClass.declaredMethods
-                .filter { it.name.contains("registerScreenRecordingCallback") }
+            // IWindowManager 协议入口（注册必经，AOSP/ColorOS 同名）；
+            // uid 缺参形取 calling uid
+            wmsClass.declaredMethods
+                .filter { it.name == "registerScreenRecordingCallback" }
                 .forEach { m ->
                     val uidIdx = m.parameterTypes.indexOfFirst { it == Int::class.javaPrimitiveType }
-                    if (uidIdx < 0) return@forEach
                     m.isAccessible = true
                     HookContext.hookE("E2b", m).intercept { chain ->
-                        val uid = chain.args.getOrNull(uidIdx) as? Int ?: -1
+                        val uid = (chain.args.getOrNull(uidIdx) as? Int) ?: Binder.getCallingUid()
                         if (uid >= 0 && HookContext.anyPkgForUid(uid) { HookContext.maskRecordDetection(it) }) {
                             HookContext.log(Log.INFO, "E2b recording callback swallowed: uid=$uid")
                             null
@@ -82,16 +84,16 @@ object RecordDetectionHook {
                     hooked++
                 }
             HookContext.log(Log.INFO, "E2b screenRecording: $hooked register paths hooked")
-        }.onFailure {
-            HookContext.log(Log.INFO, "E2b screenRecording leg unavailable: ${it.message}")
-        }
+        }.onFailure { HookContext.log(Log.WARN, "E2b screenRecording leg error: ${it.message}") }
     }
 
     // ==================== 通道 2：虚拟显示器隐身 ====================
 
-    private fun installDisplayLeg() {
+    private fun installDisplayLeg(classLoader: ClassLoader) {
         runCatching {
-            val dmsClass = Class.forName("com.android.server.display.DisplayManagerService")
+            // ColorOS 15 实测：services.jar 类不在模块 CL 可见域（bare
+            // Class.forName CNFE），须经 system_server CL 装载
+            val dmsClass = classLoader.loadClass("com.android.server.display.DisplayManagerService")
             getDisplayInfoM = dmsClass.declaredMethods
                 .firstOrNull { it.name == "getDisplayInfo" && it.parameterCount == 1 }
                 ?.apply { isAccessible = true }

@@ -6,7 +6,7 @@ import fake.screenshot.hooks.CaptureDetectionHook
 import fake.screenshot.hooks.FreeformPierceHook
 import fake.screenshot.hooks.HookContext
 import fake.screenshot.hooks.HookContext.ProcessKind
-import fake.screenshot.hooks.OverlayStealthHook
+import fake.screenshot.hooks.FocusStealthHook
 import fake.screenshot.hooks.RecordDetectionHook
 import fake.screenshot.hooks.SecurePolicyHook
 import io.github.libxposed.api.XposedModule
@@ -34,14 +34,9 @@ class ScreenshotFaker : XposedModule() {
          * 截屏应用白名单（scope 泛滥防御）。用户手动把无关应用加入 LSPosed
          * 作用域时静默忽略——不 hook、不弹窗（DFS 对未知包弹窗退出，我们
          * 的 scope 是静态预置的，不存在配置错误的用户路径）。
+         * 集合本体统一维护在 [HookContext.SCREENSHOT_PACKAGES]
          */
-        private val SCREENSHOT_PACKAGES = setOf(
-            "com.android.systemui",
-            "com.flyme.systemuiex",
-            "com.miui.screenshot",
-            "com.oplus.appplatform",
-            "com.oplus.screenshot",
-        )
+        private val SCREENSHOT_PACKAGES get() = HookContext.SCREENSHOT_PACKAGES
     }
 
     /**
@@ -99,9 +94,9 @@ class ScreenshotFaker : XposedModule() {
                 // + 虚拟显示器存在性隐身（检测者）
                 runCatching { RecordDetectionHook.installSystemServer(p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E2b install failed", it) }
-                // E2d OverlayStealthHook —— 遮挡感知隐身：焦点丢失隐瞒 +
-                // TrustedPresentation 注册点探测（检测者）
-                runCatching { OverlayStealthHook.installSystemServer(p.second) }
+                // E2d FocusStealthHook —— 焦点丢失隐瞒（悬浮窗/小窗归因
+                // 与 FOCUS_LOSS 共享焦点轮询信号源，一并失活；检测者）
+                runCatching { FocusStealthHook.installSystemServer(p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E2d install failed", it) }
                 // E3b ProjectionReplaceHook—— MediaProjection 虚拟屏假图层（全局）
             }

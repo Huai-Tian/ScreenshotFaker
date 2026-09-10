@@ -1,8 +1,10 @@
 package fake.screenshot.pages
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,11 +28,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -76,11 +81,14 @@ import fake.screenshot.Auxiliary
 import fake.screenshot.R
 import fake.screenshot.hooks.HookConfig
 import fake.screenshot.hooks.HookTemplate
+import fake.screenshot.wrappers.ReplaceImageManager
 import fake.screenshot.wrappers.TemplateManager
+import fake.screenshot.styles.IconCropDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.max
 
 /**
  * 模板页（HMA 三级结构第一级，布局仿 HMA TemplateManageFragment）：
@@ -99,11 +107,16 @@ fun TemplateCompose(navController: NavController) {
     var showHint by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    // 截图替换选图（Photo Picker，不可用时框架自动回落系统选择器）
+    // 截图替换选图（Photo Picker，不可用时框架自动回落系统选择器）。
+    // 选图后先解码降采样（原图可能 50MP，直接解码 OOM），弹屏幕比例
+    // 裁剪对话框，确认后落盘
+    var pendingCrop by remember { mutableStateOf<Bitmap?>(null) }
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        if (uri != null) scope.launch { importReplaceImage(context, config, uri) }
+        if (uri != null) scope.launch {
+            pendingCrop = decodeForCrop(context, uri)
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -225,6 +238,10 @@ fun TemplateCompose(navController: NavController) {
                                         append(" · ")
                                         append(stringResource(R.string.freeform_pierce))
                                     }
+                                    if (tpl.imageId != null) {
+                                        append(" · ")
+                                        append(stringResource(R.string.screenshot_replace))
+                                    }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -256,6 +273,20 @@ fun TemplateCompose(navController: NavController) {
             }
         )
     }
+
+    // 屏幕比例裁剪（选图后触发）：确认落盘，取消丢弃
+    pendingCrop?.let { bmp ->
+        IconCropDialog(
+            image = bmp,
+            aspectRatio = screenAspectRatio(context),
+            titleRes = R.string.crop_replace_image,
+            onConfirm = { cropped ->
+                pendingCrop = null
+                scope.launch { importReplaceImage(context, config, cropped) }
+            },
+            onDismiss = { pendingCrop = null }
+        )
+    }
 }
 
 /**
@@ -263,7 +294,8 @@ fun TemplateCompose(navController: NavController) {
  * 编辑模式下权威配置未到达前（DataStore 冷流首帧为 DEFAULT）显示
  * 加载态、表单不组合——若先以空值组合，数据到达后 key 值不变
  * （editing.id == templateId），remember 不会重置，表单将停留在
- * 空名称假象。imageId 字段暂不暴露（E3 替换引擎落地后随选图功能开放）。
+ * 空名称假象。模板级替换图仅编辑态可配（新建态模板尚无 id，选图
+ * 以模板 id 作为 imageId 命名，保存后再开放——与"已应用于"行同约束）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -292,13 +324,25 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
 
     val scope = rememberCoroutineScope()
     var confirmingDelete by remember { mutableStateOf(false) }
+
+    // 模板级替换选图（与全局入口同管线：Photo Picker → 降采样解码 →
+    // 屏幕比例裁剪 → ReplaceImageManager 落双区，imageId = 模板 id）
+    var pendingCrop by remember { mutableStateOf<Bitmap?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) scope.launch { pendingCrop = decodeForCrop(context, uri) }
+    }
+
     key(editing?.id ?: "") {
         var name by remember { mutableStateOf(editing?.name ?: "") }
         var policy by remember { mutableStateOf(editing?.securePolicy ?: HookConfig.SECURE_FOLLOW) }
         var maskCapture by remember { mutableStateOf(editing?.maskCaptureDetection ?: false) }
         var maskRecord by remember { mutableStateOf(editing?.maskRecordDetection ?: false) }
         var maskOverlay by remember { mutableStateOf(editing?.maskOverlayDetection ?: false) }
+        var maskFocus by remember { mutableStateOf(editing?.maskFocusDetection ?: false) }
         var pierceFreeform by remember { mutableStateOf(editing?.pierceFreeform ?: false) }
+        var imageId by remember { mutableStateOf(editing?.imageId) }
 
         Column(modifier = Modifier.fillMaxSize()) {
             TopAppBar(
@@ -311,8 +355,11 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                     )
                 },
                 navigationIcon = {
-                    TextButton(onClick = { navController.popBackStack() }) {
-                        Text(stringResource(R.string.Cancel))
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                            contentDescription = null
+                        )
                     }
                 },
                 actions = {
@@ -326,7 +373,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                             )
                         }
                     }
-                    TextButton(
+                    IconButton(
                         enabled = name.isNotBlank(),
                         onClick = {
                             val saved = HookTemplate(
@@ -336,8 +383,9 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 maskCaptureDetection = maskCapture,
                                 maskRecordDetection = maskRecord,
                                 maskOverlayDetection = maskOverlay,
+                                maskFocusDetection = maskFocus,
                                 pierceFreeform = pierceFreeform,
-                                imageId = editing?.imageId, // 未暴露字段原样保留
+                                imageId = imageId,
                             )
                             val next = if (editing == null) {
                                 config.copy(templates = config.templates + saved)
@@ -349,7 +397,12 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                             scope.launch { TemplateManager.saveConfig(context, next) }
                             navController.popBackStack()
                         }
-                    ) { Text(stringResource(R.string.save)) }
+                    ) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = stringResource(R.string.save)
+                        )
+                    }
                 }
             )
             Column(
@@ -394,6 +447,24 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                         }
                     }
                 }
+                // 模板级替换图（编辑态：imageId = 模板 id，前台命中即换图，
+                // 优先级高于全局图；清除即时删双区图，未保存退出时配置
+                // 残留旧 imageId 但图已删 → hook 侧 fail-open 原生截图）
+                if (editing != null) {
+                    TemplateReplaceRow(
+                        imageFile = ReplaceImageManager.localFile(context, editing.id),
+                        bound = imageId != null,
+                        onPickImage = {
+                            imagePicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        onClear = {
+                            imageId = null
+                            scope.launch { ReplaceImageManager.delete(context, editing.id) }
+                        }
+                    )
+                }
                 // 截屏限制：标签占左余宽，紧凑三态 chips 靠右同一水平线（无滚动）
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -409,7 +480,29 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                 SwitchRow(stringResource(R.string.mask_capture_detection), maskCapture) { maskCapture = it }
                 SwitchRow(stringResource(R.string.mask_record_detection), maskRecord) { maskRecord = it }
                 SwitchRow(stringResource(R.string.mask_overlay_detection), maskOverlay) { maskOverlay = it }
+                SwitchRow(stringResource(R.string.mask_focus_detection), maskFocus) { maskFocus = it }
                 SwitchRow(stringResource(R.string.freeform_pierce), pierceFreeform) { pierceFreeform = it }
+            }
+        }
+
+        // 屏幕比例裁剪（模板级选图后触发）：确认后落双区并绑定
+        // imageId = 模板 id（key 块内，直取块内 imageId 状态）
+        pendingCrop?.let { bmp ->
+            val tplId = editing?.id
+            if (tplId != null) {
+                IconCropDialog(
+                    image = bmp,
+                    aspectRatio = screenAspectRatio(context),
+                    titleRes = R.string.crop_replace_image,
+                    onConfirm = { cropped ->
+                        pendingCrop = null
+                        scope.launch {
+                            ReplaceImageManager.save(context, tplId, cropped)
+                            imageId = tplId
+                        }
+                    },
+                    onDismiss = { pendingCrop = null }
+                )
             }
         }
     }
@@ -431,6 +524,10 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 scope = config.scope.filterValues { it != editing.id }
                             )
                         )
+                        // 模板删除同步清替换图双区（imageId = 模板 id，
+                        // 孤儿图在 hook 侧表现为加载失败 fail-open，但
+                        // 本地明文/远程密文必须随模板消亡）
+                        ReplaceImageManager.delete(context, editing.id)
                     }
                     confirmingDelete = false
                     navController.popBackStack()
@@ -448,12 +545,76 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
 // ==================== 复用小组件 ====================
 
 /**
+ * 模板级替换图行（编辑页）：点击选图（已绑定时换图），清除按钮解绑。
+ * 与全局 [ReplaceEntryRow] 的差异：无 Switch——模板有图即生效，启停
+ * 语义由"是否分配到应用"承担；副标题说明命中语义（模板图优先于全局图）
+ */
+@Composable
+private fun TemplateReplaceRow(
+    imageFile: File,
+    bound: Boolean,
+    onPickImage: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val configured = bound && imageFile.exists()
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(onClick = onPickImage),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (configured) {
+                    ReplaceThumb(imageFile)
+                    Spacer(Modifier.width(12.dp))
+                } else {
+                    Icon(
+                        Icons.Default.Image,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(Modifier.width(16.dp))
+                }
+                Column {
+                    Text(
+                        stringResource(R.string.screenshot_replace),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        if (configured) stringResource(R.string.replace_state_configured)
+                        else stringResource(R.string.replace_state_not_configured),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (configured) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (configured) {
+                IconButton(onClick = onClear) {
+                    Icon(Icons.Outlined.Delete, contentDescription = stringResource(R.string.delete))
+                }
+            }
+        }
+        Text(
+            stringResource(R.string.replace_template_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
  * 模板语义图标（仿 HMA 按类型区分模板的图标语义；我们无模板类型，
  * 按最高优先级特征取图）：穿透 > 屏蔽 > 强制禁止 > 强制允许 > 空
  */
 private fun featureIcon(tpl: HookTemplate): ImageVector = when {
     tpl.pierceFreeform -> Icons.Filled.PictureInPictureAlt
-    tpl.maskCaptureDetection || tpl.maskRecordDetection || tpl.maskOverlayDetection ->
+    tpl.maskCaptureDetection || tpl.maskRecordDetection || tpl.maskOverlayDetection ||
+            tpl.maskFocusDetection ->
         Icons.Filled.VisibilityOff
     tpl.securePolicy == HookConfig.SECURE_DENY -> Icons.Filled.Lock
     tpl.securePolicy == HookConfig.SECURE_ALLOW -> Icons.Filled.LockOpen
@@ -464,7 +625,8 @@ private fun featureIcon(tpl: HookTemplate): ImageVector = when {
  * 截图替换行（全局卡第二行）：Switch 是唯一启停入口；关闭时仅显示
  * "未启用"（配置状态静默保留，不显示缩略图与是否配置）；开启时点击
  * 行主体弹选图器，副标题显示 未配置/已配置，已配置时带缩略图预览。
- * 纯 UI 阶段：hook 侧暂不消费（E3 落地接入）。
+ * hook 侧经 HookContext.replacementImageId 消费（前台者的模板图
+ * 优先，未命中模板时回落此全局图）。
  */
 @Composable
 private fun ReplaceEntryRow(
@@ -538,44 +700,58 @@ private fun ReplaceThumb(file: File) {
     }
 }
 
-/** 替换图落盘位置（files/replace/ + 配置中的中性文件名） */
+/** 全局替换图本地凭据（files/replace/g.png；存在 = 已配置） */
 private fun replaceImageFile(context: Context, config: HookConfig): File? =
-    config.globalReplaceImage?.let { File(File(context.filesDir, "replace"), it) }
+    if (config.globalReplaceImage != null)
+        ReplaceImageManager.localFile(context, ReplaceImageManager.GLOBAL_ID)
+    else null
 
 /**
- * 选图导入：拷贝进私有 files/replace/（固定名 global.<ext>，换图自动
- * 清理旧扩展名文件，不堆积）。配置只存中性文件名——相册 Uri 权限会
- * 过期、原图会被删，私有拷贝才是"已配置"的可靠凭据。bounds 解码校验
- * 失败（损坏/非图片）则丢弃拷贝、不落配置。
+ * 选图导入：裁剪后的 Bitmap 经 [ReplaceImageManager] 落双区（本地明文
+ * PNG + 托管区 AES 密文），配置存 imageId（全局图固定 [ReplaceImageManager.GLOBAL_ID]）。
+ * 本地 PNG 是"已配置"的可靠凭据（相册 Uri 权限会过期、原图会被删）；
+ * 远程投递失败（服务未连接）不阻断配置落库——本地已保底，绑定 catch-up 补投
  */
-private suspend fun importReplaceImage(context: Context, config: HookConfig, uri: Uri) =
+private suspend fun importReplaceImage(context: Context, config: HookConfig, bitmap: Bitmap) {
+    ReplaceImageManager.save(context, ReplaceImageManager.GLOBAL_ID, bitmap)
+    TemplateManager.saveConfig(context, config.copy(globalReplaceImage = ReplaceImageManager.GLOBAL_ID))
+}
+
+/**
+ * 裁剪前解码：bounds 探测 + inSampleSize 降采样（长边 ≤ 4096，防
+ * 50MP 原图直接解码 ~200MB OOM；4096 已超任何手机屏分辨率，替换图
+ * 场景无质量损失感知）。失败返回 null（损坏/非图片静默丢弃）
+ */
+private suspend fun decodeForCrop(context: Context, uri: Uri): Bitmap? =
     withContext(Dispatchers.IO) {
         runCatching {
-            val dir = File(context.filesDir, "replace").apply { mkdirs() }
-            val ext = when (context.contentResolver.getType(uri)?.substringAfter('/')) {
-                "png" -> "png"
-                "webp" -> "webp"
-                "gif" -> "gif"
-                "heic", "heif" -> "heic"
-                else -> "jpg"
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            } ?: return@runCatching null
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+            var sample = 1
+            while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 4096) {
+                sample *= 2
             }
-            val target = File(dir, "global.$ext")
             context.contentResolver.openInputStream(uri)?.use { input ->
-                target.outputStream().use { input.copyTo(it) }
-            } ?: error("empty stream")
-            // 可解码性校验（bounds 探测，不解码全图）
-            val probe = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(target.absolutePath, probe)
-            check(probe.outWidth > 0) { "undecodable image" }
-            // 清理旧扩展名残留（global.png → global.jpg 切换场景）
-            dir.listFiles()?.forEach { old ->
-                if (old != target && old.name.startsWith("global.")) old.delete()
+                BitmapFactory.decodeStream(
+                    input, null,
+                    BitmapFactory.Options().apply { inSampleSize = sample }
+                )
             }
-            target.name
-        }.getOrNull()?.let { name ->
-            TemplateManager.saveConfig(context, config.copy(globalReplaceImage = name))
-        }
+        }.getOrNull()
     }
+
+/**
+ * 屏幕宽高比（currentWindowMetrics.bounds：真实物理分辨率，截图
+ * 输出即此分辨率——替换图按此比例裁剪，E3 注入时无黑边/拉伸）
+ */
+private fun screenAspectRatio(context: Context): Float {
+    val bounds = context.getSystemService(WindowManager::class.java)
+        .currentWindowMetrics.bounds
+    return bounds.width().toFloat() / bounds.height()
+}
 
 /**
  * E1 三态选择器（全局卡与编辑页共用）。
@@ -633,4 +809,9 @@ private fun policyLabel(policy: Int): String = when (policy) {
 }
 
 private fun masksCount(tpl: HookTemplate): Int =
-    listOf(tpl.maskCaptureDetection, tpl.maskRecordDetection, tpl.maskOverlayDetection).count { it }
+    listOf(
+        tpl.maskCaptureDetection,
+        tpl.maskRecordDetection,
+        tpl.maskOverlayDetection,
+        tpl.maskFocusDetection
+    ).count { it }

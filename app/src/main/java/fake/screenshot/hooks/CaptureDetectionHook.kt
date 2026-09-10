@@ -1,10 +1,8 @@
 package fake.screenshot.hooks
 
-import android.content.ComponentName
 import android.net.Uri
 import android.os.Binder
 import android.util.Log
-import java.lang.reflect.Field
 import java.lang.reflect.Method
 
 /**
@@ -13,23 +11,28 @@ import java.lang.reflect.Method
  * 检测者的两类截屏感知通道（对照 ScreenshotDetector 实测源码）：
  *
  * 【通道 1：ScreenCaptureCallback（API 34+ 主路径）】
- * Activity.registerScreenCaptureCallback → binder → ActivityRecord 持有
- * observer；截屏包含 secure 内容时 WMS 回调派发。装配面双吞：
- * - 注册点（ActivityRecord#registerScreenCaptureObserver）：masked →
- *   跳过注册（observer 列表为空，派发永远无从发生；反注册为无遍历删除，
- *   客户端 void 调用无感知）；
- * - 派发点（ActivityRecord#dispatchScreenCaptureCallback）：masked →
- *   吞噬（兜底 OEM 注册路径变体）。
- * 方法名按 "ScreenCapture" 前缀扫描适配（OEM 改名容错），零命中输出
- * 探针日志供校准。
+ * 检测者（Activity.registerScreenCaptureCallback）→ binder →
+ * ActivityRecord 持有 observer；截屏时 WMS 回调派发。双点吞噬
+ * （精确方法名，AOSP 标准形 + ColorOS 实证形）：
+ * - registerScreenCaptureObserver（AOSP 注册）：masked → 跳过注册
+ *   （observer 列表为空，派发无从发生；反注册为无遍历删除，客户端
+ *   void 调用无感知）；
+ * - dispatchScreenCaptureCallback（AOSP 派发）/ reportScreenCaptured
+ *   （ColorOS 15 派发，OEM 改名，实测）：masked → 吞噬——与注册路径
+ *   互为冗余覆盖。
+ * 查询形（isRegisteredForScreenCaptureCallback）不碰：吞噬查询会
+ * 破坏 WMS 内部派发判定。
  *
- * 【通道 2：媒体库 ContentObserver（全版本路径 + Shell 通道）】
+ * 【通道 2：媒体库 ContentObserver（激进检测过滤，全版本路径 + Shell 通道）】
  * 检测者监听 MediaStore.Images / Downloads（截图落盘 + screencap 落盘
  * Download/）。ContentService#registerContentObserver（system_server）：
- * 调用者 masked 且 URI 属媒体域（authority media/downloads）→ 静默跳过
- * 注册，observer 永不触发）。子域分诊：video 子路径归 [HookContext.maskRecordDetection]
- * （录屏录像，E2b 域），images/downloads 归 maskCaptureDetection——单一
- * ContentService hook 点两域分治（注册无法区分引擎，两引擎共用此腿）。
+ * 调用者开启激进过滤且 URI 属媒体域（authority media/downloads）→
+ * 静默跳过注册——注册/反注册 binder 调用正常返回（客户端零感知），
+ * observer 永不触发。激进过滤为 per-app 独立开关（应用详情页），
+ * 不依赖模板分配；开启即该应用媒体域监听全吞（含 video 子域——
+ * 检测者的截屏与录屏媒体库监听一并隐身，不再按域分诊）。
+ * 副作用：应用自身的媒体库变更感知同步失效（相册类自动刷新）——
+ * 「激进」语义。
  *
  * 与 E1 的组合语义：DENY 时截屏已被拒（媒体库无新增、secure 派发不发生），
  * 本引擎作用于 ALLOW/FOLLOW 下"截屏成功但检测者不应知晓"的场景。
@@ -44,13 +47,19 @@ object CaptureDetectionHook {
     /** 媒体域 authority（MediaStore 全系 + 旧版 Downloads provider） */
     private val MEDIA_AUTHORITIES = setOf("media", "downloads")
 
-    // ---- ActivityRecord 包名解析器链（install 期装配，事件期顺序取首个命中）----
-
-    private val pkgResolvers = ArrayList<(Any) -> String?>()
+    /**
+     * 吞噬目标（AOSP 标准形 + ColorOS 15 实证形；精确名匹配，
+     * 查询形 isRegistered* 不碰——见类注释）
+     */
+    private val AR_CAPTURE_METHODS = setOf(
+        "registerScreenCaptureObserver",
+        "dispatchScreenCaptureCallback",
+        "reportScreenCaptured",
+    )
 
     fun installSystemServer(classLoader: ClassLoader) {
         installActivityRecordLeg(classLoader)
-        installContentObserverLeg()
+        installContentObserverLeg(classLoader)
     }
 
     // ==================== 通道 1：ScreenCaptureCallback ====================
@@ -58,22 +67,24 @@ object CaptureDetectionHook {
     private fun installActivityRecordLeg(classLoader: ClassLoader) {
         runCatching {
             val arClass = classLoader.loadClass("com.android.server.wm.ActivityRecord")
-            buildPkgResolvers(arClass)
-            val candidates = hierarchyOf(arClass)
-                .flatMap { it.declaredMethods.toList() }
-                .filter { it.name.contains("ScreenCapture") }
-                .toList()
+            // ActivityRecord 继承 WindowToken：getOwningPackage 为 AOSP 标准
+            // 方法，跨 ROM 稳定（实测 ColorOS 15 命中）
+            val getOwningPackage = methodInHierarchy(arClass, "getOwningPackage")
+                ?.apply { isAccessible = true }
+            if (getOwningPackage == null) {
+                HookContext.log(Log.WARN, "E2a activityRecord leg abort: no getOwningPackage")
+                return
+            }
             var hooked = 0
-            candidates.forEach { m ->
-                val skip = when {
-                    m.name.startsWith("register") && m.parameterCount == 1 -> true
-                    m.name.startsWith("dispatch") && m.parameterCount == 0 -> true
-                    else -> false
-                }
-                if (skip) {
+            hierarchyOf(arClass)
+                .flatMap { it.declaredMethods.toList() }
+                .filter { it.name in AR_CAPTURE_METHODS }
+                .forEach { m ->
                     m.isAccessible = true
                     HookContext.hookE("E2a", m).intercept { chain ->
-                        val pkg = pkgOf(chain.thisObject)
+                        val pkg = runCatching {
+                            getOwningPackage.invoke(chain.thisObject) as? String
+                        }.getOrNull()
                         if (pkg != null && HookContext.maskCaptureDetection(pkg)) {
                             HookContext.log(Log.INFO, "E2a capture callback swallowed: $pkg")
                             null
@@ -83,58 +94,20 @@ object CaptureDetectionHook {
                     }
                     hooked++
                 }
-            }
             HookContext.log(
                 Log.INFO,
-                "E2a activityRecord: $hooked hooked of ${candidates.size} candidates, " +
-                        "resolvers=${pkgResolvers.size}"
+                "E2a activityRecord: $hooked hooked of ${AR_CAPTURE_METHODS.size} targets"
             )
-            if (hooked == 0 && candidates.isNotEmpty()) {
-                // OEM 改名校准弹药
-                HookContext.log(
-                    Log.INFO,
-                    "E2a probe: " + candidates.joinToString { "${it.name}(${it.parameterCount})" }
-                )
-            }
         }.onFailure { HookContext.log(Log.WARN, "E2a activityRecord leg error: ${it.message}") }
-    }
-
-    /** 包名解析器链：getOwningPackage / getPackageName / getComponent / 同名字段 */
-    private fun buildPkgResolvers(arClass: Class<*>) {
-        fun addMethod(name: String, unwrap: (Any) -> String?) {
-            methodInHierarchy(arClass, name)?.let { m ->
-                m.isAccessible = true
-                pkgResolvers.add { target ->
-                    runCatching { m.invoke(target) }.getOrNull()?.let(unwrap)
-                }
-            }
-        }
-        addMethod("getOwningPackage") { it as? String }
-        addMethod("getPackageName") { it as? String }
-        addMethod("getComponent") { (it as? ComponentName)?.packageName }
-        fieldInHierarchy(arClass, "packageName")?.let { f ->
-            pkgResolvers.add { target -> runCatching { f.get(target) as? String }.getOrNull() }
-        }
-        fieldInHierarchy(arClass, "mActivityComponent")?.let { f ->
-            pkgResolvers.add { target ->
-                runCatching { (f.get(target) as? ComponentName)?.packageName }.getOrNull()
-            }
-        }
-    }
-
-    private fun pkgOf(activityRecord: Any?): String? {
-        if (activityRecord == null) return null
-        for (resolve in pkgResolvers) {
-            runCatching { resolve(activityRecord) }.getOrNull()?.let { return it }
-        }
-        return null
     }
 
     // ==================== 通道 2：媒体库 ContentObserver ====================
 
-    private fun installContentObserverLeg() {
+    private fun installContentObserverLeg(classLoader: ClassLoader) {
         runCatching {
-            val csClass = Class.forName("android.content.ContentService")
+            // ColorOS 15 实测：ContentService 不在模块 CL 可见域（bare
+            // Class.forName CNFE），须经 system_server CL 装载
+            val csClass = classLoader.loadClass("android.content.ContentService")
             var hooked = 0
             csClass.declaredMethods.filter { it.name == "registerContentObserver" }.forEach { m ->
                 val uriIdx = m.parameterTypes.indexOfFirst { it == Uri::class.java }
@@ -151,14 +124,10 @@ object CaptureDetectionHook {
         }.onFailure { HookContext.log(Log.WARN, "E2a contentObserver leg error: ${it.message}") }
     }
 
-    /** 调用者 masked 且 URI 属媒体域：video → E2b 录屏域，其余 → E2a 截屏域 */
+    /** 开启激进过滤的调用者且 URI 属媒体域（media/downloads，含 video 子域） */
     private fun isMaskedMediaWatch(uri: Uri): Boolean {
         if (uri.authority !in MEDIA_AUTHORITIES) return false
-        val isVideo = uri.pathSegments?.any { it.equals("video", true) } == true
-        return HookContext.anyPkgForUid(Binder.getCallingUid()) { pkg ->
-            if (isVideo) HookContext.maskRecordDetection(pkg)
-            else HookContext.maskCaptureDetection(pkg)
-        }
+        return HookContext.anyPkgForUid(Binder.getCallingUid()) { HookContext.aggressiveFilter(it) }
     }
 
     // ==================== 反射工具 ====================
@@ -171,16 +140,6 @@ object CaptureDetectionHook {
         while (c != null) {
             val m = runCatching { c!!.getDeclaredMethod(name, *params) }.getOrNull()
             if (m != null) return m
-            c = c.superclass
-        }
-        return null
-    }
-
-    private fun fieldInHierarchy(cls: Class<*>, name: String): Field? {
-        var c: Class<*>? = cls
-        while (c != null) {
-            val f = runCatching { c!!.getDeclaredField(name) }.getOrNull()
-            if (f != null) return f
             c = c.superclass
         }
         return null

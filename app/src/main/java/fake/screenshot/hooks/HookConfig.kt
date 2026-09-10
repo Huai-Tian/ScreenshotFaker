@@ -33,6 +33,12 @@ data class HookTemplate(
     /** E2d：屏蔽悬浮窗检测（obscured 遮挡参与位 + TrustedPresentation） */
     val maskOverlayDetection: Boolean,
     /**
+     * E2d：屏蔽焦点检测（窗口焦点丢失信号隐瞒）。检测器的 FOCUS_LOSS
+     * 检测项与悬浮窗/小窗归因（FLOATING_WINDOW / FREEFORM_WINDOW）
+     * 共享焦点轮询信号源，任一开关启用即隐瞒派发——双开关语义同腿
+     */
+    val maskFocusDetection: Boolean = false,
+    /**
      * E4：自由浮窗穿透——小窗（WINDOWING_MODE_FREEFORM，含 OEM 小窗）
      * 模式下该应用窗口对截图/录屏隐身（skipScreenshot，露出下层内容）
      */
@@ -64,6 +70,15 @@ data class HookConfig(
     val templates: List<HookTemplate> = emptyList(),
     /** 包名 → 模板 id（显式映射；悬空引用按未配置处理） */
     val scope: Map<String, String> = emptyMap(),
+    /**
+     * E2a 激进检测过滤的包名集（应用详情页单独开关，独立于模板——
+     * 未分配模板的应用也可开启）。开启 = 该应用的媒体域
+     * ContentObserver 注册全部静默跳过（注册/反注册正常返回，回调
+     * 永不触发）：截屏媒体库监听、screencap 落盘监听全通道隐身。
+     * 副作用：应用自身的媒体库变更感知失效（相册类应用的自动刷新）
+     * ——「激进」语义，per-app 粒度即为此
+     */
+    val aggressiveFilter: Set<String> = emptySet(),
 ) {
     companion object {
         /** 全关默认态：与未安装模块的原生行为不可区分 */
@@ -135,12 +150,14 @@ object HookConfigCodec {
                         put("c", tpl.maskCaptureDetection)
                         put("b", tpl.maskRecordDetection)
                         put("o", tpl.maskOverlayDetection)
+                        put("x", tpl.maskFocusDetection)
                         put("f", tpl.pierceFreeform)
                         tpl.imageId?.let { img -> put("g", img) }
                     })
                 }
             })
             put("s", JSONObject(config.scope))
+            put("af", JSONArray(config.aggressiveFilter))
         }.toString()
 
         val nonce = ByteArray(NONCE_LEN).also { SecureRandom().nextBytes(it) }
@@ -185,6 +202,7 @@ object HookConfigCodec {
                         maskCaptureDetection = o.optBoolean("c"),
                         maskRecordDetection = o.optBoolean("b"),
                         maskOverlayDetection = o.optBoolean("o"),
+                        maskFocusDetection = o.optBoolean("x"),
                         pierceFreeform = o.optBoolean("f"),
                         imageId = o.optString("g").ifEmpty { null },
                     )
@@ -195,12 +213,19 @@ object HookConfigCodec {
             val o = json.optJSONObject("s") ?: JSONObject()
             o.keys().forEach { pkg -> o.optString(pkg).ifEmpty { return@forEach }.let { put(pkg, it) } }
         }
+        val aggressiveFilter = buildSet {
+            val arr = json.optJSONArray("af") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                arr.optString(i).ifEmpty { continue }.let { add(it) }
+            }
+        }
         return HookConfig(
             globalSecurePolicy = json.optInt("gp", HookConfig.SECURE_FOLLOW).coerceIn(0, 2),
             globalReplaceEnabled = json.optBoolean("re"),
             globalReplaceImage = json.optString("ri").ifEmpty { null },
             templates = templates,
             scope = scope,
+            aggressiveFilter = aggressiveFilter,
         )
     }
 }

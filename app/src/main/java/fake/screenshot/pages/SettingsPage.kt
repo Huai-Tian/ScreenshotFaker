@@ -72,7 +72,6 @@ fun SettingsCompose(navController: NavController) {
     val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
     val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
     val hideFromRecent by ConfigManager.rememberValue(context, "hide_from_recent", true)
-    val attemptFilter by ConfigManager.rememberValue(context, "attempt_filter", false)
     val definedTimestamp by ConfigManager.rememberValue(context, "defined_timestamp", "")
     var definedTimestampInputText by remember { mutableStateOf(definedTimestamp) }
     val daemonSocketPort by ConfigManager.rememberValue(
@@ -575,23 +574,6 @@ fun SettingsCompose(navController: NavController) {
                             else repackConfigDialog = true
                         }
                     )
-                }
-            }
-            if (Auxiliary.isModuleActivated) {
-                item {
-                    CommonCard {
-                        TwoStatePreference(
-                            icon = Icons.Default.Gavel,
-                            title = stringResource(R.string.aggressive_detection_filtering),
-                            subtitle = stringResource(R.string.filter_content_observer),
-                            checked = attemptFilter,
-                            onCheckedChange = {
-                                scope.launch {
-                                    ConfigManager.saveData(context, "attempt_filter", it)
-                                }
-                            }
-                        )
-                    }
                 }
             }
             item {

@@ -45,6 +45,7 @@ import fake.screenshot.Auxiliary.isModuleActivated
 import fake.screenshot.Auxiliary.isShellActivated
 import fake.screenshot.wrappers.TemplateManager
 import fake.screenshot.pages.AboutCompose
+import fake.screenshot.pages.AppDetailCompose
 import fake.screenshot.pages.ApplicationCompose
 import fake.screenshot.pages.DaemonStatusCompose
 import fake.screenshot.pages.ExtensionCompose
@@ -75,6 +76,7 @@ import fake.screenshot.defense.IdleWatchdog
 import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
+import fake.screenshot.wrappers.ReplaceImageManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -365,12 +367,15 @@ fun MainContent() {
             composable(AppDestinations.HOME.route) { HomeCompose() }
             composable(AppDestinations.SETTINGS.route) { SettingsCompose(navController) }
             composable(AppDestinations.TEMPLATE.route) { TemplateCompose(navController) }
-            composable(AppDestinations.APPLICATION.route) { ApplicationCompose() }
+            composable(AppDestinations.APPLICATION.route) { ApplicationCompose(navController) }
             composable("template_edit/{id}") { entry ->
                 TemplateEditCompose(navController, entry.arguments?.getString("id") ?: "")
             }
             composable("template_apps/{id}") { entry ->
                 TemplateAppsCompose(navController, entry.arguments?.getString("id") ?: "")
+            }
+            composable("app_detail/{pkg}") { entry ->
+                AppDetailCompose(navController, entry.arguments?.getString("pkg") ?: "")
             }
             composable(AppDestinations.EXTENSION.route) { ExtensionCompose() }
             composable("daemon_status") { DaemonStatusCompose() }
@@ -481,6 +486,8 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         // hook 配置导出 catch-up：补发服务未连接期间的全部配置变更
         //（TemplateManager 导出管道的时序闭环，详见其类注释）
         TemplateManager.onServiceBound(this)
+        // E3 替换图 catch-up：补投远程缺失 + 清孤儿（详见其注释）
+        ReplaceImageManager.onServiceBound(this)
     }
 
     override fun onServiceDied(service: XposedService) {
