@@ -3,7 +3,8 @@ package fake.screenshot.hooks
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplayConfig
+import android.os.Binder
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceControl
@@ -23,7 +24,9 @@ import java.lang.reflect.Modifier
  * - hook DMS#createVirtualDisplay（binder 入口，参数含 VirtualDisplayConfig）：
  *   AUTO_MIRROR 类 VD（MediaProjection 录屏标准形态）记录目标分辨率，
  *   供 mirror layer 创建时定假图层尺寸（buffer = VD 分辨率，假图拉伸
- *   铺满，无缺角露出真实内容）
+ *   铺满，无缺角露出真实内容）。系统内部 auto-mirror VD（ColorOS 下拉
+ *   控制中心实时屏幕背景等，mirror 树合成回真实屏幕）按 callingUid
+ *   排除——误挂会把替换图真实显示在系统 UI 上
  * - hook SurfaceControl#mirrorDisplay/#mirrorSurface（静态 hidden，
  *   auto-mirror VD 内容树的创建必经）：after 拿 mirror SurfaceControl，
  *   前台命中替换策略时创建 buffer layer 绘制假图，reparent 到
@@ -104,8 +107,13 @@ object ProjectionReplaceHook {
         }.onFailure { HookContext.log(Log.WARN, "E3b top-app chain unresolved: ${it.message}") }
 
         // ---- VirtualDisplayConfig 尺寸读取 ----
+        // 类为 API 34+（minSdk 30，编译期引用触发 NewApi lint）：反射解析，
+        // < 34 ROM 上 CNFE → null，下方 DMS 腿整体跳过（该签名不存在于旧 ROM）
+        val vdCfgClass = runCatching {
+            Class.forName("android.hardware.display.VirtualDisplayConfig")
+        }.getOrNull()
         runCatching {
-            val cfgClass = VirtualDisplayConfig::class.java
+            val cfgClass = vdCfgClass ?: return@runCatching
             cfgGetWidthM = cfgClass.getMethod("getWidth").apply { isAccessible = true }
             cfgGetHeightM = cfgClass.getMethod("getHeight").apply { isAccessible = true }
             cfgGetFlagsM = cfgClass.getMethod("getFlags").apply { isAccessible = true }
@@ -114,20 +122,29 @@ object ProjectionReplaceHook {
         var dmsHooked = 0
         // ---- DMS#createVirtualDisplay：AUTO_MIRROR VD 分辨率登记 ----
         runCatching {
+            val vdCfg = vdCfgClass ?: return@runCatching
             val dmsClass = classLoader.loadClass("com.android.server.display.DisplayManagerService")
             dmsClass.declaredMethods.filter { it.name == "createVirtualDisplay" }.forEach { m ->
-                val cfgIdx = m.parameterTypes.indexOfFirst { it == VirtualDisplayConfig::class.java }
+                val cfgIdx = m.parameterTypes.indexOfFirst { it == vdCfg }
                 if (cfgIdx < 0) return@forEach
                 m.isAccessible = true
                 HookContext.hookE("E3b", m).intercept { chain ->
                     val cfg = chain.args[cfgIdx] ?: return@intercept chain.proceed()
                     val flags = runCatching { cfgGetFlagsM?.invoke(cfg) as? Int }.getOrNull() ?: 0
                     if (flags and DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR != 0) {
-                        val w = runCatching { cfgGetWidthM?.invoke(cfg) as? Int }.getOrNull() ?: 0
-                        val h = runCatching { cfgGetHeightM?.invoke(cfg) as? Int }.getOrNull() ?: 0
-                        if (w > 0 && h > 0) {
-                            pendingDims = (w to h) to System.currentTimeMillis()
-                            HookContext.log(Log.INFO, "E3b auto-mirror VD registered ${w}x$h")
+                        // AUTO_MIRROR VD 不全是录屏：系统内部也建（ColorOS 15 实测
+                        // 下拉控制中心的"实时屏幕背景"即每次下拉创建 auto-mirror VD
+                        // + mirrorDisplay，其 mirror 树合成回真实屏幕）。若不区分，
+                        // 假图层会被挂到该 mirror 上——替换图真实显示在状态栏背景。
+                        // 判据：binder 调用方为 system（含 system_server 同进程内
+                        // 调用）或 SystemUI → 系统内部用途，不登记
+                        if (!isSystemMirrorCaller()) {
+                            val w = runCatching { cfgGetWidthM?.invoke(cfg) as? Int }.getOrNull() ?: 0
+                            val h = runCatching { cfgGetHeightM?.invoke(cfg) as? Int }.getOrNull() ?: 0
+                            if (w > 0 && h > 0) {
+                                pendingDims = (w to h) to System.currentTimeMillis()
+                                HookContext.log(Log.INFO, "E3b auto-mirror VD registered ${w}x$h")
+                            }
                         }
                     }
                     chain.proceed()
@@ -168,15 +185,17 @@ object ProjectionReplaceHook {
 
     // ==================== 假图层核心 ====================
 
-    /** mirror layer 就绪：消费 pending 尺寸，命中策略则挂假图层 */
+    /** mirror layer 就绪：消费 pending 尺寸，命中策略则挂假图层。
+     *  pending 为空 = 系统内部 mirror（未登记的 VD 或纯 mirrorDisplay 调用）
+     *  → 不挂也不记 lastMirror（防 reload 重挂污染系统 mirror） */
     private fun onMirrorCreated(mirrorSc: Any) {
-        lastMirror = mirrorSc
         val pending = pendingDims ?: return
         if (System.currentTimeMillis() - pending.second > PENDING_TTL_MS) {
             pendingDims = null
             return
         }
         pendingDims = null
+        lastMirror = mirrorSc
         overlayMirror(mirrorSc, pending.first.first, pending.first.second)
     }
 
@@ -253,6 +272,21 @@ object ProjectionReplaceHook {
 
     // ==================== 前台解析 ====================
 
+    /**
+     * 系统内部 mirror VD 判定：callingUid 为 system（binder 远端 system_server
+     * / system 共享 uid 应用，或 system_server 同进程内直调——此时 callingUid
+     * 恒为本进程 1000）或 SystemUI → true。其余（三方/OEM 录屏 app，
+     * uid 为普通应用段）→ false，按录屏会话登记。
+     * uid ≠ 1000 时即使包名解析失败也视为 app——auto-mirror VD 的 binder
+     * 调用方本身就是"应用请求录屏"语义，漏登记比误登记（假图上系统
+     * UI）的代价小
+     */
+    private fun isSystemMirrorCaller(): Boolean {
+        val uid = Binder.getCallingUid()
+        if (uid == Process.SYSTEM_UID) return true
+        return HookContext.anyPkgForUid(uid) { it == "com.android.systemui" }
+    }
+
     /** system_server 前台包名（getTopApp → processName）；失败 null → 全局图回落 */
     private fun topPackage(): String? = runCatching {
         val atm = getServiceM?.invoke(null, atmInternalClass) ?: return null
@@ -260,7 +294,11 @@ object ProjectionReplaceHook {
         wpcNameField?.get(top) as? String
     }.getOrNull()
 
-    /** 主屏物理分辨率（reload 重挂的尺寸兜底；解析失败放弃重挂） */
+    /** 主屏物理分辨率（reload 重挂的尺寸兜底；解析失败放弃重挂）。
+     *  getPhysicalDisplayIds/Token 在 blocklist（targetSdk 36 起 lint 拦截）——
+     *  本引擎仅运行于 system_server（Xposed 注入），隐藏 API 限制不适用，
+     *  与 Auxiliary.kt 同款豁免 */
+    @android.annotation.SuppressLint("BlockedPrivateApi")
     private fun displaySize(): Pair<Int, Int>? = runCatching {
         val scClass = Class.forName("android.view.SurfaceControl")
         val getM = scClass.getDeclaredMethod("getPhysicalDisplayIds").apply { isAccessible = true }

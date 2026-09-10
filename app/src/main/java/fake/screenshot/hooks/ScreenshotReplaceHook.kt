@@ -1,6 +1,7 @@
 package fake.screenshot.hooks
 
 import android.app.ActivityManager
+import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
@@ -49,7 +50,29 @@ object ScreenshotReplaceHook {
     /** ActivityThread.currentApplication（截屏进程 Application 取 context） */
     private var currentApplicationM: Method? = null
 
-    fun installScreenshotApp(@Suppress("UNUSED_PARAMETER") packageName: String, classLoader: ClassLoader) {
+    fun installScreenshotApp(packageName: String, classLoader: ClassLoader) {
+        // ---- 进程过滤（scope 泛滥防御第二轮）----
+        // LSPosed 按包授权：scope 含 com.android.systemui（为其 :screenshot
+        // 截屏子进程）时，主进程与 :tuner/:fgservices 等全部子进程都会进入
+        // 本安装路径。但 ColorOS 15 实测 SystemUI 主进程的
+        // SurfaceControl#screenshot 用于下拉状态栏"实时屏幕背景"——误装
+        // 会把替换图真实显示在屏幕上（下拉背景变替换图）。
+        // 判据：进程名含 "screenshot"（com.oplus.screenshot[/:activity]、
+        // com.android.systemui:screenshot/:appclips.screenshot、
+        // com.miui.screenshot 等截屏管线进程）或 Flyme 截屏载体
+        // com.flyme.systemuiex。其余（SystemUI 主进程/UI 子进程/
+        // com.oplus.appplatform——实测从未命中画面捕获）跳过。
+        // 已知边界：AOSP 原生截屏在 SystemUI 主进程，此判据下不装 →
+        // fail-open 原生截图（可见异常的代价高于功能缺失）
+        val processName = Application.getProcessName()
+        val isCaptureProcess =
+            processName.contains("screenshot", ignoreCase = true) ||
+                    processName == "com.flyme.systemuiex"
+        if (!isCaptureProcess) {
+            HookContext.log(Log.INFO, "E3a skipped for non-capture process $processName")
+            return
+        }
+
         ReplaceImageStore.ensureInstalled()
 
         currentApplicationM = runCatching {
