@@ -30,14 +30,24 @@ data class HookTemplate(
     val maskCaptureDetection: Boolean,
     /** E2b：屏蔽录屏检测（ScreenRecordingCallback 派发吞噬） */
     val maskRecordDetection: Boolean,
-    /** E2d：屏蔽悬浮窗检测（obscured 遮挡参与位 + TrustedPresentation） */
+    /**
+     * E2c：屏蔽悬浮窗检测（直接信号 = 触摸遮挡标志。模块自有悬浮窗标记
+     * trustedOverlay，FLAG_WINDOW_IS_OBSCURED / PARTIALLY_OBSCURED 失活。
+     * 检测者由焦点/用量等推理出的悬浮窗结论不在屏蔽范围——开关语义：
+     * 只屏蔽直接信号，逻辑推断不处理）
+     */
     val maskOverlayDetection: Boolean,
     /**
-     * E2d：屏蔽焦点检测（窗口焦点丢失信号隐瞒）。检测器的 FOCUS_LOSS
-     * 检测项与悬浮窗/小窗归因（FLOATING_WINDOW / FREEFORM_WINDOW）
-     * 共享焦点轮询信号源，任一开关启用即隐瞒派发——双开关语义同腿
+     * E2d：屏蔽焦点检测（直接信号 = 窗口焦点丢失。FOCUS_LOSS 失活；
+     * 悬浮窗/小窗归因若依赖焦点信号属推理链副作用，非本开关目标）
      */
     val maskFocusDetection: Boolean = false,
+    /**
+     * E2e：屏蔽窗口显示完整性检测（直接信号 = TrustedPresentation 回调，
+     * API 35+。SurfaceFlinger 计算的窗口实际渲染像素比例跌出阈值即
+     * 回调 false → WINDOW_NOT_FULLY_PRESENTED）
+     */
+    val maskPresentationDetection: Boolean = false,
     /**
      * E4：自由浮窗穿透——小窗（WINDOWING_MODE_FREEFORM，含 OEM 小窗）
      * 模式下该应用窗口对截图/录屏隐身（skipScreenshot，露出下层内容）
@@ -151,6 +161,7 @@ object HookConfigCodec {
                         put("b", tpl.maskRecordDetection)
                         put("o", tpl.maskOverlayDetection)
                         put("x", tpl.maskFocusDetection)
+                        put("w", tpl.maskPresentationDetection)
                         put("f", tpl.pierceFreeform)
                         tpl.imageId?.let { img -> put("g", img) }
                     })
@@ -203,6 +214,7 @@ object HookConfigCodec {
                         maskRecordDetection = o.optBoolean("b"),
                         maskOverlayDetection = o.optBoolean("o"),
                         maskFocusDetection = o.optBoolean("x"),
+                        maskPresentationDetection = o.optBoolean("w"),
                         pierceFreeform = o.optBoolean("f"),
                         imageId = o.optString("g").ifEmpty { null },
                     )

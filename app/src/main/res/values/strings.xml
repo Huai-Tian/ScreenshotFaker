@@ -105,6 +105,7 @@
     <string name="mask_record_detection">Block screen recording detection</string>
     <string name="mask_overlay_detection">Block overlay detection</string>
     <string name="mask_focus_detection">Block focus detection</string>
+    <string name="mask_presentation_detection">Block window presentation detection</string>
     <string name="freeform_pierce">Freeform window pierce</string>
     <string name="template_settings_title">Template settings</string>
     <string name="template_usage_hint">Create templates for apps that need screenshot restrictions, then assign templates to apps on the Application page.\n\nEach template controls: screenshot restrictions (follow / force allow / force deny), detection masking, and freeform window pierce. Unassigned apps fall back to the global screenshot restrictions.</string>
@@ -247,6 +248,7 @@
     <!--Style-->
     <string name="crop_icon">Crop icon</string>
     <string name="crop_replace_image">Crop image</string>
+    <string name="replace_image_read_failed">Cannot read the selected image</string>
     <string name="crop_icon_hint">Drag to reposition, pinch to zoom.</string>
     <!--Common-->
     <string name="start">Start</string>

@@ -94,19 +94,40 @@ object RecordDetectionHook {
             // ColorOS 15 实测：services.jar 类不在模块 CL 可见域（bare
             // Class.forName CNFE），须经 system_server CL 装载
             val dmsClass = classLoader.loadClass("com.android.server.display.DisplayManagerService")
-            getDisplayInfoM = dmsClass.declaredMethods
-                .firstOrNull { it.name == "getDisplayInfo" && it.parameterCount == 1 }
-                ?.apply { isAccessible = true }
+            // OEM 签名形变（ColorOS 15 实测单参 getDisplayInfo 不存在，多出
+            // callingUid/callingPackage 位）：宽容匹配 getDisplayInfo* 家族，
+            // 首参 int（displayId），任意参数数量
+            val infoCandidates = dmsClass.declaredMethods.filter {
+                it.name.startsWith("getDisplayInfo") &&
+                        it.parameterTypes.firstOrNull() == java.lang.Integer.TYPE
+            }
+            getDisplayInfoM = (infoCandidates.firstOrNull { it.parameterCount == 1 }
+                ?: infoCandidates.firstOrNull())?.apply { isAccessible = true }
             if (getDisplayInfoM == null) {
-                HookContext.log(Log.WARN, "E2b display leg abort: getDisplayInfo not found")
+                // OEM 校准弹药：DMS 的 Display 相关方法清单
+                val trace = dmsClass.declaredMethods
+                    .filter { it.name.contains("display", true) }
+                    .distinctBy { it.name }
+                    .joinToString { it.name }
+                HookContext.log(Log.WARN, "E2b display leg abort: getDisplayInfo not found; methods: $trace")
                 return
             }
             displayInfoTypeField = runCatching {
                 getDisplayInfoM!!.returnType.getField("type")
             }.getOrNull()
+            if (displayInfoTypeField == null) {
+                // OEM 校准弹药：DisplayInfo 字段清单（type 被改名/移除时）
+                val fTrace = getDisplayInfoM!!.returnType.declaredFields.joinToString { it.name }
+                HookContext.log(Log.WARN, "E2b display: info type field missing; fields: $fTrace")
+            }
 
             var hookedIds = 0
-            dmsClass.declaredMethods.filter { it.name == "getDisplayIds" }.forEach { m ->
+            // OEM 签名形变（ColorOS 15 实测 getDisplayIds 精确名 0 命中）：
+            // 宽容匹配返回 IntArray 且名含 DisplayId 的方法族
+            val idsCandidates = dmsClass.declaredMethods.filter {
+                it.name.contains("DisplayId", true) && it.returnType == IntArray::class.java
+            }
+            idsCandidates.forEach { m ->
                 m.isAccessible = true
                 HookContext.hookE("E2b", m).intercept { chain ->
                     val ids = chain.proceed() as? IntArray ?: return@intercept null
@@ -120,28 +141,34 @@ object RecordDetectionHook {
                 }
                 hookedIds++
             }
+            if (hookedIds == 0) {
+                // OEM 校准弹药：DMS 返回数组的方法清单（id 列表被改名时）
+                val trace = dmsClass.declaredMethods
+                    .filter { it.returnType.isArray }
+                    .distinctBy { it.name }
+                    .joinToString { it.name }
+                HookContext.log(Log.WARN, "E2b display: 0 id-lists; array methods: $trace")
+            }
 
             var hookedInfo = 0
-            dmsClass.declaredMethods
-                .filter { it.name == "getDisplayInfo" && it.parameterCount == 1 }
-                .forEach { m ->
-                    m.isAccessible = true
-                    HookContext.hookE("E2b", m).intercept { chain ->
-                        // 重入旁路：getDisplayIds 过滤中的探测调用直通
-                        if (filtering.get() == true) return@intercept chain.proceed()
-                        val info = chain.proceed() ?: return@intercept null
-                        if (!callerMasked()) return@intercept info
-                        // 直接判定已取到的 info（不得反射再调 getDisplayInfo——同线程同 uid 会重入本 hook）
-                        val type = runCatching { displayInfoTypeField?.getInt(info) }.getOrNull()
-                        if (type != null && type in HIDDEN_DISPLAY_TYPES) {
-                            HookContext.log(Log.INFO, "E2b virtual display hidden from masked caller")
-                            null
-                        } else {
-                            info
-                        }
+            infoCandidates.forEach { m ->
+                m.isAccessible = true
+                HookContext.hookE("E2b", m).intercept { chain ->
+                    // 重入旁路：getDisplayIds 过滤中的探测调用直通
+                    if (filtering.get() == true) return@intercept chain.proceed()
+                    val info = chain.proceed() ?: return@intercept null
+                    if (!callerMasked()) return@intercept info
+                    // 直接判定已取到的 info（不得反射再调 getDisplayInfo——同线程同 uid 会重入本 hook）
+                    val type = runCatching { displayInfoTypeField?.getInt(info) }.getOrNull()
+                    if (type != null && type in HIDDEN_DISPLAY_TYPES) {
+                        HookContext.log(Log.INFO, "E2b virtual display hidden from masked caller")
+                        null
+                    } else {
+                        info
                     }
-                    hookedInfo++
                 }
+                hookedInfo++
+            }
             HookContext.log(Log.INFO, "E2b display: $hookedIds id-lists, $hookedInfo info paths hooked")
         }.onFailure { HookContext.log(Log.WARN, "E2b display leg error: ${it.message}") }
     }

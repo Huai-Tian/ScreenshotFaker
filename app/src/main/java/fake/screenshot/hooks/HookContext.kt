@@ -75,7 +75,52 @@ object HookContext {
         config = HookConfigCodec.decode(raw)
         // 有状态引擎（surface 上留有标记类副作用）按新配置重算，如 E4
         reloadListeners.forEach { runCatching(it) }
+        if (raw != null) {
+            configSynced = true
+            log(Log.INFO, "config synced (templates=${config.templates.size})")
+        } else {
+            // 热重载时序竞争（实测：连续热重载后 RemotePreferences 桥推送
+            // 丢失，config 停留 DEFAULT → 全引擎判定静默失效）：退避重拉
+            scheduleConfigRetry()
+        }
     }
+
+    /** 配置是否已从远端同步（false = 停留 DEFAULT，触发退避重拉） */
+    @Volatile
+    private var configSynced = false
+
+    /** 退避重拉（1s/2s/4s/8s/16s；期间收到推送则 configSynced=true 退出） */
+    private fun scheduleConfigRetry() {
+        if (configSynced || retryScheduled) return
+        synchronized(this) {
+            if (configSynced || retryScheduled) return
+            retryScheduled = true
+        }
+        Thread({
+            for (i in 0 until 5) {
+                runCatching { Thread.sleep(1000L shl i) }
+                if (configSynced) break
+                log(Log.WARN, "config retry #${i + 1} (still unsynced)")
+                val ok = runCatching {
+                    val raw = prefs?.getString(HookConfigCodec.REMOTE_KEY, null)
+                    if (raw != null) {
+                        config = HookConfigCodec.decode(raw)
+                        reloadListeners.forEach { runCatching(it) }
+                        configSynced = true
+                        true
+                    } else false
+                }.getOrDefault(false)
+                if (ok) {
+                    log(Log.INFO, "config retry synced (templates=${config.templates.size})")
+                    break
+                }
+            }
+            retryScheduled = false
+        }, "sf-config-retry").apply { isDaemon = true }.start()
+    }
+
+    @Volatile
+    private var retryScheduled = false
 
     /** 配置重载监听（引擎订阅；同为 listener，热重载时随 prefs 一并清理） */
     private val reloadListeners = CopyOnWriteArraySet<() -> Unit>()
@@ -111,13 +156,25 @@ object HookContext {
     fun maskRecordDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskRecordDetection ?: false
 
-    /** E2d：检测者的遮挡/呈现侦听信号是否剥离 */
+    /** E2c：检测者的悬浮窗直接信号是否屏蔽（触摸遮挡标志） */
     fun maskOverlayDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskOverlayDetection ?: false
 
-    /** E2d：检测者的窗口焦点丢失信号是否隐瞒（与悬浮窗归因共享信号源） */
+    /**
+     * E2c 生效条件：任一模板启用悬浮窗屏蔽。trustedOverlay 是模块自有
+     * 窗口的属性，作用于全部下方窗口——无法按检测者包名区分，故任一
+     * 开启即全局标记（开关语义见 OverlayStealthHook 头注释）
+     */
+    fun anyOverlayMaskOn(): Boolean =
+        config.templates.any { it.maskOverlayDetection }
+
+    /** E2d：检测者的窗口焦点丢失信号是否隐瞒（仅焦点直接信号） */
     fun maskFocusDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskFocusDetection ?: false
+
+    /** E2e：检测者的可信呈现信号是否屏蔽（窗口显示完整性） */
+    fun maskPresentationDetection(pkg: String?): Boolean =
+        config.templateFor(pkg)?.maskPresentationDetection ?: false
 
     /**
      * E2a：激进检测过滤（媒体域 ContentObserver 注册全吞）。

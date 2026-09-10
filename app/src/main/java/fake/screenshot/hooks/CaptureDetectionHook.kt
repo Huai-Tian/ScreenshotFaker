@@ -3,6 +3,7 @@ package fake.screenshot.hooks
 import android.net.Uri
 import android.os.Binder
 import android.util.Log
+import java.lang.reflect.Field
 import java.lang.reflect.Method
 
 /**
@@ -47,6 +48,26 @@ object CaptureDetectionHook {
     /** 媒体域 authority（MediaStore 全系 + 旧版 Downloads provider） */
     private val MEDIA_AUTHORITIES = setOf("media", "downloads")
 
+    // ---- ActivityRecord 归属解析缓存（install 解析一次，ownerMasked 消费）----
+
+    /** WindowToken#getOwningPackage（AOSP 方法候选） */
+    private var getOwningPackage: Method? = null
+
+    /** ActivityRecord#mPackageName（AOSP 字段候选） */
+    private var pkgField: Field? = null
+
+    /** ActivityRecord#getUid（AOSP 方法候选） */
+    private var uidMethod: Method? = null
+
+    /** ActivityRecord#mUid（字段候选） */
+    private var uidField: Field? = null
+
+    /** WindowToken#getOwnerUid（方法候选） */
+    private var ownerUidMethod: Method? = null
+
+    /** WindowToken#mOwnerUid（字段候选） */
+    private var ownerUidField: Field? = null
+
     /**
      * 吞噬目标（AOSP 标准形 + ColorOS 15 实证形；精确名匹配，
      * 查询形 isRegistered* 不碰——见类注释）
@@ -67,12 +88,26 @@ object CaptureDetectionHook {
     private fun installActivityRecordLeg(classLoader: ClassLoader) {
         runCatching {
             val arClass = classLoader.loadClass("com.android.server.wm.ActivityRecord")
-            // ActivityRecord 继承 WindowToken：getOwningPackage 为 AOSP 标准
-            // 方法，跨 ROM 稳定（实测 ColorOS 15 命中）
-            val getOwningPackage = methodInHierarchy(arClass, "getOwningPackage")
+            // 归属解析链（ColorOS 15 实测 getOwningPackage 方法与 mPackageName
+            // 字段均被 OEM 移除）：包名方法 → 包名字段 → uid 方法（getUid，
+            // AOSP ActivityRecord 标准公开）→ uid 字段（mUid）→ WindowToken
+            // ownerUid 方法/字段；uid 结果经 IPackageManager 反查包名集合
+            getOwningPackage = methodInHierarchy(arClass, "getOwningPackage")
                 ?.apply { isAccessible = true }
-            if (getOwningPackage == null) {
-                HookContext.log(Log.WARN, "E2a activityRecord leg abort: no getOwningPackage")
+            pkgField = fieldInHierarchy(arClass, "mPackageName")?.apply { isAccessible = true }
+            uidMethod = methodInHierarchy(arClass, "getUid")?.apply { isAccessible = true }
+            uidField = fieldInHierarchy(arClass, "mUid")?.apply { isAccessible = true }
+            ownerUidMethod = methodInHierarchy(arClass, "getOwnerUid")?.apply { isAccessible = true }
+            ownerUidField = fieldInHierarchy(arClass, "mOwnerUid")?.apply { isAccessible = true }
+            if (getOwningPackage == null && pkgField == null && uidMethod == null &&
+                uidField == null && ownerUidMethod == null && ownerUidField == null
+            ) {
+                // OEM 校准弹药：ActivityRecord 链字段清单（归属解析全灭时）
+                val fTrace = hierarchyOf(arClass)
+                    .flatMap { it.declaredFields.toList() }
+                    .filter { it.type == String::class.java || it.type == Int::class.javaPrimitiveType }
+                    .joinToString { "${it.name}:${it.type.simpleName}" }
+                HookContext.log(Log.WARN, "E2a activityRecord leg abort: no owner resolution; fields: $fTrace")
                 return
             }
             var hooked = 0
@@ -82,11 +117,8 @@ object CaptureDetectionHook {
                 .forEach { m ->
                     m.isAccessible = true
                     HookContext.hookE("E2a", m).intercept { chain ->
-                        val pkg = runCatching {
-                            getOwningPackage.invoke(chain.thisObject) as? String
-                        }.getOrNull()
-                        if (pkg != null && HookContext.maskCaptureDetection(pkg)) {
-                            HookContext.log(Log.INFO, "E2a capture callback swallowed: $pkg")
+                        if (ownerMasked(chain.thisObject)) {
+                            HookContext.log(Log.INFO, "E2a capture callback swallowed (owner resolved)")
                             null
                         } else {
                             chain.proceed()
@@ -94,20 +126,56 @@ object CaptureDetectionHook {
                     }
                     hooked++
                 }
-            HookContext.log(
-                Log.INFO,
-                "E2a activityRecord: $hooked hooked of ${AR_CAPTURE_METHODS.size} targets"
-            )
+            if (hooked == 0) {
+                // OEM 校准弹药：ActivityRecord 链上含 capture 语义的方法清单
+                val trace = hierarchyOf(arClass)
+                    .flatMap { it.declaredMethods.toList() }
+                    .filter { it.name.contains("apture", true) }
+                    .joinToString { "${it.name}(${it.parameterCount})" }
+                HookContext.log(Log.WARN, "E2a activityRecord: 0 hooked; capture-ish: $trace")
+            } else {
+                val via = listOfNotNull(
+                    "pkg-method" to (getOwningPackage != null),
+                    "pkg-field" to (pkgField != null),
+                    "uid-method" to (uidMethod != null),
+                    "uid-field" to (uidField != null),
+                    "ownerUid-method" to (ownerUidMethod != null),
+                    "ownerUid-field" to (ownerUidField != null),
+                ).filter { it.second }.joinToString { it.first }
+                HookContext.log(
+                    Log.INFO,
+                    "E2a activityRecord: $hooked hooked of ${AR_CAPTURE_METHODS.size} targets (owner via $via)"
+                )
+            }
         }.onFailure { HookContext.log(Log.WARN, "E2a activityRecord leg error: ${it.message}") }
     }
+
+    /** ActivityRecord 归属命中检测屏蔽：包名直判 → uid 反查包名集任一命中 */
+    private fun ownerMasked(ar: Any?): Boolean = runCatching {
+        (getOwningPackage?.invoke(ar) as? String)?.let { return@runCatching HookContext.maskCaptureDetection(it) }
+        (pkgField?.get(ar) as? String)?.let { return@runCatching HookContext.maskCaptureDetection(it) }
+        val uid = (uidMethod?.invoke(ar) as? Int)
+            ?: (uidField?.get(ar) as? Int)
+            ?: (ownerUidMethod?.invoke(ar) as? Int)
+            ?: (ownerUidField?.get(ar) as? Int)
+            ?: return@runCatching false
+        HookContext.anyPkgForUid(uid) { HookContext.maskCaptureDetection(it) }
+    }.getOrDefault(false)
 
     // ==================== 通道 2：媒体库 ContentObserver ====================
 
     private fun installContentObserverLeg(classLoader: ClassLoader) {
         runCatching {
-            // ColorOS 15 实测：ContentService 不在模块 CL 可见域（bare
-            // Class.forName CNFE），须经 system_server CL 装载
-            val csClass = classLoader.loadClass("android.content.ContentService")
+            // ColorOS 15 实测：ContentService 既不在模块 CL 可见域（bare
+            // Class.forName CNFE），也不在 system_server 服务 CL 的委托链
+            // （loadClass CNFE——该 CL 仅 services.jar/apex 服务模块）。
+            // 改走实例反查：system_server 进程内 getService("content") 返回
+            // 本进程注册的本地 Binder（ContentService 实例自身），javaClass
+            // 即运行类，绕开全部 classloader 结构问题
+            val csClass = resolveContentServiceClass(classLoader) ?: run {
+                HookContext.log(Log.WARN, "E2a contentObserver leg abort: no ContentService")
+                return
+            }
             var hooked = 0
             csClass.declaredMethods.filter { it.name == "registerContentObserver" }.forEach { m ->
                 val uriIdx = m.parameterTypes.indexOfFirst { it == Uri::class.java }
@@ -120,8 +188,31 @@ object CaptureDetectionHook {
                 }
                 hooked++
             }
-            HookContext.log(Log.INFO, "E2a contentObserver: $hooked register paths hooked")
+            if (hooked == 0) {
+                HookContext.log(
+                    Log.WARN,
+                    "E2a contentObserver: 0 hooked; register-ish: " +
+                            csClass.declaredMethods.filter { it.name.startsWith("register") }
+                                .joinToString { it.name }
+                )
+            } else {
+                HookContext.log(Log.INFO, "E2a contentObserver: $hooked register paths hooked (${csClass.name})")
+            }
         }.onFailure { HookContext.log(Log.WARN, "E2a contentObserver leg error: ${it.message}") }
+    }
+
+    /** ContentService 运行类解析：本地 binder 实例反查 → system_server CL 回落 */
+    private fun resolveContentServiceClass(classLoader: ClassLoader): Class<*>? {
+        runCatching {
+            val binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String::class.java)
+                .invoke(null, "content")
+            // 本地 Binder 实例（非 BinderProxy）即服务实现，且须含目标方法
+            if (binder != null && binder.javaClass.name != "android.os.BinderProxy" &&
+                binder.javaClass.declaredMethods.any { it.name == "registerContentObserver" }
+            ) return binder.javaClass
+        }
+        return runCatching { classLoader.loadClass("android.content.ContentService") }.getOrNull()
     }
 
     /** 开启激进过滤的调用者且 URI 属媒体域（media/downloads，含 video 子域） */
@@ -134,6 +225,19 @@ object CaptureDetectionHook {
 
     private fun hierarchyOf(cls: Class<*>): Sequence<Class<*>> =
         generateSequence(cls) { it.superclass }
+
+    private fun fieldInHierarchy(cls: Class<*>, name: String): Field? {
+        var c: Class<*>? = cls
+        while (c != null) {
+            val f = runCatching { c!!.getDeclaredField(name) }.getOrNull()
+            if (f != null) {
+                f.isAccessible = true
+                return f
+            }
+            c = c.superclass
+        }
+        return null
+    }
 
     private fun methodInHierarchy(cls: Class<*>, name: String, vararg params: Class<*>): Method? {
         var c: Class<*>? = cls

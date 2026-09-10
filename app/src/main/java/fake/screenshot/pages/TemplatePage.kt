@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -32,7 +33,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
@@ -61,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -115,7 +116,12 @@ fun TemplateCompose(navController: NavController) {
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) scope.launch {
-            pendingCrop = decodeForCrop(context, uri)
+            val bmp = decodeForCrop(context, uri)
+            if (bmp != null) {
+                pendingCrop = bmp
+            } else {
+                Toast.makeText(context, R.string.replace_image_read_failed, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -331,16 +337,24 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        if (uri != null) scope.launch { pendingCrop = decodeForCrop(context, uri) }
+        if (uri != null) scope.launch {
+            val bmp = decodeForCrop(context, uri)
+            if (bmp != null) {
+                pendingCrop = bmp
+            } else {
+                Toast.makeText(context, R.string.replace_image_read_failed, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     key(editing?.id ?: "") {
         var name by remember { mutableStateOf(editing?.name ?: "") }
-        var policy by remember { mutableStateOf(editing?.securePolicy ?: HookConfig.SECURE_FOLLOW) }
+        var policy by remember { mutableIntStateOf(editing?.securePolicy ?: HookConfig.SECURE_FOLLOW) }
         var maskCapture by remember { mutableStateOf(editing?.maskCaptureDetection ?: false) }
         var maskRecord by remember { mutableStateOf(editing?.maskRecordDetection ?: false) }
         var maskOverlay by remember { mutableStateOf(editing?.maskOverlayDetection ?: false) }
         var maskFocus by remember { mutableStateOf(editing?.maskFocusDetection ?: false) }
+        var maskPresentation by remember { mutableStateOf(editing?.maskPresentationDetection ?: false) }
         var pierceFreeform by remember { mutableStateOf(editing?.pierceFreeform ?: false) }
         var imageId by remember { mutableStateOf(editing?.imageId) }
 
@@ -384,6 +398,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 maskRecordDetection = maskRecord,
                                 maskOverlayDetection = maskOverlay,
                                 maskFocusDetection = maskFocus,
+                                maskPresentationDetection = maskPresentation,
                                 pierceFreeform = pierceFreeform,
                                 imageId = imageId,
                             )
@@ -481,6 +496,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                 SwitchRow(stringResource(R.string.mask_record_detection), maskRecord) { maskRecord = it }
                 SwitchRow(stringResource(R.string.mask_overlay_detection), maskOverlay) { maskOverlay = it }
                 SwitchRow(stringResource(R.string.mask_focus_detection), maskFocus) { maskFocus = it }
+                SwitchRow(stringResource(R.string.mask_presentation_detection), maskPresentation) { maskPresentation = it }
                 SwitchRow(stringResource(R.string.freeform_pierce), pierceFreeform) { pierceFreeform = it }
             }
         }
@@ -614,7 +630,7 @@ private fun TemplateReplaceRow(
 private fun featureIcon(tpl: HookTemplate): ImageVector = when {
     tpl.pierceFreeform -> Icons.Filled.PictureInPictureAlt
     tpl.maskCaptureDetection || tpl.maskRecordDetection || tpl.maskOverlayDetection ||
-            tpl.maskFocusDetection ->
+            tpl.maskFocusDetection || tpl.maskPresentationDetection ->
         Icons.Filled.VisibilityOff
     tpl.securePolicy == HookConfig.SECURE_DENY -> Icons.Filled.Lock
     tpl.securePolicy == HookConfig.SECURE_ALLOW -> Icons.Filled.LockOpen
@@ -718,28 +734,32 @@ private suspend fun importReplaceImage(context: Context, config: HookConfig, bit
 }
 
 /**
- * 裁剪前解码：bounds 探测 + inSampleSize 降采样（长边 ≤ 4096，防
- * 50MP 原图直接解码 ~200MB OOM；4096 已超任何手机屏分辨率，替换图
- * 场景无质量损失感知）。失败返回 null（损坏/非图片静默丢弃）
+ * 裁剪前解码：单次读流 + bounds 探测 + inSampleSize 降采样（长边 ≤ 4096，
+ * 防 50MP 原图直接解码 ~200MB OOM；4096 已超任何手机屏分辨率，替换图
+ * 场景无质量损失感知）。失败返回 null（调用方 Toast 提示——损坏/无授权/
+ * 单读 provider 均可见，不静默）
+ *
+ * 单次读流的原因：bounds 探测与实际解码不能对同一 URI openInputStream
+ * 两次——部分 OEM 相册 provider（ColorOS 回落选择器实测）的流是一次性
+ * 的，第二次打开返回 null → 解码失败静默丢弃 → 裁剪页不弹（round 1
+ * 实测 bug）。读入 byte[] 后两次 decodeByteArray 共用同一份字节
  */
 private suspend fun decodeForCrop(context: Context, uri: Uri): Bitmap? =
     withContext(Dispatchers.IO) {
         runCatching {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return@runCatching null
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, bounds)
-            } ?: return@runCatching null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
             var sample = 1
             while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 4096) {
                 sample *= 2
             }
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                BitmapFactory.decodeStream(
-                    input, null,
-                    BitmapFactory.Options().apply { inSampleSize = sample }
-                )
-            }
+            BitmapFactory.decodeByteArray(
+                bytes, 0, bytes.size,
+                BitmapFactory.Options().apply { inSampleSize = sample }
+            )
         }.getOrNull()
     }
 
@@ -813,5 +833,6 @@ private fun masksCount(tpl: HookTemplate): Int =
         tpl.maskCaptureDetection,
         tpl.maskRecordDetection,
         tpl.maskOverlayDetection,
-        tpl.maskFocusDetection
+        tpl.maskFocusDetection,
+        tpl.maskPresentationDetection
     ).count { it }

@@ -7,7 +7,11 @@ import fake.screenshot.hooks.FreeformPierceHook
 import fake.screenshot.hooks.HookContext
 import fake.screenshot.hooks.HookContext.ProcessKind
 import fake.screenshot.hooks.FocusStealthHook
+import fake.screenshot.hooks.OverlayStealthHook
+import fake.screenshot.hooks.PresentationStealthHook
+import fake.screenshot.hooks.ProjectionReplaceHook
 import fake.screenshot.hooks.RecordDetectionHook
+import fake.screenshot.hooks.ScreenshotReplaceHook
 import fake.screenshot.hooks.SecurePolicyHook
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam
@@ -94,17 +98,29 @@ class ScreenshotFaker : XposedModule() {
                 // + 虚拟显示器存在性隐身（检测者）
                 runCatching { RecordDetectionHook.installSystemServer(p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E2b install failed", it) }
-                // E2d FocusStealthHook —— 焦点丢失隐瞒（悬浮窗/小窗归因
-                // 与 FOCUS_LOSS 共享焦点轮询信号源，一并失活；检测者）
+                // E2c OverlayStealthHook —— 悬浮窗直接信号屏蔽：模块自有
+                // 窗口标记 trustedOverlay，触摸遮挡标志失活（检测者）
+                runCatching { OverlayStealthHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E2c install failed", it) }
+                // E2d FocusStealthHook —— 焦点丢失隐瞒（仅 FOCUS_LOSS 直接
+                // 信号；检测者的推理链路不处理）
                 runCatching { FocusStealthHook.installSystemServer(p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E2d install failed", it) }
+                // E2e PresentationStealthHook —— 可信呈现信号屏蔽
+                // （TrustedPresentation 派发改写，API 35+；检测者）
+                runCatching { PresentationStealthHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E2e install failed", it) }
                 // E3b ProjectionReplaceHook—— MediaProjection 虚拟屏假图层（全局）
+                runCatching { ProjectionReplaceHook.installSystemServer(p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E3b install failed", it) }
             }
             ProcessKind.SCREENSHOT_APP -> {
                 // E1 SecurePolicyHook（捕获管线放行腿，仅 ALLOW 态激活）
                 runCatching { SecurePolicyHook.installScreenshotApp(p.first, p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E1 install failed for ${p.first}", it) }
                 // E3a ScreenshotReplaceHook —— 截图族 API 拦截返回模板图（前台者选图）
+                runCatching { ScreenshotReplaceHook.installScreenshotApp(p.first, p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E3a install failed for ${p.first}", it) }
             }
             ProcessKind.OTHER -> return
         }
