@@ -1,13 +1,10 @@
 package fake.screenshot.hooks
 
-import android.app.ActivityManager
 import android.app.Application
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.hardware.HardwareBuffer
 import android.util.Log
-import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 
 /**
@@ -32,10 +29,10 @@ import java.lang.reflect.Modifier
  * - 【OEM buffer 腿】`ScreenshotHardwareBuffer#asBitmap`（AOSP 存在
  *   则 hook，ColorOS 15 的 OplusScreenCapture 若经此转换即命中）
  *
- * 前台解析：截屏应用为特权系统进程，ActivityManager 任务查询可用；
- * 触发形态（三指/快捷球）不切换前台，从截屏应用自身界面触发时跳过
- * 自己人（[HookContext.SCREENSHOT_PACKAGES]）取下层任务。解析失败
- * → null → 全局图回落（replacementImageId(null)），再失败 fail-open。
+ * 前台解析：共用 [HookContext.screenshotForegroundPackage] 的
+ * getRunningTasks 特权查询（E1 system_server 腿 getTasks 白名单放行，
+ * 跳过截屏应用自己人）。解析失败 → null → 全局图回落
+ * （replacementImageId(null)），再失败 fail-open。
  *
  * fail-open 全链：无策略 / 无图 / 解码失败 → 原生结果原样返回——
  * 替换功能绝不阻断截屏流程本身（截屏失败比真内容更可疑）。
@@ -53,11 +50,6 @@ object ScreenshotReplaceHook {
 
     /** 冷启动配置竞态的有界等待上限（覆盖实测 ~1.25s 推送延迟 + 余量） */
     private const val COLD_CONFIG_WAIT_MS = 2000L
-
-    // ---- 反射单点缓存（install 解析一次）----
-
-    /** ActivityThread.currentApplication（截屏进程 Application 取 context） */
-    private var currentApplicationM: Method? = null
 
     fun installScreenshotApp(packageName: String, classLoader: ClassLoader) {
         // ---- 进程过滤（scope 泛滥防御第二轮）----
@@ -83,11 +75,6 @@ object ScreenshotReplaceHook {
         }
 
         ReplaceImageStore.ensureInstalled()
-
-        currentApplicationM = runCatching {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication").apply { isAccessible = true }
-        }.getOrNull()
 
         var hooked = 0
         // 【腿 1】SurfaceControl#screenshot（返回 Bitmap 的静态重载族）
@@ -173,19 +160,9 @@ object ScreenshotReplaceHook {
     // ==================== 前台解析 ====================
 
     /**
-     * 截屏瞬间的前台包名（特权任务查询）。从截屏应用自身界面触发时
-     * top 是自己人——跳过 SCREENSHOT_PACKAGES 取下层任务。解析失败
-     * null（replacementImageId(null) = 全局图回落）
+     * 截屏瞬间的前台包名，共用 [HookContext.screenshotForegroundPackage]
+     * 的 getRunningTasks 特权查询。解析失败 null
+     * （replacementImageId(null) = 全局图回落）
      */
-    private fun foregroundPackage(): String? = runCatching {
-        val app = currentApplicationM?.invoke(null) as? Context ?: return null
-        val am = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
-        // getRunningTasks：deprecated 但保留且截屏特权进程可查（top task +
-        // 下层一条，跳过截屏应用自身取被截应用）
-        @Suppress("DEPRECATION")
-        val tasks = am.getRunningTasks(2)
-        tasks.asSequence()
-            .mapNotNull { it.topActivity?.packageName }
-            .firstOrNull { it !in HookContext.SCREENSHOT_PACKAGES }
-    }.getOrNull()
+    private fun foregroundPackage(): String? = HookContext.screenshotForegroundPackage()
 }

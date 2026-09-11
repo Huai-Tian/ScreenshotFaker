@@ -1,7 +1,9 @@
 package fake.screenshot.hooks
 
 import android.annotation.SuppressLint
+import android.os.Binder
 import android.os.Build
+import android.os.Process
 import android.util.Log
 import java.lang.reflect.Constructor
 import java.lang.reflect.Field
@@ -15,8 +17,26 @@ import java.util.function.BiPredicate
 /**
  * E1 截屏限制引擎（三态：FOLLOW 跟随应用 / ALLOW 强制允许 / DENY 强制禁止）。
  *
+ * 策略解析三层口径（两次实测踩坑校准）：
+ * - 窗口层（isSecureLocked / DENY reconcile）：仅消费显式模板策略
+ *   （[HookContext.templateSecurePolicy]，null = 原生 FLAG_SECURE）。
+ *   全局 DENY 不打窗口层 SF secure 标记——实测 ColorOS 15：全局 DENY
+ *   给 systemui/launcher/壁纸打 secure 后，截屏应用特权捕获
+ *   （uid -334 captureLayers）被 SurfaceFlinger 以 -22(EINVAL) 物理
+ *   拒绝，管线在捕获层即断，判定层根本没机会放行前台 ALLOW 应用。
+ *   显式模板 DENY 的窗口层标记（FLAG_SECURE 模拟，MediaProjection/
+ *   adb 物理拦截）语义不变
+ * - 截屏判定层（captureFlags / containsSecureLayers / OEM 腿）：按
+ *   前台应用单值解析（[foregroundPolicy]，显式模板 → 全局三态）——
+ *   前台模板 ALLOW → 放行强制捕获；前台 DENY / 全局 DENY → 捕获成
+ *   功但不保存（判定层落闸）。锚定源按进程：system_server 取
+ *   WMS.mCurrentFocus owner，截屏应用取 getRunningTasks 特权查询
+ *   （跳过截屏应用自身）；解析失败回落全局态 fail-safe。已知边界：
+ *   控制中心/通知栏等系统浮层持焦时锚定取到系统包（回落全局态）；
+ *   MediaProjection 物理拦截维持窗口层口径。
+ *
  * 两腿架构（对标 DFS hookSystemServer/hookPackage 实测矩阵，ColorOS 15 / A35
- * 为首验目标；DFS 无条件放行处，本引擎一律以"存在 ALLOW 态"为门控）：
+ * 为首验目标；DFS 无条件放行处，本引擎一律以"前台 ALLOW 态"为门控）：
  *
  * 【system_server 腿】
  * - WindowState#isSecureLocked 三态塑形（核心）：
@@ -55,12 +75,11 @@ import java.util.function.BiPredicate
  * 必须维持 secure 层排除，强制捕获会把 secure 内容泄入最近任务缩略图）
  *
  * 【ColorOS 长截图】OplusLongshotMainWindow#hasSecure
- * 长截图聚合多窗口转储，此调用点拿不到单一目标归属者，无法 per-app
- * 判定——按策略聚合近似：存在任何 DENY → fail-closed 拒绝长截图；
- * 否则存在 ALLOW → 放行；否则原生。已知边界：单个应用的 DENY 会全局
- * 关闭长截图（ColorOS 专属路径，文档化接受）。
+ * 长截图聚合多窗口转储，此调用点拿不到单一目标归属者——按前台锚定
+ * 三态近似（[foregroundPolicy]）。已知边界：锚定失败（系统浮层持焦）
+ * 回落全局态时，全局 DENY 会关闭长截图（ColorOS 专属路径，文档化接受）。
  *
- * 已知边界（DENY×ALLOW 并存的整屏捕获）：captureFlags 是 display 级
+ * 已知边界（前台 ALLOW 放行的整屏捕获）：captureFlags 是 display 级
  * 而非窗口级——同屏 DENY 窗口的 SF-secure 层会随 ALLOW 的放行一并被
  * 捕获（DFS 同款全局行为，分屏混用两态时的固有粒度限制）。
  *
@@ -97,6 +116,48 @@ object SecurePolicyHook {
 
     @Volatile
     private var rootContainer: Any? = null
+
+    /** WMS 实例（前台锚定：mCurrentFocus 读取入口） */
+    @Volatile
+    private var wmsService: Any? = null
+
+    @Volatile
+    private var wmsFocusField: Field? = null
+
+    /**
+     * 截屏判定锚点——前台应用的策略单值（follow/allow/deny），替代
+     * 原"配置聚合"口径。修复语义：用户组合
+     * "模板 ALLOW + 全局 DENY"时前台为模板应用 → ALLOW（强制捕获，
+     * 穿透全局 DENY 打的 secure 层）；前台为未配置应用 → 全局 DENY。
+     * 按进程分派锚定源：
+     * - system_server：WMS.mCurrentFocus → owner（焦点为截屏应用自身
+     *   时回落 null→全局——实测捕获先于截屏 UI 焦点，此为竞态兜底）
+     * - 截屏应用：getRunningTasks 特权查询（[HookContext.
+     *   screenshotForegroundPackage]，经 [hookGetTasksPassthrough]
+     *   白名单放行绕过 REAL_GET_TASKS 收紧，ColorOS 15 实测可靠）
+     */
+    private fun foregroundPolicy(): Int = when (HookContext.kind) {
+        HookContext.ProcessKind.SYSTEM_SERVER ->
+            HookContext.screenshotPolicy(systemForegroundPackage())
+        else -> HookContext.screenshotPolicy(HookContext.screenshotForegroundPackage())
+    }
+
+    /**
+     * system_server 侧前台包：当前焦点窗口的归属包。焦点不可用
+     * （锁屏瞬间/无窗口）或归属截屏应用白名单（截屏 UI 已抢焦的
+     * 竞态）时返回 null——策略解析经 [HookContext.screenshotPolicy]
+     * 回落全局态（fail-safe：无法锚定时按全局，宁可保守）
+     */
+    private fun systemForegroundPackage(): String? {
+        val svc = wmsService ?: return null
+        val field = wmsFocusField
+            ?: runCatching { fieldInHierarchy(svc.javaClass, "mCurrentFocus") }
+                .getOrNull()?.also { wmsFocusField = it }
+            ?: return null
+        val focus = runCatching { field.get(svc) }.getOrNull() ?: return null
+        val owner = runCatching { getOwningPackageM?.invoke(focus) as? String }.getOrNull()
+        return if (owner != null && owner in HookContext.SCREENSHOT_PACKAGES) null else owner
+    }
 
     /** 诊断日志单次开关（refs 捕获失败 / reconcile 早退，避免高频刷屏） */
     @Volatile
@@ -142,7 +203,12 @@ object SecurePolicyHook {
                 if (nativeBypass.get()) {
                     // reconcile 的原生值读取：不塑形
                     chain.proceed()
-                } else when (HookContext.screenshotPolicy(ownerPackage(chain.thisObject, getOwningPackage))) {
+                } else when (HookContext.templateSecurePolicy(
+                    ownerPackage(chain.thisObject, getOwningPackage)
+                )) {
+                    // 窗口层仅消费显式模板策略（全局态在判定层落闸，
+                    // 见 HookContext.templateSecurePolicy——ColorOS 特权
+                    // 捕获被全局 secure 层 -22 物理拒绝的实证）
                     HookConfig.SECURE_ALLOW ->
                         if (inSurfaceCreationFrame(systemCl)) chain.proceed() else false
                     HookConfig.SECURE_DENY -> true
@@ -170,6 +236,18 @@ object SecurePolicyHook {
         installCatching("system", "oneUI") { hookOneUI(classLoader) }
         installCatching("system", "hyperOS") { hookHyperOS(classLoader) }
         installCatching("system", "oplusLongshot") { hookOplusLongshot(classLoader) }
+
+        // ---- 锚定源权限腿：getTasks 白名单放行（双入口 CNFE/无方法容错）----
+        installCatching("system", "atmsGetTasks") {
+            hookGetTasksPassthrough(
+                classLoader.loadClass("com.android.server.wm.ActivityTaskManagerService"), "atms"
+            )
+        }
+        installCatching("system", "amsGetTasks") {
+            hookGetTasksPassthrough(
+                classLoader.loadClass("com.android.server.am.ActivityManagerService"), "ams"
+            )
+        }
     }
 
     /**
@@ -197,13 +275,15 @@ object SecurePolicyHook {
         }
     }
 
-    /** DFS 同粒度容错：类不存在（CNFE）= 版本矩阵不适用，静默；其余记日志 */
+    /** DFS 同粒度容错：类/方法不存在（CNFE/NSME = 版本矩阵不适用，OEM 签名漂移）记一次性 INFO（区分"hook 未装配"与"装配未调用"，真机诊断需要）；其余记 ERROR */
     private inline fun installCatching(pkg: String, what: String, block: () -> Unit) {
         try {
             block()
         } catch (t: Throwable) {
-            if (t !is ClassNotFoundException) {
+            if (t !is ClassNotFoundException && t !is NoSuchMethodException) {
                 HookContext.log(Log.ERROR, "E1 $what hook failed for $pkg", t)
+            } else {
+                HookContext.log(Log.INFO, "E1 $what unavailable for $pkg (class/method missing)")
             }
         }
     }
@@ -346,10 +426,12 @@ object SecurePolicyHook {
     }
 
     /**
-     * 单窗口重算：target = DENY || 原生 secure 位。置 false 与置 true 同等
-     * 一等公民——DENY→FOLLOW 切换经 [reconcileAll] 即时恢复原生。
-     * 必须在 WM 全局锁内调用（surface 事件帧天然持锁；重载监听器显式加锁）。
-     * 返回是否新打了 DENY 标记（全量遍历的统计口径）。
+     * 单窗口重算：target = 显式模板 DENY || 原生 secure 位（全局 DENY
+     * 不参与窗口层——[HookContext.templateSecurePolicy]，ColorOS 特权
+     * 捕获 -22 实证）。置 false 与置 true 同等一等公民——DENY→其他
+     * 态切换经 [reconcileAll] 即时恢复原生。必须在 WM 全局锁内调用
+     * （surface 事件帧天然持锁；重载监听器显式加锁）。返回是否新打了
+     * DENY 标记（全量遍历的统计口径）。
      */
     private fun reconcileWindow(ws: Any?): Boolean {
         if (ws == null || (wsSurfaceField == null && getSurfaceControlM == null)) {
@@ -360,7 +442,7 @@ object SecurePolicyHook {
             return false
         }
         val pkg = runCatching { getOwningPackageM?.invoke(ws) as? String }.getOrNull()
-        val deny = HookContext.screenshotPolicy(pkg) == HookConfig.SECURE_DENY
+        val deny = HookContext.templateSecurePolicy(pkg) == HookConfig.SECURE_DENY
         val target = deny || nativeSecureOf(ws)
         val sc = surfaceOf(ws) ?: run {
             if (deny && !reconcileDiagLogged) {
@@ -449,6 +531,7 @@ object SecurePolicyHook {
             if (root != null && lock != null) {
                 rootContainer = root
                 wmGlobalLock = lock
+                wmsService = service
             } else if (!refsDiagLogged) {
                 refsDiagLogged = true
                 HookContext.log(
@@ -487,7 +570,9 @@ object SecurePolicyHook {
             "checkPermission", String::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
         )
         HookContext.hookE("E1", method).intercept { chain ->
-            if (chain.args[0] != "android.permission.CAPTURE_BLACKOUT_CONTENT" || !HookContext.hasAllowPolicy()) {
+            if (chain.args[0] != "android.permission.CAPTURE_BLACKOUT_CONTENT" ||
+                foregroundPolicy() != HookConfig.SECURE_ALLOW
+            ) {
                 chain.proceed()
             } else {
                 val args = chain.args.toTypedArray()
@@ -503,7 +588,7 @@ object SecurePolicyHook {
         val clazz = classLoader.loadClass("com.android.server.wm.WmScreenshotController")
         clazz.declaredMethods.filter { it.name == "canBeScreenshotTarget" }.forEach { method ->
             HookContext.hookE("E1", method).intercept { chain ->
-                if (HookContext.hasAllowPolicy()) true else chain.proceed()
+                if (foregroundPolicy() == HookConfig.SECURE_ALLOW) true else chain.proceed()
             }
         }
     }
@@ -514,25 +599,69 @@ object SecurePolicyHook {
         val clazz = classLoader.loadClass("com.android.server.wm.WindowManagerServiceImpl")
         clazz.declaredMethods.filter { it.name == "notAllowCaptureDisplay" }.forEach { method ->
             HookContext.hookE("E1", method).intercept { chain ->
-                if (HookContext.hasAllowPolicy()) false else chain.proceed()
+                if (foregroundPolicy() == HookConfig.SECURE_ALLOW) false else chain.proceed()
             }
         }
     }
 
-    /** ColorOS 长截图判定（hasSecure 三态聚合，见类注释） */
+    /** ColorOS 长截图判定（hasSecure 前台锚定三态，见类注释） */
     @SuppressLint("PrivateApi")
     private fun hookOplusLongshot(classLoader: ClassLoader) {
         val clazz = classLoader.loadClass("com.android.server.wm.OplusLongshotMainWindow")
         clazz.declaredMethods.filter { it.name == "hasSecure" }.forEach { method ->
             HookContext.hookE("E1", method).intercept { chain ->
-                when {
-                    HookContext.hasDenyPolicy() -> true
-                    HookContext.hasAllowPolicy() -> false
+                when (foregroundPolicy()) {
+                    HookConfig.SECURE_DENY -> true
+                    HookConfig.SECURE_ALLOW -> false
                     else -> chain.proceed()
                 }
             }
         }
         HookContext.log(Log.INFO, "E1 oplus longshot hooked")
+    }
+
+    // ==================== 锚定源权限腿（getTasks 白名单放行） ====================
+
+    /**
+     * ATMS/AMS getTasks 白名单放行（截屏判定锚定的 system_server 侧权限
+     * 腿）。ColorOS 15 实测：REAL_GET_TASKS 收紧后截屏应用的
+     * getRunningTasks 只见自己任务，[HookContext.screenshotForegroundPackage]
+     * 锚定恒 unresolved → "模板 ALLOW + 全局 DENY"被全局态吞噬、截屏落闸。
+     *
+     * 机制：识别截屏应用调用者后 Binder.clearCallingIdentity 令原方法以
+     * system（REAL_GET_TASKS 持有者）身份执行，返回完整任务列表；finally
+     * 恢复（AMS 内部标准模式，同步 binder 调用内同线程安全）。覆盖 OEM
+     * 自研权限读取（一切 Binder.getCallingUid() 读取点统一被欺骗）。
+     * 双入口 ATMS/AMS（binder 入口随版本/OEM 漂移，按名收集全变体，
+     * 签名漂移免疫；ColorOS 15 实测两者皆有声明）。仅截屏包 uid 生效，
+     * system 内部调用（uid 1000，含 getTasks 内部重载互调）与第三方
+     * 调用者原生语义
+     */
+    @SuppressLint("PrivateApi")
+    private fun hookGetTasksPassthrough(ownerClass: Class<*>, label: String) {
+        val methods = ownerClass.declaredMethods.filter { it.name == "getTasks" }
+        if (methods.isEmpty()) {
+            HookContext.log(Log.INFO, "E1 $label getTasks not declared (skipped)")
+            return
+        }
+        methods.forEach { method ->
+            HookContext.hookE("E1", method).intercept { chain ->
+                val callingUid = Binder.getCallingUid()
+                if (callingUid == Process.SYSTEM_UID ||
+                    !HookContext.anyPkgForUid(callingUid) { it in HookContext.SCREENSHOT_PACKAGES }
+                ) {
+                    chain.proceed()
+                } else {
+                    val ident = Binder.clearCallingIdentity()
+                    try {
+                        chain.proceed()
+                    } finally {
+                        Binder.restoreCallingIdentity(ident)
+                    }
+                }
+            }
+        }
+        HookContext.log(Log.INFO, "E1 $label getTasks passthrough hooked (${methods.size} variants)")
     }
 
     // ==================== 两进程共享的捕获管线三态实现 ====================
@@ -582,12 +711,12 @@ object SecurePolicyHook {
         for (name in listOf("nativeCaptureDisplay", "nativeCaptureLayers")) {
             screenCaptureClazz.declaredMethods.filter { it.name == name }.forEach { method ->
                 HookContext.hookE("E1", method).intercept { chain ->
-                    // deny 优先：两态并存时 fail-closed（display 级粒度已知边界）
-                    val allow = HookContext.hasAllowPolicy() && !HookContext.hasDenyPolicy()
-                    val deny = HookContext.hasDenyPolicy()
-                    when {
-                        !allow && !deny -> chain.proceed()
-                        deny -> {
+                    // 前台锚定三态：以前台应用的单值策略决定整屏捕获
+                    // （"模板 ALLOW + 全局 DENY"时前台为模板应用 → 放行
+                    // 强制捕获，穿透全局 DENY 打的 secure 层）。锚定失败
+                    // （null → 全局态）时全局 DENY 仍 fail-closed
+                    when (foregroundPolicy()) {
+                        HookConfig.SECURE_DENY -> {
                             // 全量 reconcile 兜底：仅 system_server 且尚未标记任何
                             // 窗口时（applied 为空）遍历——覆盖存量窗口与监听链路
                             // 断裂；此后由 applied 缓存去重，常规捕获零遍历开销
@@ -597,7 +726,10 @@ object SecurePolicyHook {
                                 runCatching { reconcileAll() }
                             }
                             if (!method.returnType.isPrimitive && !isTaskSnapshotFrame()) {
-                                HookContext.log(Log.INFO, "E1 capture denied ($name)")
+                                HookContext.log(
+                                    Log.INFO,
+                                    "E1 capture denied ($name, fg=${fgAnchorForLog()}, policy=deny)"
+                                )
                                 null
                             } else {
                                 // TaskSnapshot（最近任务缩略图）/ 原始返回类型
@@ -611,7 +743,7 @@ object SecurePolicyHook {
                                 chain.proceed()
                             }
                         }
-                        else -> {
+                        HookConfig.SECURE_ALLOW -> {
                             // CaptureArgs 按类型扫描参数位（不假设固定下标，native 签名随版本漂移）
                             var hit = false
                             for (arg in chain.args) {
@@ -624,6 +756,7 @@ object SecurePolicyHook {
                             if (hit) HookContext.log(Log.INFO, "E1 capture secure layers forced")
                             chain.proceed()
                         }
+                        else -> chain.proceed()
                     }
                 }
             }
@@ -642,10 +775,10 @@ object SecurePolicyHook {
     /**
      * 结果缓冲区 containsSecureLayers 三态（实测 ColorOS 15：此判定是 DENY
      * 的最终落闸点——截屏应用捕获后立即消费它，true 即放弃保存，MediaStore
-     * insert 不发生；false 才走保存流程）。DENY→true（deny 优先 fail-closed，
-     * 与捕获管线一致——ALLOW×DENY 并存时缓冲区可能已含 DENY 内容，必须
-     * 拒绝保存兜底）；ALLOW→false（强制捕获的 secure 内容不再被判含安全层，
-     * 保存放行）；FOLLOW 原生。
+     * insert 不发生；false 才走保存流程）。前台锚定三态：前台 DENY → true
+     * （fail-closed）；前台 ALLOW → false（强制捕获的 secure 内容不再被判
+     * 含安全层，保存放行）；FOLLOW 原生。锚定失败回落全局态——全局 DENY
+     * 仍拒（保守 fail-safe）
      */
     private fun hookContainsSecureLayers(classLoader: ClassLoader) {
         val clazz = classLoader.loadClass(
@@ -655,9 +788,15 @@ object SecurePolicyHook {
         )
         clazz.declaredMethods.filter { it.name == "containsSecureLayers" }.forEach { method ->
             HookContext.hookE("E1", method).intercept { chain ->
-                when {
-                    HookContext.hasDenyPolicy() -> true
-                    HookContext.hasAllowPolicy() -> false
+                when (val policy = foregroundPolicy()) {
+                    HookConfig.SECURE_DENY -> {
+                        HookContext.log(Log.INFO, "E1 containsSecureLayers -> true (fg=${fgAnchorForLog()}, policy=deny)")
+                        true
+                    }
+                    HookConfig.SECURE_ALLOW -> {
+                        HookContext.log(Log.INFO, "E1 containsSecureLayers -> false (fg=${fgAnchorForLog()}, policy=allow)")
+                        false
+                    }
                     else -> chain.proceed()
                 }
             }
@@ -665,17 +804,24 @@ object SecurePolicyHook {
         HookContext.log(Log.INFO, "E1 containsSecureLayers hooked")
     }
 
+    /** 判定日志的前台锚点描述（system_server=焦点窗 owner；截屏应用=任务查询） */
+    private fun fgAnchorForLog(): String = when (HookContext.kind) {
+        HookContext.ProcessKind.SYSTEM_SERVER -> systemForegroundPackage() ?: "(unfocused→global)"
+        else -> HookContext.screenshotForegroundPackage() ?: "(unresolved→global)"
+    }
+
     /**
-     * ColorOS 截屏应用自有目标 uid 安全检查旁路（A15+）：纯 ALLOW 态改写
-     * -1 使捕获获特权（SF 含 secure 层 → 真实内容，DFS 同款）。DENY 态
-     * 存在时保持原值——特权捕获会把 DENY 窗口的 secure 内容拉进缓冲区，
-     * 宁可黑块（与捕获管线 allow = allow && !deny 口径一致）。
+     * ColorOS 截屏应用自有目标 uid 安全检查旁路（A15+）：前台锚定 ALLOW 态
+     * 改写 -1 使捕获获特权（SF 含 secure 层 → 真实内容，DFS 同款）。前台
+     * DENY 时保持原值——特权捕获会把 DENY 窗口的 secure 内容拉进缓冲区，
+     * 宁可黑块（与捕获管线前台锚定口径一致）。仅区域/长截图等 OEM 模式
+     * 经此通道（普通截图不走 setUid，实测恒不调用）
      */
     private fun hookOplusScreenCapture(classLoader: ClassLoader) {
         val clazz = classLoader.loadClass($$"com.oplus.screenshot.OplusScreenCapture$CaptureArgs$Builder")
         val method = clazz.getDeclaredMethod("setUid", java.lang.Long.TYPE)
         HookContext.hookE("E1", method).intercept { chain ->
-            if (HookContext.hasAllowPolicy() && !HookContext.hasDenyPolicy()) {
+            if (foregroundPolicy() == HookConfig.SECURE_ALLOW) {
                 chain.proceed(arrayOf<Any>(-1L))
             } else {
                 chain.proceed()

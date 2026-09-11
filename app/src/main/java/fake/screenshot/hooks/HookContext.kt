@@ -204,6 +204,41 @@ object HookContext {
     /** E1：被截者管控三态（显式模板 → 全局三态） */
     fun screenshotPolicy(pkg: String?): Int = config.securePolicyFor(pkg)
 
+    /**
+     * E1 窗口层三态：仅显式模板策略，null = 无模板（窗口层不干预，
+     * 原生 FLAG_SECURE 语义）。全局 DENY 不打窗口层 SF secure 标记——
+     * 实测 ColorOS 15：全局 DENY 给 systemui/launcher/壁纸打 secure 后，
+     * 截屏应用的特权捕获（uid -334 captureLayers）被 SurfaceFlinger 以
+     * -22(EINVAL) 物理拒绝，管线在捕获层即断——判定层
+     * （containsSecureLayers 前台锚定）根本没机会放行前台 ALLOW 应用。
+     * 全局 DENY 的落闸在判定层（捕获成功但不保存）；窗口层只模拟显式
+     * DENY 应用自身的 FLAG_SECURE（MediaProjection/adb 对该应用窗口的
+     * 物理拦截语义不变）
+     */
+    fun templateSecurePolicy(pkg: String?): Int? =
+        config.templateFor(pkg)?.securePolicy
+
+    /**
+     * 截屏应用进程的前台包解析（E1 截屏判定锚点；E3a 泛化共用）。
+     * getRunningTasks 特权查询，跳过截屏应用自己人任务——依赖 E1
+     * system_server 腿的 getTasks 白名单放行
+     * （[SecurePolicyHook.hookGetTasksPassthrough]）绕过 REAL_GET_TASKS
+     * 收紧（ColorOS 15 实测：无放行时只见自己任务，锚定恒 unresolved，
+     * 前台模板策略被全局态吞噬）。
+     * 解析失败 → null（策略解析经 [screenshotPolicy] 回落全局态）
+     */
+    fun screenshotForegroundPackage(): String? = runCatching {
+        val app = Class.forName("android.app.ActivityThread")
+            .getMethod("currentApplication").invoke(null) as? android.content.Context
+            ?: return@runCatching null
+        val am = app.getSystemService(android.content.Context.ACTIVITY_SERVICE)
+                as? android.app.ActivityManager ?: return@runCatching null
+        @Suppress("DEPRECATION")
+        am.getRunningTasks(10).asSequence()
+            .mapNotNull { it.topActivity?.packageName }
+            .firstOrNull { it !in SCREENSHOT_PACKAGES }
+    }.getOrNull()
+
     /** E2a：检测者的截屏侦听回调是否吞噬 */
     fun maskCaptureDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskCaptureDetection ?: false
@@ -241,23 +276,6 @@ object HookContext {
         config.templateFor(pkg)?.pierceFreeform ?: false
 
     /**
-     * 策略聚合查询（截屏应用进程侧引擎用——捕获调用无法定位逐窗口归属，
-     * 只能按"配置中是否存在某态"整体放行/收紧捕获管线）。
-     * 模板列表极小（用户手建），逐次线性扫描无性能问题。
-     */
-    fun hasAllowPolicy(): Boolean {
-        val c = config
-        return c.globalSecurePolicy == HookConfig.SECURE_ALLOW ||
-                c.templates.any { it.securePolicy == HookConfig.SECURE_ALLOW }
-    }
-
-    fun hasDenyPolicy(): Boolean {
-        val c = config
-        return c.globalSecurePolicy == HookConfig.SECURE_DENY ||
-                c.templates.any { it.securePolicy == HookConfig.SECURE_DENY }
-    }
-
-    /**
      * E3：前台者的替换图 id。null = 不替换（原生截图）。
      * 优先级：前台者的显式模板图 > 全局替换（开关开启且已配置图）。
      * 图片本体的远程密文加载/解码/缓存由 [ReplaceImageStore] 负责，
@@ -270,7 +288,7 @@ object HookContext {
         return null
     }
 
-    /** E3b 门控：任何替换配置存在（聚合口径，与 hasAllowPolicy 同模式） */
+    /** E3b 门控：任何替换配置存在（聚合口径——会话级判定无前台语义） */
     fun hasReplacePolicy(): Boolean {
         val c = config
         return (c.globalReplaceEnabled && c.globalReplaceImage != null) ||
