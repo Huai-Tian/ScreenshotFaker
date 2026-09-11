@@ -15,14 +15,20 @@ It allows you to customize how your personal information is protected during scr
 ## ✨ Features
 
 - **Protect private content from being captured in screenshots**  
-  Prevents the screenshot service from capturing sensitive content on the screen, with support for user‑defined redaction.  
+  Prevents screenshot services from capturing sensitive on-screen content and allows users to replace it with a custom image.  
+  Prevents screen recording services from capturing sensitive content; supports custom video stream replacement (local or network).  
+  Supports configuring specific Freeform floating windows to be excluded from screenshot and screen recording capture.  
   Supports disabling screenshots for sensitive apps that allow them.
 
-- **Block screenshot and screen recording detection by specific apps**  
-  Bypass malicious app detection of user screenshots and screen recordings.
+- **Comprehensively block malicious detection by specific apps**  
+  Bypass malicious app detection of user screenshots and screen recordings.  
+  Supports independently blocking apps' floating window detection, focus detection, and window integrity detection.  
+  Supports more aggressive detection and filtering against “unruly” malware.
 
 - **Enables stealthy screen capture, recording, and sharing**  
-  Bypasses application-layer malicious detection via direct system-level calls.
+  The screenshot and screen recording feature bypasses malicious application-layer detection through direct low-level system calls.  
+  Screen sharing supports not only local network sharing but also remote sharing over SSH.
+  It also supports receiving screen sharing and remote control efficiently.
 
 - **Custom trigger methods**  
   Most configurations are user‑customizable;  
@@ -48,9 +54,6 @@ It allows you to customize how your personal information is protected during scr
   Force-enable the timeout self‑destruct setting: if normal usage is not detected within the user‑defined time, it will be treated as duress and trigger automatic data self‑destruction.  
   Built-in tamper protection: any unauthorized data injection or modification will be treated as an anomaly and trigger automatic data self‑destruction.
 
-- **Comprehensive screen sharing**  
-  Supports receiving screen sharing, initiating LAN screen sharing, and remote sharing via SSH.
-
 - **More features coming soon...**
 
 ---
@@ -66,11 +69,12 @@ This project is currently in an early development stage. Bugs, incomplete featur
 This project's core functionality relies on **LSPosed** and **Shizuku**:
 
 **LSPosed**
-- Protects private content from being captured in screenshots.
+- Protect private content captured through screenshots and screen recordings.
 - Supports taking screenshots on pages where screenshots are not allowed.
 - Disable screenshots on pages that allow them.
 - Block screenshot and screen recording detection by specific apps.
 - Supports preventing specific apps from detecting floating windows.
+- Block focus detection, floating window detection, and window integrity detection by specific apps.
 - Supports setting floating windows for specific apps to enable screen capture passthrough.
 
 **Shizuku**
