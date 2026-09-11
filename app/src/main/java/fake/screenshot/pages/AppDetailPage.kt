@@ -171,11 +171,11 @@ fun AppDetailCompose(navController: NavController, pkg: String) {
                     )
                     // ---- 子开关：允许监听自身媒体事件（影子 observer，随总开关显隐）----
                     if (aggressive) {
-                        Column(modifier = Modifier.padding(start = 16.dp)) {
+                        Column {
                             TwoStatePreference(
                                 icon = Icons.Default.Collections,
                                 title = stringResource(R.string.allow_self_media_events),
-                                subtitle = stringResource(R.string.allow_self_media_events_hint),
+                                subtitle = "避免应用发现媒体事件被屏蔽",
                                 checked = allowSelf,
                                 onCheckedChange = { on ->
                                     save(

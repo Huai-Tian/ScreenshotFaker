@@ -83,7 +83,11 @@ object HookContext {
         if (raw != null) {
             configSynced = true
             configSettled.countDown()
-            log(Log.INFO, "config synced (templates=${config.templates.size})")
+            // aggressive 口径入日志（E2a 两集随配置推送同步增减的可见性）
+            log(
+                Log.INFO,
+                "config synced (templates=${config.templates.size}, aggressive=${config.aggressiveFilter.size}, selfMedia=${config.aggressiveAllowSelfMedia.size})"
+            )
         } else {
             // 热重载时序竞争（实测：连续热重载后 RemotePreferences 桥推送
             // 丢失，config 停留 DEFAULT → 全引擎判定静默失效）：退避重拉
@@ -127,7 +131,10 @@ object HookContext {
                 }.getOrDefault(false)
                 if (ok) {
                     configSettled.countDown()
-                    log(Log.INFO, "config retry synced (templates=${config.templates.size})")
+                    log(
+                        Log.INFO,
+                        "config retry synced (templates=${config.templates.size}, aggressive=${config.aggressiveFilter.size}, selfMedia=${config.aggressiveAllowSelfMedia.size})"
+                    )
                     break
                 }
             }
