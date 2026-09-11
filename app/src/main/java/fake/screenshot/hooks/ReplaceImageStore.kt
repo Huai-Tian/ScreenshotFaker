@@ -128,15 +128,24 @@ object ReplaceImageStore {
 
     /** 单 id 全链路：远程密文 → 解密 → 解码 */
     private fun load(imageId: String): Bitmap? = runCatching {
-        val pfd = HookContext.openRemoteImage(remoteName(imageId)) ?: return null
+        val pfd = HookContext.openRemoteImage(remoteName(imageId)) ?: run {
+            HookContext.log(Log.WARN, "E3 remote file absent for $imageId")
+            return null
+        }
         val envelope = pfd.use { fd ->
             ByteArrayOutputStream().use { out ->
                 android.os.ParcelFileDescriptor.AutoCloseInputStream(fd).use { it.copyTo(out) }
                 out.toByteArray()
             }
         }
-        val plain = ReplaceImageCodec.decrypt(envelope) ?: return null
-        BitmapFactory.decodeByteArray(plain, 0, plain.size)
+        val plain = ReplaceImageCodec.decrypt(envelope) ?: run {
+            HookContext.log(Log.WARN, "E3 decrypt failed for $imageId")
+            return null
+        }
+        BitmapFactory.decodeByteArray(plain, 0, plain.size) ?: run {
+            HookContext.log(Log.WARN, "E3 decode failed for $imageId")
+            return null
+        }
     }.onFailure {
         HookContext.log(Log.WARN, "E3 image load failed for $imageId: ${it.message}")
     }.getOrNull()

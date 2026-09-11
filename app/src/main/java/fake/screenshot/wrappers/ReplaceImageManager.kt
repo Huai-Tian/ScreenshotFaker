@@ -46,6 +46,14 @@ object ReplaceImageManager {
      * 空档在下一次绑定必然补齐）；同时删除配置外孤儿（模板已删/销毁后
      * 残留的 sf_img_*，销毁-未连接场景的中和在此兜底闭环——active 为
      * 空集时全删）
+     *
+     * active 口径 = 已配置的图，不含开关态：HookConfig 语义为"关闭时
+     * 静默保留（globalReplaceImage 不清除）"——若按开关态计算，任何
+     * 一次"开关=关"时的 App 重启（装 APK/后台被杀后重开）都会把全局
+     * 图当孤儿删除；而补投仅在绑定时机发生（开关循环不触发），删除后
+     * 重开开关无法自愈，E3a 在 hook 侧静默 miss（远程文件缺失 →
+     * ReplaceImageStore 负缓存固化），表现为"替换偶发失效、装 APK
+     * 后恢复"（重启 App → 绑定 → 缺失补投恰好是唯一恢复路径）
      */
     fun onServiceBound(context: Context) {
         scope.launch {
@@ -54,9 +62,7 @@ object ReplaceImageManager {
                 val config = TemplateManager.configFlow(context).first()
                 val active = buildSet {
                     config.templates.forEach { it.imageId?.let { id -> add(id) } }
-                    if (config.globalReplaceEnabled && config.globalReplaceImage != null) {
-                        add(config.globalReplaceImage)
-                    }
+                    config.globalReplaceImage?.let { add(it) }
                 }
                 val existing = service.listRemoteFiles()
                     .filter { it.startsWith(ReplaceImageStore.REMOTE_PREFIX) }
