@@ -18,7 +18,7 @@ import java.lang.reflect.Modifier
  * 显式模板图 > 全局图（开关开启且已配置）；无命中 → 原生截图。
  *
  * hook 矩阵（framework 层被 OEM 封装共同消费的捕获/转换点，全反射 +
- * 运行时探测 + CNFE 容错；替换命中记一次性探针日志供真机校准）：
+ * 运行时探测 + CNFE 容错；替换命中记每图一次事件日志防高频刷屏）：
  * - 【Bitmap 直接产出腿】`SurfaceControl#screenshot` 静态族（返回
  *   Bitmap，A13- 主路径 + 部分 OEM A14+ 兼容路径）——E1 矩阵实证
  *   ColorOS 截屏应用的捕获链最终仍经 framework 静态 API 取画面

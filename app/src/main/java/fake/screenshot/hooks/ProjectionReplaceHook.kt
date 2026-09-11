@@ -21,7 +21,9 @@ import java.lang.reflect.Modifier
  * SurfaceFlinger 侧合成，system_server 是唯一可注入 layer 的进程。
  *
  * 机制（虚拟屏假图层）：
- * - hook DMS#createVirtualDisplay（binder 入口，参数含 VirtualDisplayConfig）：
+ * - hook DMS#createVirtualDisplay*（binder 入口在 DMS 外层类或其内部类，
+ *   形参两系：公开 VirtualDisplayConfig / system parcelable
+ *   VirtualDisplayConfigInternal——AOSP 13+ 及 ColorOS 15 为后者）：
  *   AUTO_MIRROR 类 VD（MediaProjection 录屏标准形态）记录目标分辨率，
  *   供 mirror layer 创建时定假图层尺寸（buffer = VD 分辨率，假图拉伸
  *   铺满，无缺角露出真实内容）。系统内部 auto-mirror VD（ColorOS 下拉
@@ -40,9 +42,9 @@ import java.lang.reflect.Modifier
  * #getTopApp → WindowProcessController.mName（processName，普通应用
  * = 包名）。解析失败 → 全局图回落（replacementImageId(null)）。
  *
- * 防御性设计（无真机先验的 OEM 差异，E4 探针模式）：
+ * 防御性设计（OEM 差异容错）：
  * - mirror 双候选方法名（mirrorDisplay/mirrorSurface）运行时探测，
- *   全部缺失时探针日志，不阻断其余 hook；
+ *   全部缺失时仅 installed 摘要计数归零，不阻断其余 hook；
  * - pending 分辨率带 5s 衰减：DMS 记录与 mirror 创建跨线程传递，
  *   陈旧 pending 不污染后续无关 mirror 调用；
  * - 已知边界（文档化接受）：fake layer 的 native 资源在录屏停止后
@@ -66,9 +68,6 @@ object ProjectionReplaceHook {
     private var atmInternalClass: Class<*>? = null
     private var getTopAppM: Method? = null
     private var wpcNameField: Field? = null
-    private var cfgGetWidthM: Method? = null
-    private var cfgGetHeightM: Method? = null
-    private var cfgGetFlagsM: Method? = null
 
     /** Transaction#show(SurfaceControl)：hidden API（public SDK 无），反射缓存 */
     private var showM: Method? = null
@@ -106,50 +105,65 @@ object ProjectionReplaceHook {
                 .getDeclaredField("mName").apply { isAccessible = true }
         }.onFailure { HookContext.log(Log.WARN, "E3b top-app chain unresolved: ${it.message}") }
 
-        // ---- VirtualDisplayConfig 尺寸读取 ----
-        // 类为 API 34+（minSdk 30，编译期引用触发 NewApi lint）：反射解析，
-        // < 34 ROM 上 CNFE → null，下方 DMS 腿整体跳过（该签名不存在于旧 ROM）
-        val vdCfgClass = runCatching {
-            Class.forName("android.hardware.display.VirtualDisplayConfig")
-        }.getOrNull()
-        runCatching {
-            val cfgClass = vdCfgClass ?: return@runCatching
-            cfgGetWidthM = cfgClass.getMethod("getWidth").apply { isAccessible = true }
-            cfgGetHeightM = cfgClass.getMethod("getHeight").apply { isAccessible = true }
-            cfgGetFlagsM = cfgClass.getMethod("getFlags").apply { isAccessible = true }
-        }
+        // ---- VD config 形参解析（两系） ----
+        // DMS binder 形参在 AOSP 13+ 为 VirtualDisplayConfigInternal（system
+        // parcelable，public final m* 字段），公开 API 类 VirtualDisplayConfig
+        // （getter）仅在旧签名出现——ColorOS 15 实测 dms=0 根因即原匹配只认
+        // 公开类。两系全解析，按形参 Class 对号读取
+        val cfgAccessors = listOf(
+            "android.hardware.display.VirtualDisplayConfig",
+            "android.hardware.display.VirtualDisplayConfigInternal"
+        ).mapNotNull { name ->
+            runCatching {
+                val cls = Class.forName(name)
+                cls to CfgAccessors(
+                    intAccessor(cls, "getWidth", "mWidth", "width"),
+                    intAccessor(cls, "getHeight", "mHeight", "height"),
+                    intAccessor(cls, "getFlags", "mFlags", "flags")
+                )
+            }.getOrNull()
+        }.toMap()
 
         var dmsHooked = 0
-        // ---- DMS#createVirtualDisplay：AUTO_MIRROR VD 分辨率登记 ----
+        // ---- DMS#createVirtualDisplay*：AUTO_MIRROR VD 分辨率登记 ----
+        // binder 入口宿主含 DMS 内部类（AOSP 13+ BinderService extends
+        // IDisplayManager.Stub，binder 方法不在外层类）；方法名前缀匹配
+        // 兼容 createVirtualDisplayInternal 辅助路径——与 binder 方法同会话
+        // 双跳时 pendingDims 幂等覆盖，仅登记日志重复一行，无害
         runCatching {
-            val vdCfg = vdCfgClass ?: return@runCatching
             val dmsClass = classLoader.loadClass("com.android.server.display.DisplayManagerService")
-            dmsClass.declaredMethods.filter { it.name == "createVirtualDisplay" }.forEach { m ->
-                val cfgIdx = m.parameterTypes.indexOfFirst { it == vdCfg }
-                if (cfgIdx < 0) return@forEach
-                m.isAccessible = true
-                HookContext.hookE("E3b", m).intercept { chain ->
-                    val cfg = chain.args[cfgIdx] ?: return@intercept chain.proceed()
-                    val flags = runCatching { cfgGetFlagsM?.invoke(cfg) as? Int }.getOrNull() ?: 0
-                    if (flags and DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR != 0) {
-                        // AUTO_MIRROR VD 不全是录屏：系统内部也建（ColorOS 15 实测
-                        // 下拉控制中心的"实时屏幕背景"即每次下拉创建 auto-mirror VD
-                        // + mirrorDisplay，其 mirror 树合成回真实屏幕）。若不区分，
-                        // 假图层会被挂到该 mirror 上——替换图真实显示在状态栏背景。
-                        // 判据：binder 调用方为 system（含 system_server 同进程内
-                        // 调用）或 SystemUI → 系统内部用途，不登记
-                        if (!isSystemMirrorCaller()) {
-                            val w = runCatching { cfgGetWidthM?.invoke(cfg) as? Int }.getOrNull() ?: 0
-                            val h = runCatching { cfgGetHeightM?.invoke(cfg) as? Int }.getOrNull() ?: 0
-                            if (w > 0 && h > 0) {
-                                pendingDims = (w to h) to System.currentTimeMillis()
-                                HookContext.log(Log.INFO, "E3b auto-mirror VD registered ${w}x$h")
+            val hosts = listOf(dmsClass) + dmsClass.declaredClasses
+            hosts.forEach { host ->
+                host.declaredMethods
+                    .filter { it.name.startsWith("createVirtualDisplay") }
+                    .forEach { m ->
+                        val cfgIdx = m.parameterTypes.indexOfFirst { it in cfgAccessors }
+                        if (cfgIdx < 0) return@forEach
+                        val acc = cfgAccessors.getValue(m.parameterTypes[cfgIdx])
+                        m.isAccessible = true
+                        HookContext.hookE("E3b", m).intercept { chain ->
+                            val cfg = chain.args[cfgIdx] ?: return@intercept chain.proceed()
+                            val flags = acc.flags(cfg) ?: 0
+                            if (flags and DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR != 0) {
+                                // AUTO_MIRROR VD 不全是录屏：系统内部也建（ColorOS 15 实测
+                                // 下拉控制中心的"实时屏幕背景"即每次下拉创建 auto-mirror VD
+                                // + mirrorDisplay，其 mirror 树合成回真实屏幕）。若不区分，
+                                // 假图层会被挂到该 mirror 上——替换图真实显示在状态栏背景。
+                                // 判据：binder 调用方为 system（含 system_server 同进程内
+                                // 调用）或 SystemUI → 系统内部用途，不登记
+                                if (!isSystemMirrorCaller()) {
+                                    val w = acc.width(cfg) ?: 0
+                                    val h = acc.height(cfg) ?: 0
+                                    if (w > 0 && h > 0) {
+                                        pendingDims = (w to h) to System.currentTimeMillis()
+                                        HookContext.log(Log.INFO, "E3b auto-mirror VD registered ${w}x$h")
+                                    }
+                                }
                             }
+                            chain.proceed()
                         }
+                        dmsHooked++
                     }
-                    chain.proceed()
-                }
-                dmsHooked++
             }
         }.onFailure { HookContext.log(Log.WARN, "E3b dms leg error: ${it.message}") }
 
@@ -178,9 +192,6 @@ object ProjectionReplaceHook {
             Log.INFO,
             "E3b installed (dms=$dmsHooked, mirror=$mirrorHooked, topApp=${getTopAppM != null})"
         )
-        if (mirrorHooked == 0) {
-            HookContext.log(Log.WARN, "E3b no mirror hook point on this ROM (probe for calibration)")
-        }
     }
 
     // ==================== 假图层核心 ====================
@@ -271,6 +282,26 @@ object ProjectionReplaceHook {
     }
 
     // ==================== 前台解析 ====================
+
+    /** VD config 形参的 int 读取器组（width/height/flags） */
+    private class CfgAccessors(
+        val width: (Any) -> Int?,
+        val height: (Any) -> Int?,
+        val flags: (Any) -> Int?,
+    )
+
+    /** 单 int 读取器：getter 优先（公开 VirtualDisplayConfig），字段兜底
+     *  （internal parcelable 为 public final m* 字段，兼容裸字段名） */
+    private fun intAccessor(cls: Class<*>, getter: String, vararg fields: String): (Any) -> Int? {
+        val g = runCatching { cls.getMethod(getter) }.getOrNull()
+        val fs = fields.mapNotNull { f ->
+            runCatching { cls.getDeclaredField(f).apply { isAccessible = true } }.getOrNull()
+        }
+        return { o ->
+            g?.let { m -> runCatching { m.invoke(o) as? Int }.getOrNull() }
+                ?: fs.firstNotNullOfOrNull { f -> runCatching { f.getInt(o) }.getOrNull() }
+        }
+    }
 
     /**
      * 系统内部 mirror VD 判定：callingUid 为 system（binder 远端 system_server

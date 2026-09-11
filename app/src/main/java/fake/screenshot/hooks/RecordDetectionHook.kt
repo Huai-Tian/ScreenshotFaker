@@ -103,23 +103,10 @@ object RecordDetectionHook {
             }
             getDisplayInfoM = (infoCandidates.firstOrNull { it.parameterCount == 1 }
                 ?: infoCandidates.firstOrNull())?.apply { isAccessible = true }
-            if (getDisplayInfoM == null) {
-                // OEM 校准弹药：DMS 的 Display 相关方法清单
-                val trace = dmsClass.declaredMethods
-                    .filter { it.name.contains("display", true) }
-                    .distinctBy { it.name }
-                    .joinToString { it.name }
-                HookContext.log(Log.WARN, "E2b display leg abort: getDisplayInfo not found; methods: $trace")
-                return
-            }
+            if (getDisplayInfoM == null) return
             displayInfoTypeField = runCatching {
                 getDisplayInfoM!!.returnType.getField("type")
             }.getOrNull()
-            if (displayInfoTypeField == null) {
-                // OEM 校准弹药：DisplayInfo 字段清单（type 被改名/移除时）
-                val fTrace = getDisplayInfoM!!.returnType.declaredFields.joinToString { it.name }
-                HookContext.log(Log.WARN, "E2b display: info type field missing; fields: $fTrace")
-            }
 
             var hookedIds = 0
             // OEM 签名形变（ColorOS 15 实测 getDisplayIds 精确名 0 命中）：
@@ -141,15 +128,6 @@ object RecordDetectionHook {
                 }
                 hookedIds++
             }
-            if (hookedIds == 0) {
-                // OEM 校准弹药：DMS 返回数组的方法清单（id 列表被改名时）
-                val trace = dmsClass.declaredMethods
-                    .filter { it.returnType.isArray }
-                    .distinctBy { it.name }
-                    .joinToString { it.name }
-                HookContext.log(Log.WARN, "E2b display: 0 id-lists; array methods: $trace")
-            }
-
             var hookedInfo = 0
             infoCandidates.forEach { m ->
                 m.isAccessible = true

@@ -34,8 +34,7 @@ import java.util.concurrent.ConcurrentHashMap
  *     读 state，实时无事件依赖（热重载时浮窗已存在的场景也正确）
  *   - Path B（事件式）：hook OplusFlexibleWindowMinimizedManagerHelper
  *     #onTaskInfoChanged 维护浮窗 taskId 集合，Task.mTaskId 成员判定
- *   两路径 OR，运行时自适应解析；均解析失败时输出探针日志（Task
- *   flexible 字段清单）供下轮校准。
+ *   两路径 OR，运行时自适应解析。
  * - 未知 windowing mode：一次性诊断日志（已知常规值不刷屏）
  *
  * 标记目标三处（TSS 实证矩阵，全打冗余覆盖）：
@@ -267,7 +266,7 @@ object FreeformPierceHook {
 
     // ==================== ColorOS 探测通道解析 ====================
 
-    /** Path A（TaskInfo getter）+ Path B（mTaskId 字段）运行时解析，失败输出探针日志 */
+    /** Path A（TaskInfo getter）+ Path B（mTaskId 字段）运行时自适应解析 */
     private fun resolveOplusProbes(classLoader: ClassLoader) {
         runCatching {
             val taskInfoClass = Class.forName("android.app.TaskInfo")
@@ -280,18 +279,6 @@ object FreeformPierceHook {
                 .flatMap { it.declaredFields.toList() }
                 .firstOrNull { it.name == "mTaskId" }
                 ?.apply { isAccessible = true }
-            HookContext.log(
-                Log.INFO,
-                "E4 oplus probe: taskInfo=${taskInfoM?.name ?: "none"}, mTaskId=${taskMTaskIdField != null}"
-            )
-            if (taskInfoM == null && taskMTaskIdField == null) {
-                // 下轮校准弹药：Task 上的 flexible/freeform 痕迹清单
-                val trace = hierarchyOf(taskClass)
-                    .flatMap { it.declaredFields.toList() }
-                    .filter { it.name.contains("flexible", true) || it.name.contains("freeform", true) }
-                    .joinToString { "${it.name}:${it.type.simpleName}" }
-                HookContext.log(Log.INFO, "E4 oplus probe fail, taskFlexFields=${trace.ifEmpty { "none" }}")
-            }
         }.onFailure { HookContext.log(Log.WARN, "E4 oplus probe error: ${it.message}") }
     }
 

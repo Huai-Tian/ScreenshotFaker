@@ -112,6 +112,12 @@ fun TemplateCompose(navController: NavController) {
     // 选图后先解码降采样（原图可能 50MP，直接解码 OOM），弹屏幕比例
     // 裁剪对话框，确认后落盘
     var pendingCrop by remember { mutableStateOf<Bitmap?>(null) }
+    // 换图修订号：重选同槽位时 imageId 值不变（全局恒 GLOBAL_ID）→
+    // 保存的 config 结构相等 → 状态不失效 → 行不重组 → 缩略图
+    // remember(file.length/lastModified) 无从重读磁盘元数据，预览停留
+    // 旧图。rev 变更强制行重组刷新预览（"开关一关一开才刷新"即同机理：
+    // 开关变更触发重组，彼时元数据已新）
+    var imageRev by remember { mutableStateOf(0) }
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -163,6 +169,7 @@ fun TemplateCompose(navController: NavController) {
                         ReplaceEntryRow(
                             enabled = config.globalReplaceEnabled,
                             imageFile = replaceImageFile(context, config),
+                            rev = imageRev,
                             onToggle = { v ->
                                 scope.launch {
                                     TemplateManager.saveConfig(context, config.copy(globalReplaceEnabled = v))
@@ -288,7 +295,10 @@ fun TemplateCompose(navController: NavController) {
             titleRes = R.string.crop_replace_image,
             onConfirm = { cropped ->
                 pendingCrop = null
-                scope.launch { importReplaceImage(context, config, cropped) }
+                scope.launch {
+                    importReplaceImage(context, config, cropped)
+                    imageRev++
+                }
             },
             onDismiss = { pendingCrop = null }
         )
@@ -334,6 +344,9 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
     // 模板级替换选图（与全局入口同管线：Photo Picker → 降采样解码 →
     // 屏幕比例裁剪 → ReplaceImageManager 落双区，imageId = 模板 id）
     var pendingCrop by remember { mutableStateOf<Bitmap?>(null) }
+    // 换图修订号（与 TemplateCompose 同机理：重选同模板槽位时 imageId
+    // 状态值不变、config 未保存 → 无重组 → 缩略图停留旧图）
+    var imageRev by remember { mutableStateOf(0) }
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -468,6 +481,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                 if (editing != null) {
                     TemplateReplaceRow(
                         imageFile = ReplaceImageManager.localFile(context, editing.id),
+                        rev = imageRev,
                         bound = imageId != null,
                         onPickImage = {
                             imagePicker.launch(
@@ -515,6 +529,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                         scope.launch {
                             ReplaceImageManager.save(context, tplId, cropped)
                             imageId = tplId
+                            imageRev++
                         }
                     },
                     onDismiss = { pendingCrop = null }
@@ -568,6 +583,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
 @Composable
 private fun TemplateReplaceRow(
     imageFile: File,
+    rev: Int,
     bound: Boolean,
     onPickImage: () -> Unit,
     onClear: () -> Unit,
@@ -585,7 +601,7 @@ private fun TemplateReplaceRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (configured) {
-                    ReplaceThumb(imageFile)
+                    ReplaceThumb(imageFile, rev)
                     Spacer(Modifier.width(12.dp))
                 } else {
                     Icon(
@@ -648,6 +664,7 @@ private fun featureIcon(tpl: HookTemplate): ImageVector = when {
 private fun ReplaceEntryRow(
     enabled: Boolean,
     imageFile: File?,
+    rev: Int,
     onToggle: (Boolean) -> Unit,
     onPickImage: () -> Unit,
 ) {
@@ -663,7 +680,7 @@ private fun ReplaceEntryRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (enabled && configured && imageFile != null) {
-                ReplaceThumb(imageFile)
+                ReplaceThumb(imageFile, rev)
                 Spacer(Modifier.width(12.dp))
             }
             Column {
@@ -687,10 +704,12 @@ private fun ReplaceEntryRow(
     }
 }
 
-/** 已配置缩略图（降采样解码，~256px 预览） */
+/** 已配置缩略图（降采样解码，~256px 预览；rev = 换图修订号，同槽位
+ *  重选时强制键失效——file.length/lastModified 键仅在重组时求值，
+ *  rev 变更即触发重组） */
 @Composable
-private fun ReplaceThumb(file: File) {
-    val bitmap = remember(file.absolutePath, file.length(), file.lastModified()) {
+private fun ReplaceThumb(file: File, rev: Int) {
+    val bitmap = remember(file.absolutePath, file.length(), file.lastModified(), rev) {
         runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, bounds)

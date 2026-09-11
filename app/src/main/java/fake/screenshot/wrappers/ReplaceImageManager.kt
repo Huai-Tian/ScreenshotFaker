@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import fake.screenshot.LSPosedServiceManager
 import fake.screenshot.hooks.ReplaceImageCodec
 import fake.screenshot.hooks.ReplaceImageStore
+import io.github.libxposed.service.XposedService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -71,12 +72,16 @@ object ReplaceImageManager {
                     val id = name.removePrefix(ReplaceImageStore.REMOTE_PREFIX)
                     if (id !in active) runCatching { service.deleteRemoteFile(name) }
                 }
-                // 缺失补投：配置有、远程无（本地明文是保存保底）
+                // 缺失/损坏补投：配置有、远程无，或远程信封解密失败（历史
+                // 截断缺陷损坏的残留 / 写半途中断）——本地明文是保存保底
+                // 与权威源，重投即愈（见 pushRemote 截断注释）
                 active.forEach { id ->
                     val name = ReplaceImageStore.remoteName(id)
-                    if (name !in existing) {
-                        val local = localFile(context, id)
-                        if (local.exists()) runCatching { pushRemote(id, local) }
+                    val local = localFile(context, id)
+                    if (!local.exists()) return@forEach
+                    val corrupt = name in existing && !remoteEnvelopeOk(service, name)
+                    if (name !in existing || corrupt) {
+                        runCatching { pushRemote(id, local) }
                     }
                 }
             }
@@ -130,13 +135,35 @@ object ReplaceImageManager {
         }
     }
 
-    /** 本地 PNG 加密推送到托管区；返回远程文件名（失败 null） */
+    /**
+     * 本地 PNG 加密推送到托管区；返回远程文件名（失败 null）。
+     *
+     * 截断铁律：openRemoteFile 为 RW|CREATE 语义不截断——重存更短信封
+     * 时旧文件内容残留尾巴，而信封格式 [nonce][密文+GCM tag] 的 tag 在
+     * 文件尾，解密把整个尾部当 tag → 恒败（"重选小图后替换永久失效"
+     * 的根因，真机实证：g 槽位重选后 decrypt failed 持续）。双重保险：
+     * 写前 ftruncate 归零 + 写后截到精确长度（fd 关闭前执行），任一生效
+     * 即保证文件 = 信封精确字节
+     */
     private fun pushRemote(imageId: String, local: File): String? = runCatching {
         val service = LSPosedServiceManager.mService ?: return null
         val envelope = ReplaceImageCodec.encrypt(local.readBytes())
         val name = ReplaceImageStore.remoteName(imageId)
         val pfd: ParcelFileDescriptor = service.openRemoteFile(name)
-        ParcelFileDescriptor.AutoCloseOutputStream(pfd).use { it.write(envelope) }
+        ParcelFileDescriptor.AutoCloseOutputStream(pfd).use {
+            runCatching { android.system.Os.ftruncate(pfd.fileDescriptor, 0L) }
+            it.write(envelope)
+            runCatching { android.system.Os.ftruncate(pfd.fileDescriptor, envelope.size.toLong()) }
+        }
         name
     }.getOrNull()
+
+    /** 远程信封完整性校验（绑定自愈用）：读全文解密，通过 = 非损坏 */
+    private fun remoteEnvelopeOk(service: XposedService, name: String): Boolean = runCatching {
+        val envelope = java.io.ByteArrayOutputStream().use { out ->
+            ParcelFileDescriptor.AutoCloseInputStream(service.openRemoteFile(name)).use { it.copyTo(out) }
+            out.toByteArray()
+        }
+        ReplaceImageCodec.decrypt(envelope) != null
+    }.getOrDefault(false)
 }

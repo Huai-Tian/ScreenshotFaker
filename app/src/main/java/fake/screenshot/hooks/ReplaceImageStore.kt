@@ -68,8 +68,13 @@ object ReplaceImageCodec {
  * 解码代价（~200ms 量级，落在截图流程本身的时序预算内）。
  *
  * 缓存：LruCache 4 槽（屏幕级 ARGB_8888 ~10MB/张，上限 ~40MB——
- * 同屏语义只用 1 张，4 槽覆盖前后台快速切换的复用）；失败负缓存到
- * reload 为止（坏图/文件缺失不逐帧重试 IO）。
+ * 同屏语义只用 1 张，4 槽覆盖前后台快速切换的复用）；命中须经指纹
+ * 校验（同 id 换图——重选槽位——远程文件被覆写而 imageId 不变、配置
+ * JSON 亦相同（RemotePreferences 值级去重不推送），纯 id 键控会持续
+ * 供旧图直到进程重启；指纹 = 远程文件 size+mtime，一次 open+fstat，
+ * 落在本就重量级的截图保存路径时序预算内）；失败负缓存指纹感知
+ * （[isNegativelyCached]——坏图/文件缺失不逐帧重试 IO，但远程文件
+ * 变化（App 侧自愈重投/换图）即失效重试，无需等 reload）。
  */
 object ReplaceImageStore {
 
@@ -80,13 +85,17 @@ object ReplaceImageStore {
 
     private const val CACHE_SLOTS = 4
 
-    private val cache = object : LinkedHashMap<String, Bitmap>(8, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>): Boolean =
-            size > CACHE_SLOTS
-    }.let { Collections.synchronizedMap(it) as MutableMap<String, Bitmap> }
+    /** 缓存槽：指纹（[fingerprintOf]）+ 位图 */
+    private class Entry(val fingerprint: Long, val bitmap: Bitmap)
 
-    /** 负缓存：加载失败的 id（reload 时重置） */
-    private val failed = ConcurrentHashMap.newKeySet<String>()
+    private val cache = object : LinkedHashMap<String, Entry>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Entry>): Boolean =
+            size > CACHE_SLOTS
+    }.let { Collections.synchronizedMap(it) as MutableMap<String, Entry> }
+
+    /** 负缓存：id → 失败时的远程文件指纹（reload 重置；指纹感知见
+     *  [isNegativelyCached]——App 侧自愈重投/换图后无需 reload 即失效重试） */
+    private val failed = ConcurrentHashMap<String, Long>()
 
     @Volatile
     private var installed = false
@@ -99,18 +108,48 @@ object ReplaceImageStore {
         reload()
     }
 
-    /** 取图（未命中同步加载）；null = 无图/加载失败（引擎按原生处理） */
+    /** 取图（未命中/指纹不符同步加载；null = 无图/加载失败，引擎按原生
+     *  处理）。命中先过指纹校验，不符即逐出重载——同槽位换图即时生效 */
     fun bitmapFor(imageId: String): Bitmap? {
-        cache[imageId]?.let { return it }
-        if (failed.contains(imageId)) return null
+        val cached = cache[imageId]
+        if (cached != null && fingerprintOf(imageId) == cached.fingerprint) return cached.bitmap
+        if (isNegativelyCached(imageId)) return null
         return synchronized(imageId.intern()) {
-            cache[imageId]?.let { return it }
-            load(imageId)?.also { cache[imageId] = it } ?: run {
-                failed.add(imageId)
+            val resynced = cache[imageId]
+            if (resynced != null && fingerprintOf(imageId) == resynced.fingerprint) return resynced.bitmap
+            if (isNegativelyCached(imageId)) return null
+            load(imageId)?.let { (fp, bmp) ->
+                cache[imageId] = Entry(fp, bmp)
+                bmp
+            } ?: run {
+                failed[imageId] = fingerprintOf(imageId)
                 null
             }
         }
     }
+
+    /**
+     * 负缓存命中判定：远程文件指纹仍等于失败时指纹才命中。已变
+     * （App 侧绑定自愈重投了历史损坏残留 / 换图覆盖）即逐出重试——
+     * 修复后首个恢复路径不再依赖配置 reload（开关循环），App 侧重投
+     * 完成后的下一次取图即生效
+     */
+    private fun isNegativelyCached(imageId: String): Boolean {
+        val failedFp = failed[imageId] ?: return false
+        if (fingerprintOf(imageId) == failedFp) return true
+        failed.remove(imageId)
+        return false
+    }
+
+    /** 远程文件指纹（size 高 32 位 + mtime 秒低 32 位；只 stat 不读字节。
+     *  stat 失败/文件缺失返回 0——退化校验恒等价于旧实现的纯 id 键控，
+     *  不劣化）。开销一次 openRemoteImage IPC + fstat */
+    private fun fingerprintOf(imageId: String): Long = runCatching {
+        HookContext.openRemoteImage(remoteName(imageId))?.use { pfd ->
+            val st = android.system.Os.fstat(pfd.fileDescriptor)
+            (st.st_size shl 32) or (st.st_mtime and 0xFFFFFFFFL)
+        } ?: 0L
+    }.getOrDefault(0L)
 
     /**
      * 配置 reload：清负缓存、逐出失效槽位、后台预热全部配置内 id
@@ -126,13 +165,19 @@ object ReplaceImageStore {
         }, "sf-img-warm").apply { isDaemon = true }.start()
     }
 
-    /** 单 id 全链路：远程密文 → 解密 → 解码 */
-    private fun load(imageId: String): Bitmap? = runCatching {
+    /** 单 id 全链路：远程密文 → 解密 → 解码；附带文件指纹（同一 pfd
+     *  先 stat 再读，供缓存槽校验） */
+    private fun load(imageId: String): Pair<Long, Bitmap>? = runCatching {
         val pfd = HookContext.openRemoteImage(remoteName(imageId)) ?: run {
             HookContext.log(Log.WARN, "E3 remote file absent for $imageId")
             return null
         }
+        var fingerprint = 0L
         val envelope = pfd.use { fd ->
+            runCatching {
+                val st = android.system.Os.fstat(fd.fileDescriptor)
+                fingerprint = (st.st_size shl 32) or (st.st_mtime and 0xFFFFFFFFL)
+            }
             ByteArrayOutputStream().use { out ->
                 android.os.ParcelFileDescriptor.AutoCloseInputStream(fd).use { it.copyTo(out) }
                 out.toByteArray()
@@ -142,9 +187,9 @@ object ReplaceImageStore {
             HookContext.log(Log.WARN, "E3 decrypt failed for $imageId")
             return null
         }
-        BitmapFactory.decodeByteArray(plain, 0, plain.size) ?: run {
+        BitmapFactory.decodeByteArray(plain, 0, plain.size)?.let { fingerprint to it } ?: run {
             HookContext.log(Log.WARN, "E3 decode failed for $imageId")
-            return null
+            null
         }
     }.onFailure {
         HookContext.log(Log.WARN, "E3 image load failed for $imageId: ${it.message}")

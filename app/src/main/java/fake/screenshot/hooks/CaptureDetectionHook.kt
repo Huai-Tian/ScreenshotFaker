@@ -130,15 +130,7 @@ object CaptureDetectionHook {
             ownerUidField = fieldInHierarchy(arClass, "mOwnerUid")?.apply { isAccessible = true }
             if (getOwningPackage == null && pkgField == null && uidMethod == null &&
                 uidField == null && ownerUidMethod == null && ownerUidField == null
-            ) {
-                // OEM 校准弹药：ActivityRecord 链字段清单（归属解析全灭时）
-                val fTrace = hierarchyOf(arClass)
-                    .flatMap { it.declaredFields.toList() }
-                    .filter { it.type == String::class.java || it.type == Int::class.javaPrimitiveType }
-                    .joinToString { "${it.name}:${it.type.simpleName}" }
-                HookContext.log(Log.WARN, "E2a activityRecord leg abort: no owner resolution; fields: $fTrace")
-                return
-            }
+            ) return
             var hooked = 0
             hierarchyOf(arClass)
                 .flatMap { it.declaredMethods.toList() }
@@ -155,14 +147,7 @@ object CaptureDetectionHook {
                     }
                     hooked++
                 }
-            if (hooked == 0) {
-                // OEM 校准弹药：ActivityRecord 链上含 capture 语义的方法清单
-                val trace = hierarchyOf(arClass)
-                    .flatMap { it.declaredMethods.toList() }
-                    .filter { it.name.contains("apture", true) }
-                    .joinToString { "${it.name}(${it.parameterCount})" }
-                HookContext.log(Log.WARN, "E2a activityRecord: 0 hooked; capture-ish: $trace")
-            } else {
+            if (hooked > 0) {
                 val via = listOfNotNull(
                     "pkg-method" to (getOwningPackage != null),
                     "pkg-field" to (pkgField != null),
@@ -290,14 +275,7 @@ object CaptureDetectionHook {
                 hooked++
             }
         }.onFailure { HookContext.log(Log.WARN, "E2a contentObserver hook error: ${it.message}") }
-        if (hooked == 0) {
-            HookContext.log(
-                Log.WARN,
-                "E2a contentObserver: 0 hooked; register-ish: " +
-                        csClass.declaredMethods.filter { it.name.startsWith("register") }
-                            .joinToString { it.name }
-            )
-        } else {
+        if (hooked > 0) {
             HookContext.log(Log.INFO, "E2a contentObserver: $hooked register paths hooked (${csClass.name})")
         }
         return hooked
@@ -411,10 +389,6 @@ object CaptureDetectionHook {
     @Volatile
     private var sysResolver: ContentResolver? = null
 
-    // 一次性结果探针（真机校准用：首次转发/首次吞各一条）
-    private var fwdLogged = false
-    private var dropLogged = false
-
     /**
      * 影子装配：接口由调用方按 registerContentObserver 形参传入（跨 FQN
      * 稳定：ColorOS android.database.* / AOSP android.content.*），Proxy
@@ -469,31 +443,20 @@ object CaptureDetectionHook {
      *   非截屏信号）
      */
     private fun dispatch(method: Method, args: Array<Any?>?, original: Any, callerUid: Int) {
-        val selfPkgs = HookContext.packagesForUid(callerUid) ?: return dropOnce("uid unresolved")
+        val selfPkgs = HookContext.packagesForUid(callerUid) ?: return
         if (selfPkgs.none { HookContext.aggressiveFilter(it) }) return forward(method, args, original)
-        if (selfPkgs.none { HookContext.allowSelfMediaEvents(it) }) return dropOnce("self-media off")
+        if (selfPkgs.none { HookContext.allowSelfMediaEvents(it) }) return
         val uris = urisOf(args)
-        if (uris.isEmpty()) return dropOnce("no uri")
+        if (uris.isEmpty()) return
         uris.forEach { uri ->
-            val owner = ownerOf(uri) ?: return dropOnce("unattributable ${uri.lastPathSegment}")
-            if (owner !in selfPkgs) return dropOnce("owner=$owner")
+            val owner = ownerOf(uri) ?: return
+            if (owner !in selfPkgs) return
         }
         forward(method, args, original)
     }
 
     private fun forward(method: Method, args: Array<Any?>?, original: Any) {
-        if (!fwdLogged) {
-            fwdLogged = true
-            HookContext.log(Log.INFO, "E2a shadow forwarded self event")
-        }
         runCatching { method.invoke(original, *(args ?: arrayOfNulls(0))) }
-    }
-
-    private fun dropOnce(reason: String) {
-        if (!dropLogged) {
-            dropLogged = true
-            HookContext.log(Log.INFO, "E2a shadow dropped event ($reason)")
-        }
     }
 
     /** 事件携带 uri 提取（onChangeEtc 各版本 Uri/Uri[]/List&lt;Uri&gt; 形状无关） */
