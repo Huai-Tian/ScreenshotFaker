@@ -6,14 +6,19 @@ import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import java.lang.reflect.Executable
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Hook 进程侧共享 spine：配置加载/缓存/查询面 + 进程判定 + 日志门面。
  * 各引擎（同目录单文件）唯一共享点，互相不引用。
  *
- * 体例铁律（热重载安全）：本对象只持有静态缓存与 listener，不创建线程、
- * 不触碰 native、不注册系统回调——onHotReloading 注销 listener 即达
- * "无残留"标准，框架随后可整体卸载旧代 classloader。
+ * 体例铁律（热重载安全）：本对象只持有静态缓存与 listener，不触碰
+ * native、不注册系统回调；唯一例外是配置退避重拉线程（config 未同步
+ * 时的 1s-16s 兜底拉取）——prepareHotReload 以放弃标记 + interrupt
+ * 令其即刻退出（sleep 中断被 runCatching 吞没，循环头见标记即 break），
+ * 线程 Runnable 不再持有旧 classloader，"无残留"标准仍然成立。
+ * 框架随后可整体卸载旧代 classloader。
  *
  * 配置流转：RemotePreferences（LSPosed 推送）→ 解码为 [HookConfig] 全量
  * 换入 @Volatile 引用。查询面在 hook 拦截器内被高频调用（逐事件级），
@@ -77,6 +82,7 @@ object HookContext {
         reloadListeners.forEach { runCatching(it) }
         if (raw != null) {
             configSynced = true
+            configSettled.countDown()
             log(Log.INFO, "config synced (templates=${config.templates.size})")
         } else {
             // 热重载时序竞争（实测：连续热重载后 RemotePreferences 桥推送
@@ -89,6 +95,15 @@ object HookContext {
     @Volatile
     private var configSynced = false
 
+    /**
+     * 配置就位 latch（真正的配置到达时开闸）。供冷启动竞态护栏
+     * （[awaitConfigSynced]）有界等待——截屏进程被 OEM 后台清理杀死后，
+     * 次日首截从进程拉起到捕获执行仅 ~0.4-0.8s，而 RemotePreferences
+     * 首推实测 ~1.25s：无护栏时该截必以 DEFAULT 配置（全关）放行，
+     * E3a 替换静默失效、真内容落盘
+     */
+    private val configSettled = CountDownLatch(1)
+
     /** 退避重拉（1s/2s/4s/8s/16s；期间收到推送则 configSynced=true 退出） */
     private fun scheduleConfigRetry() {
         if (configSynced || retryScheduled) return
@@ -99,7 +114,7 @@ object HookContext {
         Thread({
             for (i in 0 until 5) {
                 runCatching { Thread.sleep(1000L shl i) }
-                if (configSynced) break
+                if (configSynced || retryAbandoned) break
                 log(Log.WARN, "config retry #${i + 1} (still unsynced)")
                 val ok = runCatching {
                     val raw = prefs?.getString(HookConfigCodec.REMOTE_KEY, null)
@@ -111,16 +126,48 @@ object HookContext {
                     } else false
                 }.getOrDefault(false)
                 if (ok) {
+                    configSettled.countDown()
                     log(Log.INFO, "config retry synced (templates=${config.templates.size})")
                     break
                 }
             }
+            if (!configSynced) configSettled.countDown() // 重试耗尽：以 DEFAULT 结算，放行等待者
             retryScheduled = false
-        }, "sf-config-retry").apply { isDaemon = true }.start()
+        }, "sf-config-retry").apply {
+            isDaemon = true
+            retryThread = this
+        }.start()
     }
 
     @Volatile
     private var retryScheduled = false
+
+    /** 热重载放弃标记（prepareHotReload 置位；重拉线程见之即退，新代各自为 false） */
+    @Volatile
+    private var retryAbandoned = false
+
+    /** 重拉线程引用（prepareHotReload interrupt——睡眠最长 16s，打断即释放旧 classloader） */
+    @Volatile
+    private var retryThread: Thread? = null
+
+    /**
+     * 冷启动竞态护栏：有界等待配置真正到达（非重试耗尽）。
+     * 调用方（E3a 替换判定）在策略未命中时经此等待，命中推送即可抢回
+     * 本应替换的捕获。返回 true = 配置已就位。
+     * 超时自结算 latch——每进程至多一次完整等待（后续调用零开销直返），
+     * 等待不阻断后续推送（listener 独立更新 config，latch 只是信号）。
+     */
+    fun awaitConfigSynced(timeoutMs: Long): Boolean {
+        if (configSynced) return true
+        val settled = runCatching {
+            configSettled.await(timeoutMs, TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
+        if (!settled) {
+            configSettled.countDown()
+            log(Log.WARN, "config sync wait timed out (${timeoutMs}ms), cold-start race conceded")
+        }
+        return configSynced
+    }
 
     /** 配置重载监听（引擎订阅；同为 listener，热重载时随 prefs 一并清理） */
     private val reloadListeners = CopyOnWriteArraySet<() -> Unit>()
@@ -131,8 +178,17 @@ object HookContext {
 
     // ==================== 热重载生命周期 ====================
 
-    /** 旧代清理（onHotReloading 内调用）：注销 listener 后本对象即无外部触点 */
+    /**
+     * 旧代清理（onHotReloading 内调用）：注销 listener、放弃重拉线程后
+     * 本对象即无外部触点。重拉线程最长可眠 16s 且 Runnable 持有旧
+     * classloader——放弃标记 + interrupt 令其即刻退出（中断被 runCatching
+     * 吞没后循环头见标记即 break）；同时结算 latch，放行冷启动等待中的
+     * 捕获（configSynced 仍为 false → 调用方 fail-open，语义不变）
+     */
     fun prepareHotReload() {
+        retryAbandoned = true
+        retryThread?.interrupt()
+        configSettled.countDown()
         prefs?.unregisterOnSharedPreferenceChangeListener(prefsListener)
         reloadListeners.clear()
     }
@@ -156,14 +212,11 @@ object HookContext {
     fun maskRecordDetection(pkg: String?): Boolean =
         config.templateFor(pkg)?.maskRecordDetection ?: false
 
-    /** E2c：检测者的悬浮窗直接信号是否屏蔽（触摸遮挡标志） */
-    fun maskOverlayDetection(pkg: String?): Boolean =
-        config.templateFor(pkg)?.maskOverlayDetection ?: false
-
     /**
      * E2c 生效条件：任一模板启用悬浮窗屏蔽。trustedOverlay 是模块自有
-     * 窗口的属性，作用于全部下方窗口——无法按检测者包名区分，故任一
-     * 开启即全局标记（开关语义见 OverlayStealthHook 头注释）
+     * 窗口的属性，作用于全部下方窗口——无法按检测者包名区分（故无
+     * per-package 查询面），任一开启即全局标记（开关语义见
+     * OverlayStealthHook 头注释）
      */
     fun anyOverlayMaskOn(): Boolean =
         config.templates.any { it.maskOverlayDetection }

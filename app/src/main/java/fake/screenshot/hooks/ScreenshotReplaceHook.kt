@@ -39,11 +39,20 @@ import java.lang.reflect.Modifier
  *
  * fail-open 全链：无策略 / 无图 / 解码失败 → 原生结果原样返回——
  * 替换功能绝不阻断截屏流程本身（截屏失败比真内容更可疑）。
+ *
+ * 冷启动竞态护栏（ColorOS 15 实测）：截屏进程夜间被 OEM 后台清理
+ * （o-stop）杀死后，次日首截从进程拉起到捕获执行仅 ~0.4-0.8s，而
+ * RemotePreferences 首推 ~1.25s 才到——策略未命中时先有界等待配置
+ * （每进程至多一次），等待后仍无策略才 fail-open。无护栏时首截必以
+ * DEFAULT 配置放行真内容落盘（见 replaceBitmap）。
  */
 object ScreenshotReplaceHook {
 
     /** 每图一次的命中日志（替换发生即记，防高频刷屏） */
     private val hitLogged = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** 冷启动配置竞态的有界等待上限（覆盖实测 ~1.25s 推送延迟 + 余量） */
+    private const val COLD_CONFIG_WAIT_MS = 2000L
 
     // ---- 反射单点缓存（install 解析一次）----
 
@@ -139,10 +148,19 @@ object ScreenshotReplaceHook {
      * 按前台命中取假图并缩放到原生结果尺寸；null = 不替换。
      * 热路径先查策略存在性（无锁快照，无配置直接原路返回——非截图
      * 场景误触 wrapHardwareBuffer 时零额外开销）
+     *
+     * 冷启动竞态护栏：策略未命中且配置未同步时，有界等待推送到达后
+     * 重查（进程被杀后的首截捕获早于 RemotePreferences 首推，见类头）。
+     * 每进程至多一次完整等待，超时后按 fail-open 放行——截屏流程
+     * 本身绝不因等待被无限阻断
      */
     private fun replaceBitmap(targetW: Int, targetH: Int): Bitmap? {
         if (targetW <= 0 || targetH <= 0) return null
-        if (!HookContext.hasReplacePolicy()) return null
+        if (!HookContext.hasReplacePolicy()) {
+            if (!HookContext.awaitConfigSynced(COLD_CONFIG_WAIT_MS) ||
+                !HookContext.hasReplacePolicy()
+            ) return null
+        }
         val imageId = HookContext.replacementImageId(foregroundPackage()) ?: return null
         val fake = ReplaceImageStore.bitmapFor(imageId) ?: return null
         if (hitLogged.add(imageId)) {

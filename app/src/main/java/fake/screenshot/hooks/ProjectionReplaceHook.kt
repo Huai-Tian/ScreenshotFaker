@@ -306,7 +306,6 @@ object ProjectionReplaceHook {
         val tokenM = scClass.getDeclaredMethod("getPhysicalDisplayToken", Long::class.javaPrimitiveType)
             .apply { isAccessible = true }
         val token = tokenM.invoke(null, ids.firstOrNull() ?: return null) ?: return null
-        val statsCtor = scClass.getDeclaredConstructor().let { }
         val statsClass = Class.forName("android.view.SurfaceControl\$DisplayStatistics")
         val getStats = scClass.getDeclaredMethod("getDisplayStatistics", token::class.java)
             .apply { isAccessible = true }

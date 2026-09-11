@@ -23,8 +23,8 @@ import java.io.File
  * - 本地 files/replace/&lt;imageId&gt;.png：明文，模块私有目录，UI 缩略图
  *   渲染源；胁迫销毁随 [neutralizeForCoercion] 一并清除（明文假图
  *   本身即取证信号）
- * - 远程 sf_img_&lt;imageId&gt;：AES-GCM 信封密文（[ReplaceImageCodec]），
- *   hook 进程经 [ReplaceImageStore] 读取解密
+ * - 远程 sf_img_&lt;imageId&gt;：AES-GCM 信封密文（[fake.screenshot.hooks.ReplaceImageCodec]），
+ *   hook 进程经 [fake.screenshot.hooks.ReplaceImageStore] 读取解密
  *
  * imageId 命名：全局图固定 "g"，模板图 = 模板 id（模板删除时同步清图）。
  */
