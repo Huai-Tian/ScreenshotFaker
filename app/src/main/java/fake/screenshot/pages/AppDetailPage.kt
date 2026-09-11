@@ -15,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Collections
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material3.AlertDialog
@@ -79,6 +80,8 @@ fun AppDetailCompose(navController: NavController, pkg: String) {
 
     val assignedId = config.scope[pkg]
     val aggressive = config.aggressiveFilter.contains(pkg)
+    // 子开关态（UI 层保证：开启激进时同步入集 → 默认开启）
+    val allowSelf = config.aggressiveAllowSelfMedia.contains(pkg)
     var showTemplatePicker by remember { mutableStateOf(false) }
 
     fun save(next: HookConfig) {
@@ -156,12 +159,35 @@ fun AppDetailCompose(navController: NavController, pkg: String) {
                         onCheckedChange = { on ->
                             save(
                                 config.copy(
+                                    // 总开关联动：开 = 两集合同步入（子开关默认开启），
+                                    // 关 = 两集合同步出（重开时回到默认开启）
                                     aggressiveFilter = if (on) config.aggressiveFilter + pkg
-                                    else config.aggressiveFilter - pkg
+                                    else config.aggressiveFilter - pkg,
+                                    aggressiveAllowSelfMedia = if (on) config.aggressiveAllowSelfMedia + pkg
+                                    else config.aggressiveAllowSelfMedia - pkg,
                                 )
                             )
                         }
                     )
+                    // ---- 子开关：允许监听自身媒体事件（影子 observer，随总开关显隐）----
+                    if (aggressive) {
+                        Column(modifier = Modifier.padding(start = 16.dp)) {
+                            TwoStatePreference(
+                                icon = Icons.Default.Collections,
+                                title = stringResource(R.string.allow_self_media_events),
+                                subtitle = stringResource(R.string.allow_self_media_events_hint),
+                                checked = allowSelf,
+                                onCheckedChange = { on ->
+                                    save(
+                                        config.copy(
+                                            aggressiveAllowSelfMedia = if (on) config.aggressiveAllowSelfMedia + pkg
+                                            else config.aggressiveAllowSelfMedia - pkg
+                                        )
+                                    )
+                                }
+                            )
+                        }
+                    }
                 }
             }
             Spacer(Modifier.size(8.dp))

@@ -83,12 +83,21 @@ data class HookConfig(
     /**
      * E2a 激进检测过滤的包名集（应用详情页单独开关，独立于模板——
      * 未分配模板的应用也可开启）。开启 = 该应用的媒体域
-     * ContentObserver 注册全部静默跳过（注册/反注册正常返回，回调
-     * 永不触发）：截屏媒体库监听、screencap 落盘监听全通道隐身。
-     * 副作用：应用自身的媒体库变更感知失效（相册类应用的自动刷新）
-     * ——「激进」语义，per-app 粒度即为此
+     * ContentObserver 注册被接管，具体档位由子开关
+     * [aggressiveAllowSelfMedia] 决定（见其 KDoc）
      */
     val aggressiveFilter: Set<String> = emptySet(),
+    /**
+     * E2a 激进过滤子开关「允许监听自身媒体事件」的包名集（默认开启——
+     * 开启激进总开关时同步入集）：
+     * - 在集（子开）：媒体域注册经参数替换为影子 observer 继续成功，
+     *   派发按行级 owner_package_name 归属判定——仅放行 owner ==
+     *   注册者自己的事件（自插探测通过，屏蔽不可自证），其余全吞
+     * - 不在集（子关）：注册即吞（旧行为）——observer 永不触发，
+     *   自插探测可识破，换来零归属查询开销
+     * 总开关关闭时本集合无意义（不单独消费）
+     */
+    val aggressiveAllowSelfMedia: Set<String> = emptySet(),
 ) {
     companion object {
         /** 全关默认态：与未安装模块的原生行为不可区分 */
@@ -169,6 +178,7 @@ object HookConfigCodec {
             })
             put("s", JSONObject(config.scope))
             put("af", JSONArray(config.aggressiveFilter))
+            put("am", JSONArray(config.aggressiveAllowSelfMedia))
         }.toString()
 
         val nonce = ByteArray(NONCE_LEN).also { SecureRandom().nextBytes(it) }
@@ -231,6 +241,17 @@ object HookConfigCodec {
                 arr.optString(i).ifEmpty { continue }.let { add(it) }
             }
         }
+        val aggressiveAllowSelfMedia = run {
+            val arr = json.optJSONArray("am")
+            // 旧配置迁移：am 键缺失 = 子开关未问世时的激进用户，
+            // 按默认开启语义升格为影子模式
+                ?: return@run aggressiveFilter
+            buildSet {
+                for (i in 0 until arr.length()) {
+                    arr.optString(i).ifEmpty { continue }.let { add(it) }
+                }
+            }
+        }
         return HookConfig(
             globalSecurePolicy = json.optInt("gp", HookConfig.SECURE_FOLLOW).coerceIn(0, 2),
             globalReplaceEnabled = json.optBoolean("re"),
@@ -238,6 +259,7 @@ object HookConfigCodec {
             templates = templates,
             scope = scope,
             aggressiveFilter = aggressiveFilter,
+            aggressiveAllowSelfMedia = aggressiveAllowSelfMedia,
         )
     }
 }

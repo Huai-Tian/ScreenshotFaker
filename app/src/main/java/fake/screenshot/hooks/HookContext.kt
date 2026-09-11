@@ -265,11 +265,19 @@ object HookContext {
         config.templateFor(pkg)?.maskPresentationDetection ?: false
 
     /**
-     * E2a：激进检测过滤（媒体域 ContentObserver 注册全吞）。
+     * E2a：激进检测过滤（媒体域 ContentObserver 注册接管）。
      * per-app 独立开关，不依赖模板分配（应用详情页设置）
      */
     fun aggressiveFilter(pkg: String?): Boolean =
         pkg != null && config.aggressiveFilter.contains(pkg)
+
+    /**
+     * E2a 激进过滤子开关：该应用的媒体域监听是否换影子 observer
+     * （仅放行 owner==注册者自己的事件，自插探测通过）。仅在
+     * [aggressiveFilter] 开启时有意义（UI 层保证两集同步入/出）
+     */
+    fun allowSelfMediaEvents(pkg: String?): Boolean =
+        pkg != null && config.aggressiveAllowSelfMedia.contains(pkg)
 
     /** E4：被配置应用的自由浮窗是否穿透（对截图/录屏隐身） */
     fun piercesFreeform(pkg: String?): Boolean =

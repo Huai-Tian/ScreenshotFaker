@@ -73,6 +73,8 @@
     <string name="receive_screen_sharing_from_ScreenshotFaker">接收来自ScreenshotFaker的屏幕共享</string>
     <string name="aggressive_detection_filtering">激进的检测过滤</string>
     <string name="filter_content_observer">过滤目标应用的截屏文件监控</string>
+    <string name="allow_self_media_events">允许监听自身媒体事件</string>
+    <string name="allow_self_media_events_hint">开启：仅放行该应用自身产生的媒体变更，截图落盘对其隐身且无法被自插探测识破；关闭：该应用的媒体库监听完全失效</string>
     <!--Hook templates-->
     <string name="template_new">新建模板</string>
     <string name="template_name">名称</string>

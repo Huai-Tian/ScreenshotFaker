@@ -91,6 +91,8 @@
     <string name="receive_screen_sharing_from_ScreenshotFaker">Receive stealth screen sharing from ScreenshotFaker</string>
     <string name="aggressive_detection_filtering">Aggressive detection filtering</string>
     <string name="filter_content_observer">Filter monitoring of screenshot files from the target app</string>
+    <string name="allow_self_media_events">Allow self media events</string>
+    <string name="allow_self_media_events_hint">On: only media changes created by the app itself are delivered — screenshot inserts stay invisible and cannot be exposed by self-probing; Off: its media library monitoring is fully disabled</string>
     <!--Hook templates-->
     <string name="template_new">New template</string>
     <string name="template_name">Name</string>

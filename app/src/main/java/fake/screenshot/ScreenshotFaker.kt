@@ -128,11 +128,15 @@ class ScreenshotFaker : XposedModule() {
     }
 
     /**
-     * 热重载放行前的旧代清理。本模块在目标进程内不创建线程/native/外部回调
-     * （体例铁律，见 HookContext），唯一外部触点是 RemotePreferences
-     * listener——注销即达无残留标准，返回 true 放行。
+     * 热重载放行前的旧代清理。本模块在目标进程内不创建常驻线程/native/
+     * 外部回调（体例铁律，见 HookContext），外部触点两个：RemotePreferences
+     * listener（注销即断链）+ E2a 影子 observer（ContentService 树内钉住
+     * 旧 classloader，树遍历还原）——均清扫后返回 true 放行。
      */
     override fun onHotReloading(param: HotReloadingParam): Boolean {
+        if (HookContext.kind == ProcessKind.SYSTEM_SERVER) {
+            CaptureDetectionHook.prepareHotReload()
+        }
         HookContext.prepareHotReload()
         param.setSavedInstanceState(hookParam)
         return true
