@@ -111,6 +111,10 @@ object ReplaceImageStore {
     /** 取图（未命中/指纹不符同步加载；null = 无图/加载失败，引擎按原生
      *  处理）。命中先过指纹校验，不符即逐出重载——同槽位换图即时生效 */
     fun bitmapFor(imageId: String): Bitmap? {
+        if (isNegativelyCached(imageId)) {
+            HookContext.log(Log.WARN, "E3 image negatively cached for $imageId (remote fingerprint unchanged)")
+            return null
+        }
         val cached = cache[imageId]
         if (cached != null && fingerprintOf(imageId) == cached.fingerprint) return cached.bitmap
         if (isNegativelyCached(imageId)) return null

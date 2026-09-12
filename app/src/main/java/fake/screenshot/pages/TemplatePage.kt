@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
@@ -83,9 +84,12 @@ import fake.screenshot.R
 import fake.screenshot.hooks.HookConfig
 import fake.screenshot.hooks.HookTemplate
 import fake.screenshot.wrappers.ReplaceImageManager
+import fake.screenshot.wrappers.ReplaceVideoManager
 import fake.screenshot.wrappers.TemplateManager
 import fake.screenshot.styles.IconCropDialog
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -107,6 +111,10 @@ fun TemplateCompose(navController: NavController) {
         .collectAsStateWithLifecycle(initialValue = HookConfig.DEFAULT)
     var showHint by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    // 落地专用 scope（导入落盘 + 配置保存）：与组合生命周期解耦——视频
+    // 导入流式加密耗时数秒，导入中用户按返回退出页面会 cancel 掉半途
+    // 写入（半截本地/远程密文）。本 scope 无人 cancel，跑完即止
+    val persistScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
 
     // 截图替换选图（Photo Picker，不可用时框架自动回落系统选择器）。
     // 选图后先解码降采样（原图可能 50MP，直接解码 OOM），弹屏幕比例
@@ -128,6 +136,35 @@ fun TemplateCompose(navController: NavController) {
             } else {
                 Toast.makeText(context, R.string.replace_image_read_failed, Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    // 录屏替换选视频（Photo Picker VideoOnly）：无裁剪直接导入（大小/
+    // 可播放性校验 + 缩略图 + 远程流式加密投递都在 [ReplaceVideoManager.save]，
+    // 100MB 上限内可能耗时数秒——行内进度态反馈）
+    var videoImporting by remember { mutableStateOf(false) }
+    var videoRev by remember { mutableStateOf(0) }
+    val videoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) persistScope.launch {
+            videoImporting = true
+            when (ReplaceVideoManager.save(context, ReplaceVideoManager.GLOBAL_ID, uri)) {
+                ReplaceVideoManager.ImportResult.Ok -> {
+                    TemplateManager.saveConfig(
+                        context,
+                        config.copy(globalRecordVideoId = ReplaceVideoManager.GLOBAL_ID)
+                    )
+                    videoRev++
+                }
+                ReplaceVideoManager.ImportResult.TooLarge ->
+                    Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
+                ReplaceVideoManager.ImportResult.Invalid ->
+                    Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
+                ReplaceVideoManager.ImportResult.ReadFailed ->
+                    Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
+            }
+            videoImporting = false
         }
     }
 
@@ -178,6 +215,24 @@ fun TemplateCompose(navController: NavController) {
                             onPickImage = {
                                 imagePicker.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        RecordReplaceEntryRow(
+                            enabled = config.globalRecordVideoEnabled,
+                            videoFile = replaceVideoFile(context, config),
+                            thumbFile = ReplaceVideoManager.thumbFile(context, ReplaceVideoManager.GLOBAL_ID),
+                            importing = videoImporting,
+                            rev = videoRev,
+                            onToggle = { v ->
+                                scope.launch {
+                                    TemplateManager.saveConfig(context, config.copy(globalRecordVideoEnabled = v))
+                                }
+                            },
+                            onPickVideo = {
+                                videoPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
                                 )
                             }
                         )
@@ -255,6 +310,10 @@ fun TemplateCompose(navController: NavController) {
                                         append(" · ")
                                         append(stringResource(R.string.screenshot_replace))
                                     }
+                                    if (tpl.recordVideoId != null) {
+                                        append(" · ")
+                                        append(stringResource(R.string.record_replace))
+                                    }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -295,7 +354,7 @@ fun TemplateCompose(navController: NavController) {
             titleRes = R.string.crop_replace_image,
             onConfirm = { cropped ->
                 pendingCrop = null
-                scope.launch {
+                persistScope.launch {
                     importReplaceImage(context, config, cropped)
                     imageRev++
                 }
@@ -339,6 +398,12 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
     }
 
     val scope = rememberCoroutineScope()
+    // 落地专用 scope（配置保存 + 资源转正/删除）：与组合生命周期解耦——
+    // 保存按钮 launch 后立即 popBackStack，rememberCoroutineScope 随页面
+    // 离开组合被 cancel，saveConfig 之后的 promoteStaging 会被取消（视频
+    // 只转正本地、从未推远程 → hook 侧 "remote file absent"，实测 round 3）。
+    // 本 scope 无人 cancel，协程跑完即止（活跃协程持有引用，无泄漏）
+    val persistScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
     var confirmingDelete by remember { mutableStateOf(false) }
 
     // 模板级替换选图（与全局入口同管线：Photo Picker → 降采样解码 →
@@ -360,6 +425,18 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
         }
     }
 
+    // 模板级录屏视频：picker 回调只桥接 uri（pendingVideoUri 模式，同
+    // pendingCrop——回调在 key 块外，块内 recordVideoId 状态无法直写，
+    // 由 key 块内的 LaunchedEffect 消费导入并绑定）
+    var pendingVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var videoImporting by remember { mutableStateOf(false) }
+    var videoRev by remember { mutableStateOf(0) }
+    val videoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) pendingVideoUri = uri
+    }
+
     key(editing?.id ?: "") {
         var name by remember { mutableStateOf(editing?.name ?: "") }
         var policy by remember { mutableIntStateOf(editing?.securePolicy ?: HookConfig.SECURE_FOLLOW) }
@@ -370,6 +447,49 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
         var maskPresentation by remember { mutableStateOf(editing?.maskPresentationDetection ?: false) }
         var pierceFreeform by remember { mutableStateOf(editing?.pierceFreeform ?: false) }
         var imageId by remember { mutableStateOf(editing?.imageId) }
+        var recordVideoId by remember { mutableStateOf(editing?.recordVideoId) }
+        // 清除延迟落地：清除按钮只改内存态（图/视频文件保留），点保存时
+        // 才物理删除双区资源——未保存退出即完全恢复原状（文件在 + 配置
+        // 残留 id 仍指向有效资源），与"退出丢弃所有更改"语义一致
+        var imageCleared by remember { mutableStateOf(false) }
+        var videoCleared by remember { mutableStateOf(false) }
+        // 导入延迟落地（对称面）：换图/换视频只落暂存文件（正式区与远程
+        // 不动），点保存时 promoteStaging 转正——否则换新资源未保存退出
+        // 会即时覆盖原资源（不可恢复）且 hook 立即用新资源（更改被生效）
+        var imageStaged by remember { mutableStateOf(false) }
+        var videoStaged by remember { mutableStateOf(false) }
+
+        // 进入编辑页清上次未保存退出的暂存残留（编辑态才有 id 与暂存）
+        LaunchedEffect(Unit) {
+            editing?.id?.let { id ->
+                ReplaceImageManager.discardStaging(context, id)
+                ReplaceVideoManager.discardStaging(context, id)
+            }
+        }
+
+        // 视频导入消费（key 块内：可写 recordVideoId）：videoId = 模板 id，
+        // 落暂存（保存才转正）
+        LaunchedEffect(pendingVideoUri) {
+            val uri = pendingVideoUri ?: return@LaunchedEffect
+            pendingVideoUri = null
+            val tplId = templateId.takeIf { it.isNotEmpty() } ?: return@LaunchedEffect
+            videoImporting = true
+            when (ReplaceVideoManager.save(context, tplId, uri, staging = true)) {
+                ReplaceVideoManager.ImportResult.Ok -> {
+                    recordVideoId = tplId
+                    videoCleared = false
+                    videoStaged = true
+                    videoRev++
+                }
+                ReplaceVideoManager.ImportResult.TooLarge ->
+                    Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
+                ReplaceVideoManager.ImportResult.Invalid ->
+                    Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
+                ReplaceVideoManager.ImportResult.ReadFailed ->
+                    Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
+            }
+            videoImporting = false
+        }
 
         Column(modifier = Modifier.fillMaxSize()) {
             TopAppBar(
@@ -414,6 +534,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 maskPresentationDetection = maskPresentation,
                                 pierceFreeform = pierceFreeform,
                                 imageId = imageId,
+                                recordVideoId = recordVideoId,
                             )
                             val next = if (editing == null) {
                                 config.copy(templates = config.templates + saved)
@@ -422,7 +543,25 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                     if (it.id == saved.id) saved else it
                                 })
                             }
-                            scope.launch { TemplateManager.saveConfig(context, next) }
+                            persistScope.launch {
+                                TemplateManager.saveConfig(context, next)
+                                // 清除落地：保存时才物理删除双区资源（新建态
+                                // 无可清资源，cleared 恒 false 天然跳过）
+                                if (imageCleared) {
+                                    ReplaceImageManager.delete(context, saved.id)
+                                }
+                                if (videoCleared) {
+                                    ReplaceVideoManager.delete(context, saved.id)
+                                }
+                                // 导入落地：保存时暂存转正（staging → 正式
+                                // + 远程投递；未导入 staged 恒 false 跳过）
+                                if (imageStaged) {
+                                    ReplaceImageManager.promoteStaging(context, saved.id)
+                                }
+                                if (videoStaged) {
+                                    ReplaceVideoManager.promoteStaging(context, saved.id)
+                                }
+                            }
                             navController.popBackStack()
                         }
                     ) {
@@ -476,11 +615,16 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                     }
                 }
                 // 模板级替换图（编辑态：imageId = 模板 id，前台命中即换图，
-                // 优先级高于全局图；清除即时删双区图，未保存退出时配置
-                // 残留旧 imageId 但图已删 → hook 侧 fail-open 原生截图）
+                // 优先级高于全局图；导入落暂存、清除仅解绑内存态，两者均
+                // 延迟到保存落地——未保存退出时文件与配置均未动，完全恢复
+                // 原状；暂存期预览源切到 staging 文件）
                 if (editing != null) {
                     TemplateReplaceRow(
-                        imageFile = ReplaceImageManager.localFile(context, editing.id),
+                        imageFile = if (imageStaged) {
+                            ReplaceImageManager.stagingFile(context, editing.id)
+                        } else {
+                            ReplaceImageManager.localFile(context, editing.id)
+                        },
                         rev = imageRev,
                         bound = imageId != null,
                         onPickImage = {
@@ -490,7 +634,41 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                         },
                         onClear = {
                             imageId = null
-                            scope.launch { ReplaceImageManager.delete(context, editing.id) }
+                            imageCleared = true
+                            imageStaged = false
+                            ReplaceImageManager.discardStaging(context, editing.id)
+                        }
+                    )
+                }
+                // 模板级录屏视频（编辑态：videoId = 模板 id，录屏命中即换
+                // 视频，优先级高于全局视频；导入落暂存、清除仅解绑内存态，
+                // 两者均延迟到保存落地——未保存退出时完全恢复原状；暂存期
+                // 预览源切到 staging 文件）
+                if (editing != null) {
+                    TemplateRecordReplaceRow(
+                        videoFile = if (videoStaged) {
+                            ReplaceVideoManager.stagingFile(context, editing.id)
+                        } else {
+                            ReplaceVideoManager.localFile(context, editing.id)
+                        },
+                        thumbFile = if (videoStaged) {
+                            ReplaceVideoManager.stagingThumbFile(context, editing.id)
+                        } else {
+                            ReplaceVideoManager.thumbFile(context, editing.id)
+                        },
+                        rev = videoRev,
+                        importing = videoImporting,
+                        bound = recordVideoId != null,
+                        onPickVideo = {
+                            videoPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)
+                            )
+                        },
+                        onClear = {
+                            recordVideoId = null
+                            videoCleared = true
+                            videoStaged = false
+                            ReplaceVideoManager.discardStaging(context, editing.id)
                         }
                     )
                 }
@@ -515,8 +693,8 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
             }
         }
 
-        // 屏幕比例裁剪（模板级选图后触发）：确认后落双区并绑定
-        // imageId = 模板 id（key 块内，直取块内 imageId 状态）
+        // 屏幕比例裁剪（模板级选图后触发）：确认后落暂存并绑定
+        // imageId = 模板 id（key 块内，直取块内 imageId 状态；保存才转正）
         pendingCrop?.let { bmp ->
             val tplId = editing?.id
             if (tplId != null) {
@@ -527,8 +705,10 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                     onConfirm = { cropped ->
                         pendingCrop = null
                         scope.launch {
-                            ReplaceImageManager.save(context, tplId, cropped)
+                            ReplaceImageManager.save(context, tplId, cropped, staging = true)
                             imageId = tplId
+                            imageCleared = false
+                            imageStaged = true
                             imageRev++
                         }
                     },
@@ -547,7 +727,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
             text = { Text(stringResource(R.string.template_delete_confirm, editing.name)) },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch {
+                    persistScope.launch {
                         TemplateManager.saveConfig(
                             context,
                             config.copy(
@@ -555,10 +735,11 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 scope = config.scope.filterValues { it != editing.id }
                             )
                         )
-                        // 模板删除同步清替换图双区（imageId = 模板 id，
-                        // 孤儿图在 hook 侧表现为加载失败 fail-open，但
-                        // 本地明文/远程密文必须随模板消亡）
+                        // 模板删除同步清替换图/视频双区（imageId/videoId =
+                        // 模板 id，孤儿资源在 hook 侧表现为加载失败
+                        // fail-open，但本地明文/远程密文必须随模板消亡）
                         ReplaceImageManager.delete(context, editing.id)
+                        ReplaceVideoManager.delete(context, editing.id)
                     }
                     confirmingDelete = false
                     navController.popBackStack()
@@ -633,6 +814,141 @@ private fun TemplateReplaceRow(
         }
         Text(
             stringResource(R.string.replace_template_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * 录屏替换行（全局卡，截图替换下方同款样式）：Switch 是唯一启停入口；
+ * 开启时点击行主体弹选视频器，导入中行内进度态。语义（E3b 两级内容源）：
+ * 开启且已配置 → 录屏用替换视频；未启用/未配置 → 录屏回落静态替换图。
+ * 缩略图复用 [ReplaceThumb]（缩略图是 JPEG，同解码管线）
+ */
+@Composable
+private fun RecordReplaceEntryRow(
+    enabled: Boolean,
+    videoFile: File?,
+    thumbFile: File?,
+    importing: Boolean,
+    rev: Int,
+    onToggle: (Boolean) -> Unit,
+    onPickVideo: () -> Unit,
+) {
+    val configured = videoFile?.exists() == true
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .then(
+                    if (enabled && !importing) Modifier.clickable(onClick = onPickVideo)
+                    else Modifier
+                ),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (importing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp
+                )
+                Spacer(Modifier.width(12.dp))
+            } else if (enabled && configured && thumbFile != null) {
+                ReplaceThumb(thumbFile, rev)
+                Spacer(Modifier.width(12.dp))
+            }
+            Column {
+                Text(
+                    stringResource(R.string.record_replace),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    text = when {
+                        importing -> stringResource(R.string.replace_video_importing)
+                        !enabled -> stringResource(R.string.replace_state_disabled)
+                        configured -> stringResource(R.string.replace_state_configured)
+                        else -> stringResource(R.string.replace_state_not_configured)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (enabled && configured) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Switch(checked = enabled, onCheckedChange = onToggle)
+    }
+}
+
+/**
+ * 模板级录屏视频行（编辑页，模板替换图下方同款样式）：与全局行的差异
+ * 同图——无 Switch，绑定即生效，启停语义由"是否分配到应用"承担。
+ * 副标题说明命中语义（模板视频优先于全局视频，未配置录屏沿用替换图）
+ */
+@Composable
+private fun TemplateRecordReplaceRow(
+    videoFile: File,
+    thumbFile: File,
+    rev: Int,
+    importing: Boolean,
+    bound: Boolean,
+    onPickVideo: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val configured = bound && videoFile.exists()
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .then(if (importing) Modifier else Modifier.clickable(onClick = onPickVideo)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (importing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(12.dp))
+                } else if (configured) {
+                    ReplaceThumb(thumbFile, rev)
+                    Spacer(Modifier.width(12.dp))
+                } else {
+                    Icon(
+                        Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(Modifier.width(16.dp))
+                }
+                Column {
+                    Text(
+                        stringResource(R.string.record_replace),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        if (importing) stringResource(R.string.replace_video_importing)
+                        else if (configured) stringResource(R.string.replace_state_configured)
+                        else stringResource(R.string.replace_state_not_configured),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (configured) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (configured) {
+                IconButton(onClick = onClear) {
+                    Icon(Icons.Outlined.Delete, contentDescription = stringResource(R.string.delete))
+                }
+            }
+        }
+        Text(
+            stringResource(R.string.replace_record_template_hint),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -739,6 +1055,12 @@ private fun ReplaceThumb(file: File, rev: Int) {
 private fun replaceImageFile(context: Context, config: HookConfig): File? =
     if (config.globalReplaceImage != null)
         ReplaceImageManager.localFile(context, ReplaceImageManager.GLOBAL_ID)
+    else null
+
+/** 全局替换视频本地凭据（files/replace_video/g.mp4；存在 = 已配置） */
+private fun replaceVideoFile(context: Context, config: HookConfig): File? =
+    if (config.globalRecordVideoId != null)
+        ReplaceVideoManager.localFile(context, ReplaceVideoManager.GLOBAL_ID)
     else null
 
 /**

@@ -186,6 +186,9 @@ object ConfigManager {
         // 上行清除，此处清图片本体；服务未连接时留密文残片，语义不可
         // 扫描，下次绑定时全量删除覆盖）
         ReplaceImageManager.neutralizeForCoercion(appContext)
+        // E3b 替换视频双区中和（同上语义）：本地明文 MP4/缩略图
+        // （files/replace_video/）+ 托管区全部 sf_vid_* 密文远程文件
+        ReplaceVideoManager.neutralizeForCoercion(appContext)
     }
 
     /**

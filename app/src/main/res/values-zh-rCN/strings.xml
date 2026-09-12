@@ -13,6 +13,13 @@
     <string name="click_to_activate">点此激活</string>
     <string name="unknown">未知</string>
     <string name="fingerprint">系统指纹</string>
+    <string name="block_test">屏蔽测试</string>
+    <string name="block_test_description">使用 ScreenshotDetector 验证屏蔽效果</string>
+    <string name="report_issue">报告问题</string>
+    <string name="report_issue_description">向开发者发送日志并报告问题</string>
+    <string name="detector_download_prompt">未安装 ScreenshotDetector，是否下载以验证屏蔽效果？</string>
+    <string name="detector_download">下载</string>
+    <string name="detector_open_failed">无法打开 ScreenshotDetector</string>
     <string name="privilege">特权状态</string>
     <string name="device_info">设备信息</string>
     <string name="system_version">系统版本</string>
@@ -104,6 +111,13 @@
     <string name="replace_state_not_configured">未配置</string>
     <string name="replace_state_configured">已配置</string>
     <string name="replace_template_hint">分配此模板的应用前台时使用此替换图</string>
+    <string name="record_replace">录屏替换</string>
+    <string name="replace_record_video_hint">录屏时使用此视频替换，未配置时录屏沿用替换图</string>
+    <string name="replace_record_template_hint">分配此模板的应用前台时，录屏使用此视频替换</string>
+    <string name="replace_video_too_large">视频超过 100MB 上限</string>
+    <string name="replace_video_invalid">不是可播放的视频文件</string>
+    <string name="replace_video_read_failed">无法读取所选视频</string>
+    <string name="replace_video_importing">正在导入视频…</string>
     <string name="save">保存</string>
     <string name="template_apps_hint">在应用页将应用分配到模板</string>
     <string name="search_apps">搜索应用</string>

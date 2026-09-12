@@ -77,6 +77,7 @@ import fake.screenshot.defense.SensitiveStore
 import fake.screenshot.wrappers.ConfigManager
 import fake.screenshot.wrappers.DaemonManager
 import fake.screenshot.wrappers.ReplaceImageManager
+import fake.screenshot.wrappers.ReplaceVideoManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -488,6 +489,8 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         TemplateManager.onServiceBound(this)
         // E3 替换图 catch-up：补投远程缺失 + 清孤儿（详见其注释）
         ReplaceImageManager.onServiceBound(this)
+        // E3b 替换视频 catch-up：补投远程缺失 + 清孤儿（流式，详见其注释）
+        ReplaceVideoManager.onServiceBound(this)
     }
 
     override fun onServiceDied(service: XposedService) {

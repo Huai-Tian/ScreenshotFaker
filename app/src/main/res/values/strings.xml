@@ -13,6 +13,13 @@
     <string name="click_to_activate">Click to activate</string>
     <string name="unknown">Unknown</string>
     <string name="fingerprint">Fingerprint</string>
+    <string name="block_test">Block test</string>
+    <string name="block_test_description">Verify the blocking effect with ScreenshotDetector</string>
+    <string name="report_issue">Report issue</string>
+    <string name="report_issue_description">Send logs to the developer and report issues</string>
+    <string name="detector_download_prompt">ScreenshotDetector is not installed. Download it to verify the blocking effect?</string>
+    <string name="detector_download">Download</string>
+    <string name="detector_open_failed">Cannot open ScreenshotDetector</string>
     <string name="privilege">Privilege</string>
     <string name="device_info">DeviceInfo</string>
     <string name="system_version">SystemVersion</string>
@@ -122,6 +129,13 @@
     <string name="replace_state_not_configured">Not configured</string>
     <string name="replace_state_configured">Configured</string>
     <string name="replace_template_hint">Uses this image when an app assigned to this template is in the foreground</string>
+    <string name="record_replace">Screen recording replacement</string>
+    <string name="replace_record_video_hint">Uses this video when screen recording; unconfigured recordings keep using the replacement image</string>
+    <string name="replace_record_template_hint">Uses this video for screen recording when an app assigned to this template is in the foreground</string>
+    <string name="replace_video_too_large">Video exceeds the 100MB limit</string>
+    <string name="replace_video_invalid">Not a playable video file</string>
+    <string name="replace_video_read_failed">Cannot read the selected video</string>
+    <string name="replace_video_importing">Importing video…</string>
     <string name="save">Save</string>
     <string name="template_apps_hint">Assign apps to templates on the Application page</string>
     <string name="search_apps">Search apps</string>

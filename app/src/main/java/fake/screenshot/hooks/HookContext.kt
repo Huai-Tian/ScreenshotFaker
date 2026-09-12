@@ -88,7 +88,12 @@ object HookContext {
             c.templates.any { it.imageId != null } -> "template"
             else -> "off"
         }
-        return "templates=${c.templates.size}, replace=$replace, " +
+        val video = when {
+            c.globalRecordVideoEnabled && c.globalRecordVideoId != null -> "global"
+            c.templates.any { it.recordVideoId != null } -> "template"
+            else -> "off"
+        }
+        return "templates=${c.templates.size}, replace=$replace, video=$video, " +
                 "aggressive=${c.aggressiveFilter.size}, selfMedia=${c.aggressiveAllowSelfMedia.size}"
     }
 
@@ -313,11 +318,45 @@ object HookContext {
         return null
     }
 
-    /** E3b 门控：任何替换配置存在（聚合口径——会话级判定无前台语义） */
+    /** E3b 模板图加载失败时的全局图回落源（null = 未启用/未配置） */
+    fun globalImageId(): String? {
+        val c = config
+        return if (c.globalReplaceEnabled) c.globalReplaceImage else null
+    }
+
+    /** E3b 门控：任何替换配置存在（图或视频，聚合口径——会话级判定无前台语义） */
     fun hasReplacePolicy(): Boolean {
         val c = config
         return (c.globalReplaceEnabled && c.globalReplaceImage != null) ||
-                c.templates.any { it.imageId != null }
+                (c.globalRecordVideoEnabled && c.globalRecordVideoId != null) ||
+                c.templates.any { it.imageId != null || it.recordVideoId != null }
+    }
+
+    /**
+     * E3b：前台者的替换录屏视频 id。null = 录屏回落静态图替换。
+     * 优先级：前台者显式模板视频 > 全局视频（开关开启且已配置）。
+     * 视频本体的流式密文解密（memfd 可播放 fd）由 [ReplaceVideoStore] 负责
+     */
+    fun recordVideoId(fgPkg: String?): String? {
+        val c = config
+        c.templateFor(fgPkg)?.recordVideoId?.let { return it }
+        if (c.globalRecordVideoEnabled && c.globalRecordVideoId != null) return c.globalRecordVideoId
+        return null
+    }
+
+    /** E3b 预热源：全局替换视频 id（null = 未启用/未配置） */
+    fun globalVideoId(): String? {
+        val c = config
+        return if (c.globalRecordVideoEnabled) c.globalRecordVideoId else null
+    }
+
+    /** E3b：配置内全部替换视频 id（预热/失效口径，[ReplaceVideoStore] 消费） */
+    fun activeVideoIds(): Set<String> {
+        val c = config
+        return buildSet {
+            c.templates.forEach { it.recordVideoId?.let { id -> add(id) } }
+            if (c.globalRecordVideoEnabled && c.globalRecordVideoId != null) add(c.globalRecordVideoId)
+        }
     }
 
     /**
@@ -335,6 +374,10 @@ object HookContext {
             if (c.globalReplaceEnabled && c.globalReplaceImage != null) add(c.globalReplaceImage)
         }
     }
+
+    /** E3b 视频远程文件读取（[ReplaceVideoStore] 消费，包内可见） */
+    fun openRemoteVideo(name: String): android.os.ParcelFileDescriptor? =
+        runCatching { module?.openRemoteFile(name) }.getOrNull()
 
     // ==================== uid 解析（E2 检测者引擎共用） ====================
 

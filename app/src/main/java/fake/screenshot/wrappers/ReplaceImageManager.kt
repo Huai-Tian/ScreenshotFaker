@@ -41,6 +41,33 @@ object ReplaceImageManager {
     fun localFile(context: Context, imageId: String): File =
         File(File(context.filesDir, LOCAL_DIR), "$imageId.png")
 
+    // ==================== 编辑页暂存区 ====================
+    // 与 [ReplaceVideoManager] 暂存区同构：编辑页"保存才生效"语义下导入
+    // 先落暂存（不碰正式文件、不推远程），保存时 promoteStaging 转正；
+    // 未保存退出 = 暂存作废（编辑页进入时 discard 清残留），原状保留
+
+    fun stagingFile(context: Context, imageId: String): File =
+        File(File(context.filesDir, LOCAL_DIR), "${imageId}_staging.png")
+
+    /** 暂存转正（编辑页保存时）：staging → 正式 + 远程投递；无暂存 no-op */
+    suspend fun promoteStaging(context: Context, imageId: String) {
+        withContext(Dispatchers.IO) {
+            val staging = stagingFile(context, imageId)
+            if (!staging.exists()) return@withContext
+            val local = localFile(context, imageId)
+            if (!staging.renameTo(local)) {
+                staging.copyTo(local, overwrite = true)
+                staging.delete()
+            }
+            pushRemote(imageId, local)
+        }
+    }
+
+    /** 丢弃暂存（编辑页清除按钮 / 进入页面清上次退出残留） */
+    fun discardStaging(context: Context, imageId: String) {
+        stagingFile(context, imageId).delete()
+    }
+
     /**
      * 服务绑定 catch-up（onServiceBind 调用，与 TemplateManager 同一
      * 时序闭环）：对配置内全部替换图补投远程缺失（保存时服务未连接的
@@ -93,17 +120,27 @@ object ReplaceImageManager {
      * 服务未连接时仅落本地并返回 false（下次保存/绑定时补投——与
      * TemplateManager 的 catch-up 语义一致；调用方以配置落库为准，
      * 远程缺图在 hook 侧表现为"该 id 加载失败 = 原生截图"，fail-open）
+     *
+     * [staging] = true 时仅落暂存文件（编辑页"保存才生效"语义：不碰
+     * 正式文件、不推远程，promoteStaging 转正）
      */
-    suspend fun save(context: Context, imageId: String, bitmap: Bitmap): Boolean =
+    suspend fun save(
+        context: Context,
+        imageId: String,
+        bitmap: Bitmap,
+        staging: Boolean = false
+    ): Boolean =
         withContext(Dispatchers.IO) {
             // 1) 本地明文 PNG（压缩失败即整体失败——UI 凭据缺失）
-            val local = localFile(context, imageId)
+            val local = if (staging) stagingFile(context, imageId) else localFile(context, imageId)
             runCatching {
                 local.parentFile?.mkdirs()
                 local.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }.getOrElse { return@withContext false }
 
-            // 2) 远程密文信封（服务未连接/写失败 → 本地已保底，false 提示补投）
+            // 2) 远程密文信封（服务未连接/写失败 → 本地已保底，false 提示补投；
+            //    staging 不推——转正时统一投递）
+            if (staging) return@withContext true
             pushRemote(imageId, local) ?: return@withContext false
             true
         }

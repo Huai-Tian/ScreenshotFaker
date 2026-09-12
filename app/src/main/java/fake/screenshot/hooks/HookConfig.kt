@@ -55,6 +55,12 @@ data class HookTemplate(
     val pierceFreeform: Boolean = false,
     /** E3：内容替换绑定图（中性文件 id，图片本体经 openRemoteFile 传输） */
     val imageId: String?,
+    /**
+     * E3b：内容替换绑定录屏视频（中性文件 id，与 [imageId] 同一 id 空间，
+     * 本体经 openRemoteFile 以流式密文传输）。命中即录屏流用该视频替换
+     * （截屏仍用 [imageId] 图）；null = 录屏回落静态图替换
+     */
+    val recordVideoId: String? = null,
 )
 
 data class HookConfig(
@@ -77,6 +83,14 @@ data class HookConfig(
      * null = 未配置
      */
     val globalReplaceImage: String? = null,
+    /**
+     * E3b 全局录屏视频替换开关（语义与 [globalReplaceEnabled] 同构）：
+     * 关闭时配置状态静默保留（视频文件与 [globalRecordVideoId] 不清除），
+     * 再开启时"已配置"直接恢复；录屏内容回落静态图替换
+     */
+    val globalRecordVideoEnabled: Boolean = false,
+    /** E3b 全局替换视频：null = 未配置（录屏走静态图） */
+    val globalRecordVideoId: String? = null,
     val templates: List<HookTemplate> = emptyList(),
     /** 包名 → 模板 id（显式映射；悬空引用按未配置处理） */
     val scope: Map<String, String> = emptyMap(),
@@ -160,6 +174,8 @@ object HookConfigCodec {
             put("gp", config.globalSecurePolicy)
             put("re", config.globalReplaceEnabled)
             config.globalReplaceImage?.let { put("ri", it) }
+            put("ve", config.globalRecordVideoEnabled)
+            config.globalRecordVideoId?.let { put("vi", it) }
             put("t", JSONArray().apply {
                 config.templates.forEach { tpl ->
                     put(JSONObject().apply {
@@ -227,6 +243,7 @@ object HookConfigCodec {
                         maskPresentationDetection = o.optBoolean("w"),
                         pierceFreeform = o.optBoolean("f"),
                         imageId = o.optString("g").ifEmpty { null },
+                        recordVideoId = o.optString("vg").ifEmpty { null },
                     )
                 )
             }
@@ -256,6 +273,8 @@ object HookConfigCodec {
             globalSecurePolicy = json.optInt("gp", HookConfig.SECURE_FOLLOW).coerceIn(0, 2),
             globalReplaceEnabled = json.optBoolean("re"),
             globalReplaceImage = json.optString("ri").ifEmpty { null }?.let(::migrateLegacyImageId),
+            globalRecordVideoEnabled = json.optBoolean("ve"),
+            globalRecordVideoId = json.optString("vi").ifEmpty { null },
             templates = templates,
             scope = scope,
             aggressiveFilter = aggressiveFilter,
