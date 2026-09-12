@@ -255,11 +255,22 @@ object HookConfigCodec {
         return HookConfig(
             globalSecurePolicy = json.optInt("gp", HookConfig.SECURE_FOLLOW).coerceIn(0, 2),
             globalReplaceEnabled = json.optBoolean("re"),
-            globalReplaceImage = json.optString("ri").ifEmpty { null },
+            globalReplaceImage = json.optString("ri").ifEmpty { null }?.let(::migrateLegacyImageId),
             templates = templates,
             scope = scope,
             aggressiveFilter = aggressiveFilter,
             aggressiveAllowSelfMedia = aggressiveAllowSelfMedia,
         )
     }
+
+    /**
+     * 全局替换图 imageId 旧格式迁移：旧版 [HookConfig.globalReplaceImage]
+     * 存文件名（global.png / global.jpg），现固定为 "g"（GLOBAL_ID）。
+     * 旧值不迁移则远程 sf_img_ 与本地文件名永远指向不存在的 id——
+     * 开关开着但替换静默失效（fail-open）。现实回流路径：备份恢复
+     * （restoreAll 合并覆盖 tpl_cfg 为老信封）。模板 imageId 无历史
+     * 格式（分期 2 未暴露该字段），不迁移
+     */
+    private fun migrateLegacyImageId(id: String): String =
+        if (id == "global.png" || id == "global.jpg") "g" else id
 }

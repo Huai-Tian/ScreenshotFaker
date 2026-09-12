@@ -72,7 +72,24 @@ object HookContext {
                 p.registerOnSharedPreferenceChangeListener(prefsListener)
             }
         }
-        log(Log.INFO, "initialized, kind=$kind, templates=${config.templates.size}")
+        log(Log.INFO, "initialized, kind=$kind, ${configSummary()}")
+    }
+
+    /**
+     * 配置摘要（初始化/同步日志用）：模板数 + 替换策略态 + aggressive
+     * 口径。替换态显式化——实测踩坑：配置数据回退（备份恢复等）后
+     * hasReplacePolicy 翻转，仅凭 templates=N 无法察觉，需解密 DB 才能
+     * 定位（E2a 两集随配置推送同步增减的可见性同理）
+     */
+    private fun configSummary(): String {
+        val c = config
+        val replace = when {
+            c.globalReplaceEnabled && c.globalReplaceImage != null -> "global"
+            c.templates.any { it.imageId != null } -> "template"
+            else -> "off"
+        }
+        return "templates=${c.templates.size}, replace=$replace, " +
+                "aggressive=${c.aggressiveFilter.size}, selfMedia=${c.aggressiveAllowSelfMedia.size}"
     }
 
     private fun reloadFromPrefs() {
@@ -83,11 +100,7 @@ object HookContext {
         if (raw != null) {
             configSynced = true
             configSettled.countDown()
-            // aggressive 口径入日志（E2a 两集随配置推送同步增减的可见性）
-            log(
-                Log.INFO,
-                "config synced (templates=${config.templates.size}, aggressive=${config.aggressiveFilter.size}, selfMedia=${config.aggressiveAllowSelfMedia.size})"
-            )
+            log(Log.INFO, "config synced (${configSummary()})")
         } else {
             // 热重载时序竞争（实测：连续热重载后 RemotePreferences 桥推送
             // 丢失，config 停留 DEFAULT → 全引擎判定静默失效）：退避重拉
@@ -131,10 +144,7 @@ object HookContext {
                 }.getOrDefault(false)
                 if (ok) {
                     configSettled.countDown()
-                    log(
-                        Log.INFO,
-                        "config retry synced (templates=${config.templates.size}, aggressive=${config.aggressiveFilter.size}, selfMedia=${config.aggressiveAllowSelfMedia.size})"
-                    )
+                    log(Log.INFO, "config retry synced (${configSummary()})")
                     break
                 }
             }
