@@ -5,6 +5,9 @@
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }
+-keep class fake.screenshot.hooks.AudioRecordNativeBridge {
+    private *;
+}
 -keep,allowobfuscation class fake.screenshot.services.privileged.** { *; }
 -keepclassmembers class fake.screenshot.services.privileged.overlay.SuLauncher {
     public static void main(java.lang.String[]);

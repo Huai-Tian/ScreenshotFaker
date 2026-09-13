@@ -25,6 +25,29 @@ set_target_properties(guard PROPERTIES OUTPUT_NAME "memsys")
 target_compile_options(guard PRIVATE -fvisibility=hidden -ffunction-sections -fdata-sections)
 target_link_options(guard PRIVATE -Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL -Wl,--discard-all)
 
+# E3c-N native 音频拦截（JNI 库，注入 OEM 录屏器进程）：
+# ShadowHook inline hook libaudioclient 的 AudioRecord::obtainBuffer（read/
+# 回调/OBTAIN 三路数据出口汇聚点）实现 post-call 内容替换。落盘名中性化
+# libmediafx.so（maps 可见，不得含 hook/audio 等自曝字样）。
+#
+# ShadowHook 接入方式：vendor（cpp/shadowhook/include + src/main/jniLibs），
+# 来源 com.bytedance.android:shadowhook 2.0.1 AAR（Maven Central）。不走
+# prefab：AAR 只带 arm 双 ABI，AGP 对 x86/x86_64 configure 自动注入
+# find_package 必败（CXX1210，用户 CMakeLists 的 if 守卫拦不住——注入在
+# 项目 include 层）。jniLibs 副本一身二职：APK 打包 + 链接输入（ stripped
+# 但 dynsym 导出完整）。ABI 守卫保留：x86 上不出 libmediafx.so，模拟器内
+# Java 桥 loadLibrary 失败即 fail-open（runCatching 静默降级，其余引擎不受
+# 影响）。libshadowhook.so 无 STL 依赖（纯 C），与 c++_static 无双重 STL 冲突
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
+    add_library(audio_replace SHARED audio_replace.cpp)
+    set_target_properties(audio_replace PROPERTIES OUTPUT_NAME "mediafx")
+    target_include_directories(audio_replace PRIVATE ${CMAKE_SOURCE_DIR}/shadowhook/include)
+    target_compile_options(audio_replace PRIVATE -fvisibility=hidden -ffunction-sections -fdata-sections)
+    target_link_options(audio_replace PRIVATE -Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL -Wl,--discard-all)
+    target_link_libraries(audio_replace
+            ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libshadowhook.so)
+endif()
+
 # vault 独立密钥保管进程（可执行 so，与 libnetsvc.so 同法打包）：
 # DK 唯一持有者与全部 DK/CK 密码学操作的执行者——无 ART，Java hook
 # 框架（LSPlant/自研）无处下钩；dumpable=0 + TracerPid 自检挡同 uid

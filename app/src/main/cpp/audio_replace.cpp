@@ -1,0 +1,596 @@
+// E3c-N：native 层音频采集拦截（libaudioclient AudioRecord 数据出口替换）。
+//
+// 背景（真机实证链 2026-09-13，ColorOS 15 / com.oplus.screenrecorder）：
+// - Java 层 E3c 12 个钩子（ctor×5/build/start×2/read×4 + deoptimize）全天
+//   零触发；产物带 AAC 音轨、audioserver AudioBoost boost 录屏器 3 条采集
+//   线程 → Java AudioRecord 类从未实例化，录屏器走 C++ AudioRecord。
+// - 探针轮（41zaym）：录屏器进程加载 libaudioclient.so（及 libaaudio 全家
+//   桶），出现 "AudioRecord"/"AudioRecorder"/"COUIAudioWorkHa" 线程——
+//   "AudioRecord" 线程是 AudioRecordThread::run() 的命名（AOSP set() 中
+//   mCallback 非空时创建），即 C++ AudioRecord 回调/OBTAIN 模式实锤。
+//
+// 架构（AOSP android15-release 源码验证）：
+// - **私有 obtainBuffer(Buffer*, const timespec*, timespec*, size_t*) 是
+//   全部数据出口的汇聚点**：read()（TRANSFER_SYNC，read 循环直接调用它）、
+//   公有 obtainBuffer API（TRANSFER_OBTAIN，经 waitCount 包装转发）、
+//   processAudioBuffer()（TRANSFER_CALLBACK/OBTAIN 的 "AudioRecord" 内部
+//   线程）三条路径全部经过它 → 一处 hook 覆盖所有读取形态（对齐 Java 层
+//   native_read_in_* 汇聚点的设计思想）。
+// - **post-call 内容替换，非阻断**：真实数据管线（audioserver → 共享环
+//   缓冲）原样运转，obtainBuffer 返回后对 [raw, raw+mSize) 就地覆写。
+//   产出节奏完全原生（虚拟时钟 pacing 问题天然消失——这是相对 Java 层
+//   阻断式替换的架构优势）。Buffer.mSize = frameCount × mServerFrameSize
+//   由 obtainBuffer 自己写入（字节量精确、与客户端格式无关；read() 的
+//   格式转换从 raw 拷贝，覆写后的零值经 memcpy_by_audio_format 转换仍
+//   是零值 = 静音）。
+// - obtainBuffer 返回的 chunk 是客户端独占区（直到 releaseBuffer 归还），
+//   覆写与 audioserver 生产无竞争；填充在 orig 返回后、proxy 返回前完成
+//   ——与消费者同线程，无并发窗口。
+//
+// 策略（对齐 Java 层 E3c 语义）：
+// - 首次 obtainBuffer（成功）懒登记：JNI 上调 Kotlin 解析三态策略
+//   （recordAudioPolicy，独立于画面替换配置——用户三态选择解耦铁律）。
+//   OFF → TTL 内放行（不重复上调）；MUTE/REPLACE → 会话内持续覆写。
+// - v1 填充一律静音（REPLACE 数据源管线后续落地；Java 层同为"替换落空
+//   回落静音"——显式选择替换后放行真实音频 = 泄漏）。
+// - stop() hook 清会话（录屏会话边界，对齐 Java stop 腿）；TTL 60s 重判
+//   （兜底：实例销毁地址复用导致会话陈旧、策略中途变更）。
+// - fail-safe：Buffer 布局合理性校验（OEM 布局漂移防御）失败 → 放行 +
+//   一次性 WARN（可观测的 fail-open，绝不盲目覆写未知内存）。
+//
+// 符号（NDK shim 编译实证，LP64/ILP32 的 size_t 差异两套）：
+// - 主：_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEPK8timespecPS3_P{m,j}
+// - 备：_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEiP{m,j}（waitCount
+//   包装版，私有符号缺失时兜底——只覆盖 OBTAIN 路径）
+// - 诊断：_ZN7android11AudioRecord4readEPvm{m,j}b（私有 obtainBuffer 在位时
+//   纯打点；不在位时 post-call 零填 app 缓冲作降级替换）
+// - 诊断+兜底：libaaudio 三件套（openStream 流属性捕获 / read 打点+MMAP
+//   兜底 / close 清理）。AAudio 采集形态与覆盖关系：legacy read 与 legacy
+//   callback 内部都走 AudioRecord → obtainBuffer 已覆盖；MMAP blocking read
+//   绕过 AudioRecord → read 腿兜底填充（仅当私有 obtainBuffer 不在位，
+//   单一填充归属防双重覆写）；MMAP callback（AAudio 内部线程直调 app 回调）
+//   v1 不覆盖——openStream 打点输入流属性 + read 计数为零即其指纹，
+//   v2 采纳 CamSwap 的 setDataCallback wrap 蓝本
+// - 会话：_ZN7android11AudioRecord4stopEv + AAudioStream_close
+//
+// 热路径开销：trampoline + status 检查 + map 查找 + memset（~每 20ms/流），
+// 无 JNI（策略上调只在会话懒登记/TTL 时发生，attach 不 detach——AudioRecord
+// 采集线程可能是 ART 已附着线程，detach 会破坏 ART 线程归属）。
+
+#include <jni.h>
+#include <shadowhook.h>
+
+#include <android/log.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <sys/types.h>
+#include <time.h>
+
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <mutex>
+
+// android::AudioRecord::Buffer（android15-release 布局，NDK shim
+// static_assert 实证：LP64 sizeof=32 / ILP32 sizeof=16）
+//   frameCount@0（公有，输入=请求帧数，输出=实际可得帧数）
+//   mSize@8|@4（私有，输出=可得字节数 = frameCount × serverFrameSize）
+//   raw@16|@8（union，输出=数据指针，指向客户端独占的环缓冲 chunk）
+//   sequence@24|@12（IAudioRecord 代序号，releaseBuffer 校验用）
+struct ArBuffer {
+    size_t frameCount;
+    size_t mSize;
+    void* raw;
+    uint32_t sequence;
+};
+
+// ==================== 符号名（ABI 分套，见文件头） ====================
+
+#if defined(__LP64__)
+#define SYM_OBTAIN_PRIV "_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEPK8timespecPS3_Pm"
+#define SYM_OBTAIN_PUB "_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEiPm"
+#define SYM_READ "_ZN7android11AudioRecord4readEPvmb"
+#else
+#define SYM_OBTAIN_PRIV "_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEPK8timespecPS3_Pj"
+#define SYM_OBTAIN_PUB "_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEiPj"
+#define SYM_READ "_ZN7android11AudioRecord4readEPvjb"
+#endif
+#define SYM_STOP "_ZN7android11AudioRecord4stopEv"
+#define LIB_AUDIOCLIENT "libaudioclient.so"
+#define LIB_AAUDIO "libaaudio.so"
+
+// ==================== 策略常量（对齐 HookConfig 三态） ====================
+
+enum {
+    POLICY_OFF = 0,
+    POLICY_MUTE = 1,
+    POLICY_REPLACE = 2,
+};
+
+// 会话 TTL 重判（对齐 Java 层 IGNORE_TTL_MS：OFF→MUTE/REPLACE 切换与
+// 实例地址复用陈旧会话的刷新上限）
+static constexpr int64_t SESSION_TTL_MS = 60'000;
+
+// ==================== JNI 桥缓存 ====================
+
+static JavaVM* g_vm = nullptr;
+static jobject g_bridge = nullptr;            // AudioRecordNativeBridge 单例（全局引用）
+static jmethodID g_mid_query_policy = nullptr;
+static jmethodID g_mid_on_log = nullptr;
+
+static pthread_mutex_t g_bridge_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ==================== 会话表 ====================
+
+struct Session {
+    int policy;               // 0=放行 1=静音 2=替换（v1 均静音填充）
+    int64_t queried_at_ms;    // 策略判定时刻（TTL 重判基准）
+    int64_t fill_count;       // 覆写次数（日志限流）
+    int64_t filled_bytes;     // 累计覆写字节（周期性观测）
+    bool logged_first;        // 首次填充已打点
+    bool warned_implausible;  // 布局异常已告警（每会话一次）
+};
+
+static std::mutex g_sessions_mutex;
+static std::map<void*, Session> g_sessions;
+
+// ==================== 日志上调（低频，attach 不 detach） ====================
+
+static int64_t now_ms() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000 + ts.tv_nsec / 1'000'000;
+}
+
+static void upcall_log(int prio, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static void upcall_log(int prio, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    pthread_mutex_lock(&g_bridge_mutex);
+    jobject bridge = g_bridge;
+    jmethodID mid = g_mid_on_log;
+    pthread_mutex_unlock(&g_bridge_mutex);
+    if (bridge == nullptr || mid == nullptr || g_vm == nullptr) return;
+
+    JNIEnv* env = nullptr;
+    if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK || env == nullptr) return;
+    // 不 Detach：调用线程可能是 ART 已附着线程（app 线程经 JNI 进 native 后
+    // 调 C++ AudioRecord），detach 会破坏其 ART 线程归属；原生采集线程保持
+    // 附着也无害（ART 自带 pthread key 退出清理）
+    jstring jmsg = env->NewStringUTF(buf);
+    if (jmsg != nullptr) {
+        env->CallVoidMethod(bridge, mid, (jint) prio, jmsg);
+        env->DeleteLocalRef(jmsg);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+// ==================== 策略上调（会话懒登记时，AudioRecord 采集线程） ====================
+
+static int upcall_query_policy() {
+    pthread_mutex_lock(&g_bridge_mutex);
+    jobject bridge = g_bridge;
+    jmethodID mid = g_mid_query_policy;
+    pthread_mutex_unlock(&g_bridge_mutex);
+    if (bridge == nullptr || mid == nullptr || g_vm == nullptr) return POLICY_OFF;
+
+    JNIEnv* env = nullptr;
+    if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK || env == nullptr) return POLICY_OFF;
+    jint policy = env->CallIntMethod(bridge, mid);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return POLICY_OFF;  // 上调失败 fail-open（与 Java 层口径一致：解析异常放行）
+    }
+    if (policy < POLICY_OFF || policy > POLICY_REPLACE) return POLICY_OFF;
+    return (int) policy;
+}
+
+// ==================== 填充与 Buffer 合理性 ====================
+
+// PCM 采集的帧字节数上界（16 声道 × 4B float；REMOTE_SUBMIX 常态立体声
+// 16bit = 4B）。布局漂移防御：mSize 必须落在 [frameCount, frameCount×64]
+// 区间且 raw 至少 4 字节对齐——Android ≤12 的旧 Buffer 布局（raw@0）会被
+// 此校验拦下（读出的 mSize 是指针片段，量级不符）
+static bool buffer_plausible(const ArBuffer* b) {
+    if (b->frameCount == 0 || b->frameCount > 1'000'000) return false;
+    if (b->mSize < b->frameCount || b->mSize > b->frameCount * 64) return false;
+    if (b->raw == nullptr || ((uintptr_t) b->raw & 0x3) != 0) return false;
+    return true;
+}
+
+// 会话填充：v1 MUTE/REPLACE 均静音覆写（REPLACE 数据源管线后续接入）
+static void session_fill(void* thiz, Session& s, const ArBuffer* b) {
+    memset(b->raw, 0, b->mSize);
+    s.fill_count++;
+    s.filled_bytes += (int64_t) b->mSize;
+    if (!s.logged_first) {
+        s.logged_first = true;
+        upcall_log(ANDROID_LOG_INFO,
+                   "E3c-N first obtain fill (obj=%p, %zu frames / %zu bytes, policy=%d)",
+                   thiz, b->frameCount, b->mSize, s.policy);
+    } else if ((s.fill_count & 0xFFF) == 0) {  // 每 4096 次一条心跳（~80s@20ms）
+        upcall_log(ANDROID_LOG_INFO, "E3c-N fill heartbeat (obj=%p, n=%lld, bytes=%lld)",
+                   thiz, (long long) s.fill_count, (long long) s.filled_bytes);
+    }
+}
+
+// 会话查询（热路径）：返回是否处于覆写态。miss → 懒登记（JNI 上调，
+// 仅此处有上行开销）；OFF/过期 → TTL 重判
+static bool session_active(void* thiz) {
+    int64_t now = now_ms();
+    {
+        std::lock_guard<std::mutex> lk(g_sessions_mutex);
+        auto it = g_sessions.find(thiz);
+        if (it != g_sessions.end()) {
+            Session& s = it->second;
+            if (s.policy == POLICY_OFF) {
+                if (now - s.queried_at_ms < SESSION_TTL_MS) return false;
+            } else {
+                // 活跃会话同样 TTL 重判：策略中途变更生效上限 60s，
+                // 且兜底"实例销毁地址复用"的陈旧会话（stop 未覆盖的路径）
+                if (now - s.queried_at_ms < SESSION_TTL_MS) return true;
+            }
+        }
+    }
+    // 判定在锁外做（JNI 上调可能耗时 ~秒级：冷启动配置有界等待）
+    int policy = upcall_query_policy();
+    int64_t queried_at = now_ms();
+    std::lock_guard<std::mutex> lk(g_sessions_mutex);
+    Session& s = g_sessions[thiz];
+    bool was_active = s.policy == POLICY_MUTE || s.policy == POLICY_REPLACE;
+    s.policy = policy;
+    s.queried_at_ms = queried_at;
+    if (!was_active) {
+        s.fill_count = 0;
+        s.filled_bytes = 0;
+        s.logged_first = false;
+        s.warned_implausible = false;
+    }
+    upcall_log(ANDROID_LOG_INFO, "E3c-N capture registered (obj=%p, policy=%d%s)",
+               thiz, policy,
+               policy == POLICY_REPLACE ? ", source pending -> silence" : "");
+    return policy == POLICY_MUTE || policy == POLICY_REPLACE;
+}
+
+// ==================== hook 桩句柄（幂等重试 + 降级判定） ====================
+
+static void* g_stub_obtain_priv = nullptr;
+static void* g_stub_obtain_pub = nullptr;
+static void* g_stub_read = nullptr;
+static void* g_stub_stop = nullptr;
+static void* g_stub_aaudio_open = nullptr;
+static void* g_stub_aaudio_read = nullptr;
+static void* g_stub_aaudio_close = nullptr;
+
+// ==================== hook 代理 ====================
+
+// 主 hook：私有 obtainBuffer（read/公有 obtain/回调线程三路汇聚点）
+static int proxy_obtain_priv(void* thiz, void* buf, const struct timespec* requested,
+                             struct timespec* elapsed, size_t* nonContig) {
+    SHADOWHOOK_STACK_SCOPE();
+    int status = SHADOWHOOK_CALL_PREV(proxy_obtain_priv, thiz, buf, requested, elapsed, nonContig);
+    if (status == 0 && buf != nullptr) {  // NO_ERROR 才有有效 chunk（错误路径 mSize=0）
+        ArBuffer* b = (ArBuffer*) buf;
+        if (b->mSize > 0 && session_active(thiz)) {
+            if (buffer_plausible(b)) {
+                std::lock_guard<std::mutex> lk(g_sessions_mutex);
+                auto it = g_sessions.find(thiz);
+                if (it != g_sessions.end()) session_fill(thiz, it->second, b);
+            } else {
+                std::lock_guard<std::mutex> lk(g_sessions_mutex);
+                auto it = g_sessions.find(thiz);
+                if (it != g_sessions.end() && !it->second.warned_implausible) {
+                    it->second.warned_implausible = true;
+                    upcall_log(ANDROID_LOG_WARN,
+                               "E3c-N implausible Buffer layout (obj=%p, fc=%zu, size=%zu, raw=%p) -> passthrough",
+                               thiz, b->frameCount, b->mSize, b->raw);
+                }
+            }
+        }
+    }
+    return status;
+}
+
+// 备用：公有 obtainBuffer（waitCount 包装）。私有符号缺失时才安装；
+// 覆盖 TRANSFER_OBTAIN 直调路径（read/回调不经过它）
+static int proxy_obtain_pub(void* thiz, void* buf, int32_t waitCount, size_t* nonContig) {
+    SHADOWHOOK_STACK_SCOPE();
+    int status = SHADOWHOOK_CALL_PREV(proxy_obtain_pub, thiz, buf, waitCount, nonContig);
+    if (status == 0 && buf != nullptr) {
+        ArBuffer* b = (ArBuffer*) buf;
+        if (b->mSize > 0 && session_active(thiz) && buffer_plausible(b)) {
+            std::lock_guard<std::mutex> lk(g_sessions_mutex);
+            auto it = g_sessions.find(thiz);
+            if (it != g_sessions.end()) session_fill(thiz, it->second, b);
+        }
+    }
+    return status;
+}
+
+// 诊断 + 降级：read（私有 obtainBuffer 在位时纯打点——read 内部经私有
+// obtainBuffer 已被覆写，post-call 再填只是同值覆写；不在位时（私有符号
+// hook 失败的兜底场景）零填 app 缓冲——ret 即实读字节数，量精确）
+static std::atomic<int64_t> g_read_calls{0};
+
+static ssize_t proxy_read(void* thiz, void* buffer, size_t size, bool blocking) {
+    SHADOWHOOK_STACK_SCOPE();
+    ssize_t ret = SHADOWHOOK_CALL_PREV(proxy_read, thiz, buffer, size, blocking);
+    int64_t n = g_read_calls.fetch_add(1) + 1;
+    if (n == 1) {
+        upcall_log(ANDROID_LOG_INFO, "E3c-N read() observed (obj=%p, size=%zu, blocking=%d, ret=%zd)",
+                   thiz, size, (int) blocking, ret);
+    }
+    if (ret > 0 && buffer != nullptr && g_stub_obtain_priv == nullptr &&
+        session_active(thiz)) {
+        memset(buffer, 0, (size_t) ret);
+    }
+    return ret;
+}
+
+// 会话边界：stop 清会话（复用实例下一会话首次 obtain 重判策略，
+// 对齐 Java 层 stop 腿语义）
+static void proxy_stop(void* thiz) {
+    SHADOWHOOK_STACK_SCOPE();
+    SHADOWHOOK_CALL_PREV(proxy_stop, thiz);
+    {
+        std::lock_guard<std::mutex> lk(g_sessions_mutex);
+        g_sessions.erase(thiz);
+    }
+    upcall_log(ANDROID_LOG_INFO, "E3c-N session cleared on stop (obj=%p)", thiz);
+}
+
+// ==================== AAudio 腿（流属性诊断 + MMAP 兜底，CamSwap 蓝本） ====================
+//
+// AAudio 采集形态与覆盖关系（见文件头）：legacy 两形态由 obtainBuffer 覆盖；
+// MMAP blocking read 由本腿兜底（obtainBuffer 缺位时）；MMAP callback 是
+// v1 缺口（诊断指纹：openStream 打点输入流 + read 计数为零）。
+//
+// 流属性获取（CamSwap hook_aaudio.cpp 模式）：openStream post-call 用
+// dlsym 查询函数（getDirection/getSampleRate/getChannelCount/getFormat，
+// 不 hook）读流属性缓存 stream map；close 清理。安全回退（对齐 CamSwap）：
+// channelCount≤0→按 1、format 未知→按 I16 推算帧字节数——静音填充下
+// 低估字节数只会欠填（不越界），高估才危险而回退方向恒为低估
+//
+// 会话键：AAudioStream* 与 AudioRecord* 共用 g_sessions（void* 键，
+// 活对象地址不冲突）；close 清 aaudio 会话（对齐 stop 语义）。
+
+typedef struct AAudioStreamStruct AAudioStream;
+typedef struct AAudioStreamBuilderStruct AAudioStreamBuilder;
+
+enum { AAUDIO_DIRECTION_INPUT = 1, AAUDIO_FORMAT_PCM_I16 = 1, AAUDIO_FORMAT_PCM_FLOAT = 2 };
+
+typedef int32_t (*fn_aaudio_query)(AAudioStream*);
+
+struct AStreamInfo {
+    bool isInput;
+    int32_t sampleRate;
+    int32_t channelCount;
+    int32_t format;   // 0 = 未知（按 I16 推算）
+};
+
+static fn_aaudio_query g_q_direction = nullptr;
+static fn_aaudio_query g_q_sample_rate = nullptr;
+static fn_aaudio_query g_q_channel_count = nullptr;
+static fn_aaudio_query g_q_format = nullptr;
+
+static std::mutex g_astreams_mutex;
+static std::map<AAudioStream*, AStreamInfo> g_astreams;
+
+static std::atomic<int64_t> g_aaudio_reads{0};
+
+static void resolve_aaudio_queries() {
+    // dlopen 已加载库只加引用计数；handle 不 dlclose——查询函数需长期可用
+    void* h = dlopen(LIB_AAUDIO, RTLD_NOW);
+    if (h == nullptr) return;
+    g_q_direction = (fn_aaudio_query) dlsym(h, "AAudioStream_getDirection");
+    g_q_sample_rate = (fn_aaudio_query) dlsym(h, "AAudioStream_getSampleRate");
+    g_q_channel_count = (fn_aaudio_query) dlsym(h, "AAudioStream_getChannelCount");
+    g_q_format = (fn_aaudio_query) dlsym(h, "AAudioStream_getFormat");
+}
+
+// 静音填充的帧字节数（低估方向安全）
+static int32_t aaudio_frame_bytes(const AStreamInfo& info) {
+    int32_t ch = info.channelCount > 0 ? info.channelCount : 1;
+    int32_t bps = (info.format == AAUDIO_FORMAT_PCM_FLOAT) ? 4 : 2;
+    return ch * bps;
+}
+
+static int32_t proxy_aaudio_open_stream(void* builder, void** streamOut) {
+    SHADOWHOOK_STACK_SCOPE();
+    int32_t ret = SHADOWHOOK_CALL_PREV(proxy_aaudio_open_stream, builder, streamOut);
+    if (ret == 0 && streamOut != nullptr && *streamOut != nullptr) {
+        AAudioStream* s = (AAudioStream*) *streamOut;
+        AStreamInfo info{};
+        if (g_q_direction != nullptr)
+            info.isInput = g_q_direction(s) == AAUDIO_DIRECTION_INPUT;
+        if (g_q_sample_rate != nullptr) info.sampleRate = g_q_sample_rate(s);
+        if (g_q_channel_count != nullptr) info.channelCount = g_q_channel_count(s);
+        if (g_q_format != nullptr) info.format = g_q_format(s);
+        {
+            std::lock_guard<std::mutex> lk(g_astreams_mutex);
+            g_astreams[s] = info;
+        }
+        if (info.isInput) {
+            upcall_log(ANDROID_LOG_INFO,
+                       "E3c-N AAudio input stream opened (stream=%p, rate=%d, ch=%d, fmt=%d)",
+                       s, info.sampleRate, info.channelCount, info.format);
+        }
+    }
+    return ret;
+}
+
+static int32_t proxy_aaudio_read(void* stream, void* buffer, int32_t numFrames,
+                                 int64_t timeoutNanos) {
+    SHADOWHOOK_STACK_SCOPE();
+    int32_t ret = SHADOWHOOK_CALL_PREV(proxy_aaudio_read, stream, buffer, numFrames, timeoutNanos);
+    int64_t n = g_aaudio_reads.fetch_add(1) + 1;
+    AStreamInfo info{};
+    bool known = false;
+    {
+        std::lock_guard<std::mutex> lk(g_astreams_mutex);
+        auto it = g_astreams.find((AAudioStream*) stream);
+        if (it != g_astreams.end()) {
+            info = it->second;
+            known = true;
+        }
+    }
+    if (n == 1 || (n & 0xFFFF) == 0) {
+        upcall_log(ANDROID_LOG_INFO,
+                   "E3c-N AAudioStream_read observed (n=%lld, frames=%d, ret=%d, input=%d%s)",
+                   (long long) n, numFrames, ret, known && info.isInput ? 1 : 0,
+                   known ? "" : ", stream unknown");
+    }
+    // MMAP 兜底：输入流 + 私有 obtainBuffer 不在位 + 会话活跃（MUTE/REPLACE）
+    // → 静音填充。obtainBuffer 在位时本腿纯诊断（legacy 数据已在汇聚点覆写，
+    // 单一填充归属；v2 REPLACE 数据源下双重填充会双倍推进播放位置，规则同源）
+    if (ret > 0 && buffer != nullptr && known && info.isInput &&
+        g_stub_obtain_priv == nullptr && session_active(stream)) {
+        memset(buffer, 0, (size_t) ret * (size_t) aaudio_frame_bytes(info));
+    }
+    return ret;
+}
+
+static int32_t proxy_aaudio_close(void* stream) {
+    SHADOWHOOK_STACK_SCOPE();
+    int32_t ret = SHADOWHOOK_CALL_PREV(proxy_aaudio_close, stream);
+    {
+        std::lock_guard<std::mutex> lk(g_astreams_mutex);
+        g_astreams.erase((AAudioStream*) stream);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_sessions_mutex);
+        g_sessions.erase(stream);
+    }
+    return ret;
+}
+
+// ==================== 安装（幂等，探针重试驱动） ====================
+
+static std::atomic<int> g_sh_inited{0};
+
+// 装配互斥：初始装配（installRecorderApp 线程）与探针重试（探针线程）
+// 可能并发进入——SHARED 模式下同符号二次 hook 会成链（代理套代理重复
+// 覆写/重复计数），串行化 + 桩句柄幂等共同保证单次安装
+static pthread_mutex_t g_install_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void* hook_sym(const char* lib, const char* sym, void* proxy, void** orig,
+                      void** stub_slot, const char* label) {
+    if (*stub_slot != nullptr) return *stub_slot;  // 已在位（幂等重入）
+    void* stub = shadowhook_hook_sym_name(lib, sym, proxy, orig);
+    if (stub == nullptr) {
+        int err = shadowhook_get_errno();
+        // NOT_FOUND = 库未加载（探针见到 so 加载会重试）或符号不存在
+        // （OEM 改名——read=0 诊断腿会给出全量 dump 定位）
+        const char* msg = shadowhook_to_errmsg(err);
+        upcall_log(ANDROID_LOG_INFO, "E3c-N hook %s failed: errno=%d %s", label, err,
+                   msg != nullptr ? msg : "");
+    } else {
+        *stub_slot = stub;
+        upcall_log(ANDROID_LOG_INFO, "E3c-N hooked %s (%s)", label, sym);
+    }
+    return stub;
+}
+
+static void refresh_bridge_ref(JNIEnv* env, jobject bridge) {
+    pthread_mutex_lock(&g_bridge_mutex);
+    jobject old = g_bridge;
+    pthread_mutex_unlock(&g_bridge_mutex);
+    if (old != nullptr) env->DeleteGlobalRef(old);
+
+    jobject ref = env->NewGlobalRef(bridge);
+    jclass cls = env->GetObjectClass(ref);
+    jmethodID q = env->GetMethodID(cls, "queryPolicy", "()I");
+    jmethodID l = env->GetMethodID(cls, "onLog", "(ILjava/lang/String;)V");
+    env->DeleteLocalRef(cls);
+
+    pthread_mutex_lock(&g_bridge_mutex);
+    g_bridge = ref;
+    g_mid_query_policy = q;
+    g_mid_on_log = l;
+    pthread_mutex_unlock(&g_bridge_mutex);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jobject thiz) {
+    if (g_vm == nullptr) return JNI_FALSE;
+
+    pthread_mutex_lock(&g_install_mutex);
+
+    // 热重载：新代桥实例接管上调（旧 classloader 的 HookContext 已注销
+    // listener，旧实例引用必须换掉，否则策略读取停留在旧配置）
+    refresh_bridge_ref(env, thiz);
+
+    if (!g_sh_inited.load()) {
+        int r = shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+        if (r != 0) {
+            // 2.0.1 so 未导出 shadowhook_get_init_errno（头文件声明与导出表
+            // 不一致的已知差异），get_errno 在 init 失败后同线程取同一错误码
+            const char* msg = shadowhook_to_errmsg(shadowhook_get_errno());
+            upcall_log(ANDROID_LOG_WARN, "E3c-N shadowhook_init failed: %d (%s)", r,
+                       msg != nullptr ? msg : "");
+            pthread_mutex_unlock(&g_install_mutex);
+            return JNI_FALSE;
+        }
+        g_sh_inited.store(1);
+    }
+
+    static void* orig_obtain_priv = nullptr;
+    static void* orig_obtain_pub = nullptr;
+    static void* orig_read = nullptr;
+    static void* orig_stop = nullptr;
+    static void* orig_aaudio_open = nullptr;
+    static void* orig_aaudio_read = nullptr;
+    static void* orig_aaudio_close = nullptr;
+
+    // 主 hook 优先：私有 obtainBuffer（三路汇聚点）
+    hook_sym(LIB_AUDIOCLIENT, SYM_OBTAIN_PRIV, (void*) proxy_obtain_priv,
+             &orig_obtain_priv, &g_stub_obtain_priv, "obtainBuffer(private)");
+
+    // 私有符号缺失 → 公有包装版兜底（只覆盖 OBTAIN 直调；read/回调线程
+    // 由 read 诊断腿的降级填充兜底）
+    if (g_stub_obtain_priv == nullptr) {
+        hook_sym(LIB_AUDIOCLIENT, SYM_OBTAIN_PUB, (void*) proxy_obtain_pub,
+                 &orig_obtain_pub, &g_stub_obtain_pub, "obtainBuffer(public)");
+    }
+
+    hook_sym(LIB_AUDIOCLIENT, SYM_READ, (void*) proxy_read, &orig_read,
+             &g_stub_read, "read");
+    hook_sym(LIB_AUDIOCLIENT, SYM_STOP, (void*) proxy_stop, &orig_stop,
+             &g_stub_stop, "stop");
+
+    // AAudio 腿：查询函数 dlsym 解析（openStream post-call 读取流属性）+
+    // openStream/read/close 三 hook（libaaudio 未加载则 NOT_FOUND，探针重试）
+    resolve_aaudio_queries();
+    hook_sym(LIB_AAUDIO, "AAudioStreamBuilder_openStream", (void*) proxy_aaudio_open_stream,
+             &orig_aaudio_open, &g_stub_aaudio_open, "AAudioStreamBuilder_openStream");
+    hook_sym(LIB_AAUDIO, "AAudioStream_read", (void*) proxy_aaudio_read,
+             &orig_aaudio_read, &g_stub_aaudio_read, "AAudioStream_read");
+    hook_sym(LIB_AAUDIO, "AAudioStream_close", (void*) proxy_aaudio_close,
+             &orig_aaudio_close, &g_stub_aaudio_close, "AAudioStream_close");
+
+    upcall_log(ANDROID_LOG_INFO,
+               "E3c-N installed (obtainPriv=%d, obtainPub=%d, read=%d, stop=%d, "
+               "aaudioOpen=%d, aaudioRead=%d, aaudioClose=%d)",
+               g_stub_obtain_priv != nullptr ? 1 : 0, g_stub_obtain_pub != nullptr ? 1 : 0,
+               g_stub_read != nullptr ? 1 : 0, g_stub_stop != nullptr ? 1 : 0,
+               g_stub_aaudio_open != nullptr ? 1 : 0, g_stub_aaudio_read != nullptr ? 1 : 0,
+               g_stub_aaudio_close != nullptr ? 1 : 0);
+
+    jboolean core = g_stub_obtain_priv != nullptr ? JNI_TRUE : JNI_FALSE;
+    pthread_mutex_unlock(&g_install_mutex);
+    return core;
+}
+
+// ==================== 库加载 ====================
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+    g_vm = vm;
+    return JNI_VERSION_1_6;
+}

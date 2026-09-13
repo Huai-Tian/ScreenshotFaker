@@ -32,10 +32,13 @@ import java.util.WeakHashMap
  *   kWhatRemoveActiveAudioRecord 收尾）——但 12 个 Java 钩子（build/
  *   ctor×5/start×2/read×4）全会话零触发。native read 腿不可内联
  *   （触发即必然），零触发只有一个解释：**Java AudioRecord 类从未
- *   实例化——录屏器走 C++ AudioRecord（libaudioclient）**。Java 层
+ *   实例化——录屏器走 C++ AudioRecord（libaudioclient）。Java 层
  *   机制保留（系统内其他 Java 采集路径 + 第三方 MediaProjection app
- *   的未来覆盖）+ native 路径探针（startNativePathProbe）为 C++ 层
- *   拦截（ShadowHook so 注入，Phase E3c-N）采集 hook 点实证
+ *   的未来覆盖）+ native 路径探针（startNativePathProbe，41zaym 轮已
+ *   实锤 libaudioclient.so 加载与 AudioRecord 采集线程）→ 替换主路径
+ *   下沉至 E3c-N native 腿（[AudioRecordNativeBridge] → audio_replace.cpp，
+ *   ShadowHook inline hook 私有 obtainBuffer 三路汇聚点，post-call
+ *   内容替换）
  * - read 腿懒登记设计仍然正确（对"Java 实例存在但构造/启动腿被 OEM
  *   AOT 内联绕过"的场景兜底；native 方法不可内联，JNI 调用必经
  *   entry point）：native_read 首次见到未登记实例 → lazyRegister 判定
@@ -361,6 +364,16 @@ object AudioRecordReplaceHook {
         // libaaudio AAudioStream_read / 录屏器自研 so）提供一轮实证
         startNativePathProbe()
 
+        // ---- E3c-N native 腿（C++ AudioRecord 路径，41zaym 实锤）----
+        // ShadowHook inline hook libaudioclient 私有 obtainBuffer（read/
+        // 回调/OBTAIN 三路数据出口汇聚点），post-call 内容替换。装配即
+        // 尝试一次；libaudioclient 尚未加载则探针见其映射后重试（native
+        // 侧按符号幂等）。仅录屏器专用进程——systemui 等宿主进程的普通
+        // 录音不进入 native 腿
+        if (HookContext.kind == HookContext.ProcessKind.RECORDER_APP) {
+            AudioRecordNativeBridge.install()
+        }
+
         HookContext.log(
             Log.INFO,
             "E3c installed (build=$buildHooked, ctor=$ctorHooked, start=$startHooked, read=$readHooked, aggressive=$aggressive)"
@@ -403,6 +416,12 @@ object AudioRecordReplaceHook {
                                     AUDIO_SO_HINTS.any { name.contains(it, true) }
                             if (interesting && seen.add(so)) {
                                 HookContext.log(Log.INFO, "E3c native lib loaded: $so")
+                                // E3c-N 装配重试：ShadowHook 解析符号需库在位——
+                                // 装配时 libaudioclient/libaaudio 未加载的场景由
+                                // 此补位（native 侧按符号幂等，重复调用无副作用）
+                                if (name == "libaudioclient.so" || name == "libaaudio.so") {
+                                    AudioRecordNativeBridge.install()
+                                }
                             }
                         }
                         java.io.File("/proc/self/task").listFiles()?.forEach { t ->

@@ -628,12 +628,15 @@ object SecurePolicyHook {
      * getRunningTasks 只见自己任务，[HookContext.screenshotForegroundPackage]
      * 锚定恒 unresolved → "模板 ALLOW + 全局 DENY"被全局态吞噬、截屏落闸。
      *
-     * 机制：识别截屏应用调用者后 Binder.clearCallingIdentity 令原方法以
+     * 机制：识别白名单调用者后 Binder.clearCallingIdentity 令原方法以
      * system（REAL_GET_TASKS 持有者）身份执行，返回完整任务列表；finally
      * 恢复（AMS 内部标准模式，同步 binder 调用内同线程安全）。覆盖 OEM
      * 自研权限读取（一切 Binder.getCallingUid() 读取点统一被欺骗）。
      * 双入口 ATMS/AMS（binder 入口随版本/OEM 漂移，按名收集全变体，
-     * 签名漂移免疫；ColorOS 15 实测两者皆有声明）。仅截屏包 uid 生效，
+     * 签名漂移免疫；ColorOS 15 实测两者皆有声明）。白名单 = 截屏包 +
+     * OEM 录屏器包（E3c 录屏音频策略的前台锚定同走
+     * [HookContext.screenshotForegroundPackage]——录屏器进程同为
+     * scoped 系统应用，不放行则 per-app 音频模板恒回落全局态），
      * system 内部调用（uid 1000，含 getTasks 内部重载互调）与第三方
      * 调用者原生语义
      */
@@ -648,7 +651,9 @@ object SecurePolicyHook {
             HookContext.hookE("E1", method).intercept { chain ->
                 val callingUid = Binder.getCallingUid()
                 if (callingUid == Process.SYSTEM_UID ||
-                    !HookContext.anyPkgForUid(callingUid) { it in HookContext.SCREENSHOT_PACKAGES }
+                    !HookContext.anyPkgForUid(callingUid) {
+                        it in HookContext.SCREENSHOT_PACKAGES || it in HookContext.RECORDER_PACKAGES
+                    }
                 ) {
                     chain.proceed()
                 } else {

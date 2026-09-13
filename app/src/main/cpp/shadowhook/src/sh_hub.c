@@ -1,0 +1,580 @@
+// Copyright (c) 2021-2025 ByteDance Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+
+// Created by Kelun Cai (caikelun@bytedance.com) on 2021-04-11.
+
+#include "sh_hub.h"
+
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+
+#include "queue.h"
+#include "sh_log.h"
+#include "sh_safe.h"
+#include "sh_sig.h"
+#include "sh_trampo.h"
+#include "sh_util.h"
+#include "shadowhook.h"
+#include "tree.h"
+
+#define SH_HUB_TRAMPO_ANON_PAGE_NAME "shadowhook-hub-trampo"
+#define SH_HUB_STACK_ANON_PAGE_NAME  "shadowhook-hub-stack"
+#define SH_HUB_STACK_SIZE            4096  // 4K is enough
+#define SH_HUB_STACK_FRAME_MAX       127   // keep sizeof(sh_hub_stack_t) < 4K
+#define SH_HUB_THREAD_MAX            768
+
+#define SH_HUB_FRAME_FLAG_NONE            ((uintptr_t)0)
+#define SH_HUB_FRAME_FLAG_ALLOW_REENTRANT ((uintptr_t)(1 << 0))
+
+// proxy for each hook-task in the same target-address
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wpadded"
+typedef struct sh_hub_proxy {
+  void *func;
+  bool enabled;
+  SLIST_ENTRY(sh_hub_proxy, ) link;
+} sh_hub_proxy_t;
+#pragma clang diagnostic pop
+
+// proxy list for each hub
+typedef SLIST_HEAD(sh_hub_proxy_list, sh_hub_proxy, ) sh_hub_proxy_list_t;
+
+// frame in the stack
+typedef struct {
+  sh_hub_proxy_list_t proxies;
+  uintptr_t orig_addr;
+  void *return_address;
+  uintptr_t flags;
+} sh_hub_frame_t;
+
+// stack for each thread
+typedef struct {
+  size_t frames_cnt;
+  sh_hub_frame_t frames[SH_HUB_STACK_FRAME_MAX];
+} sh_hub_stack_t;
+
+// hub for each target-address
+struct sh_hub {
+  sh_hub_proxy_list_t proxies;
+  size_t proxies_size;
+  uintptr_t orig_addr;
+  uintptr_t trampo;
+  LIST_ENTRY(sh_hub, ) link;
+};
+
+// hub list for delayed-destroy staging
+typedef LIST_HEAD(sh_hub_list, sh_hub, ) sh_hub_list_t;
+
+// global data for trampo
+static sh_trampo_mgr_t sh_hub_trampo_mgr;
+
+// global data for stack
+static pthread_key_t sh_hub_stack_tls_key;
+static sh_hub_stack_t *sh_hub_stack_cache;
+static uint8_t *sh_hub_stack_cache_used;
+
+// global data for trampoline template
+static uintptr_t sh_hub_trampo_code_start;
+static size_t sh_hub_trampo_code_size;
+static size_t sh_hub_trampo_data_size;
+
+// hub trampoline template
+extern void *sh_hub_trampo_template_data __attribute__((visibility("hidden")));
+__attribute__((naked)) static void sh_hub_trampo_template(void) {
+#if defined(__arm__)
+  __asm__(
+      // Save parameter registers, LR. (keep SP mod 8 = 0)
+      "push  {r0 - r3, r4, lr}   \n"
+      "vpush {d0 - d7}           \n"
+
+      // Call sh_hub_push_stack()
+      "ldr   r0, .L_hub_ptr      \n"
+      "mov   r1, lr              \n"
+      "ldr   ip, .L_push_stack   \n"
+      "blx   ip                  \n"
+
+      // Save the hook function's address to IP register
+      "mov   ip, r0              \n"
+
+      // Restore parameter registers, LR. (keep SP mod 8 = 0)
+      "vpop  {d0 - d7}           \n"
+      "pop   {r0 - r3, r4, lr}   \n"
+
+      // Call hook function
+      "bx    ip                  \n"
+
+      "sh_hub_trampo_template_data:"
+      ".global sh_hub_trampo_template_data;"
+      ".L_push_stack:"
+      ".word 0;"
+      ".L_hub_ptr:"
+      ".word 0;");
+#elif defined(__aarch64__)
+  __asm__(
+      // Save parameter registers, XR(X8), LR
+      "stp   x0, x1, [sp, #-0xd0]!    \n"
+      "stp   x2, x3, [sp, #0x10]      \n"
+      "stp   x4, x5, [sp, #0x20]      \n"
+      "stp   x6, x7, [sp, #0x30]      \n"
+      "stp   x8, lr, [sp, #0x40]      \n"
+      "stp   q0, q1, [sp, #0x50]      \n"
+      "stp   q2, q3, [sp, #0x70]      \n"
+      "stp   q4, q5, [sp, #0x90]      \n"
+      "stp   q6, q7, [sp, #0xb0]      \n"
+
+      // Call sh_hub_push_stack()
+      "ldr   x0, .L_hub_ptr           \n"
+      "mov   x1, lr                   \n"
+      "ldr   x16, .L_push_stack       \n"
+      "blr   x16                      \n"
+
+      // Save the hook function's address to IP register
+      "mov   x16, x0                  \n"
+
+      // Restore parameter registers, XR(X8), LR
+      "ldp   q6, q7, [sp, #0xb0]      \n"
+      "ldp   q4, q5, [sp, #0x90]      \n"
+      "ldp   q2, q3, [sp, #0x70]      \n"
+      "ldp   q0, q1, [sp, #0x50]      \n"
+      "ldp   x8, lr, [sp, #0x40]      \n"
+      "ldp   x6, x7, [sp, #0x30]      \n"
+      "ldp   x4, x5, [sp, #0x20]      \n"
+      "ldp   x2, x3, [sp, #0x10]      \n"
+      "ldp   x0, x1, [sp], #0xd0      \n"
+
+      // Call hook function
+      "br    x16                      \n"
+
+      "sh_hub_trampo_template_data:"
+      ".global sh_hub_trampo_template_data;"
+      ".L_push_stack:"
+      ".quad 0;"
+      ".L_hub_ptr:"
+      ".quad 0;");
+#endif
+}
+
+#if defined(__arm__)
+extern void *sh_hub_trampo_template_data_ancient __attribute__((visibility("hidden")));
+__attribute__((naked)) static void sh_hub_trampo_template_ancient(void) {
+  __asm__(
+      // Save parameter registers, LR
+      "push  { r0 - r3, r4, lr } \n"
+
+      // Call sh_hub_push_stack()
+      "ldr   r0, .L_hub_ptr_ancient \n"
+      "mov   r1, lr              \n"
+      "ldr   ip, .L_push_stack_ancient \n"
+      "blx   ip                  \n"
+
+      // Save the hook function's address to IP register
+      "mov   ip, r0              \n"
+
+      // Restore parameter registers, LR
+      "pop   { r0 - r3, r4, lr } \n"
+
+      // Call hook function
+      "bx    ip                  \n"
+
+      "sh_hub_trampo_template_data_ancient:"
+      ".global sh_hub_trampo_template_data_ancient;"
+      ".L_push_stack_ancient:"
+      ".word 0;"
+      ".L_hub_ptr_ancient:"
+      ".word 0;");
+}
+#endif
+
+void sh_hub_record(sh_hub_t *self, sh_recorder_trace_t *trace) {
+  if (!sh_recorder_get_recordable()) return;
+
+  // hub info:
+  // H|<address>|<original>|<proxy function 1>|<proxy function 2>|<......>
+  sh_recorder_trace_append(trace, "H|%" PRIxPTR "|%" PRIxPTR, sh_hub_get_trampo_addr(self), self->orig_addr);
+  sh_hub_proxy_t *proxy;
+  SLIST_FOREACH(proxy, &self->proxies, link) {
+    if (__atomic_load_n(&proxy->enabled, __ATOMIC_RELAXED))
+      sh_recorder_trace_append(trace, "|%" PRIxPTR, (uintptr_t)proxy->func);
+  }
+  sh_recorder_trace_append(trace, ";");
+}
+
+__attribute__((always_inline)) static sh_hub_stack_t *sh_hub_stack_create(void) {
+  // get stack from global cache
+  for (size_t i = 0; i < SH_HUB_THREAD_MAX; i++) {
+    uint8_t *used = &(sh_hub_stack_cache_used[i]);
+    if (0 == __atomic_load_n(used, __ATOMIC_RELAXED)) {
+      uint8_t expected = 0;
+      if (__atomic_compare_exchange_n(used, &expected, 1, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        sh_hub_stack_t *stack = &(sh_hub_stack_cache[i]);
+        stack->frames_cnt = 0;
+        SH_LOG_DEBUG("hub: get stack from global cache[%zu] %p", i, (void *)stack);
+        return stack;  // OK
+      }
+    }
+  }
+
+  // create new stack by mmap
+  int prot = PROT_READ | PROT_WRITE;
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  void *buf = sh_safe_mmap(NULL, SH_HUB_STACK_SIZE, prot, flags, -1, 0);
+  if (__predict_false(MAP_FAILED == buf)) return NULL;  // failed
+  sh_safe_prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, (unsigned long)buf, SH_HUB_STACK_SIZE,
+                (unsigned long)SH_HUB_STACK_ANON_PAGE_NAME);
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)buf;
+  stack->frames_cnt = 0;
+  return stack;  // OK
+}
+
+static void sh_hub_stack_destroy(void *buf) {
+  if (NULL == buf) return;
+
+  if ((uintptr_t)sh_hub_stack_cache <= (uintptr_t)buf &&
+      (uintptr_t)buf < ((uintptr_t)sh_hub_stack_cache + SH_HUB_THREAD_MAX * sizeof(sh_hub_stack_t))) {
+    // return stack to global cache
+    size_t i = ((uintptr_t)buf - (uintptr_t)sh_hub_stack_cache) / sizeof(sh_hub_stack_t);
+    uint8_t *used = &(sh_hub_stack_cache_used[i]);
+    if (1 != __atomic_load_n(used, __ATOMIC_RELAXED)) abort();
+    __atomic_store_n(used, 0, __ATOMIC_RELEASE);
+    SH_LOG_DEBUG("hub: return stack to global cache[%zu] %p", i, buf);
+  } else {
+    // munmap stack
+    sh_safe_munmap(buf, SH_HUB_STACK_SIZE);
+  }
+}
+
+static int sh_hub_init(void) {
+  if (__predict_false(0 != pthread_key_create(&sh_hub_stack_tls_key, sh_hub_stack_destroy))) goto err;
+  if (__predict_false(NULL == (sh_hub_stack_cache = malloc(SH_HUB_THREAD_MAX * sizeof(sh_hub_stack_t))))) {
+    pthread_key_delete(sh_hub_stack_tls_key);
+    goto err;
+  }
+  if (__predict_false(NULL == (sh_hub_stack_cache_used = calloc(SH_HUB_THREAD_MAX, sizeof(uint8_t))))) {
+    pthread_key_delete(sh_hub_stack_tls_key);
+    free(sh_hub_stack_cache);
+    sh_hub_stack_cache = NULL;
+    goto err;
+  }
+
+  // init trampo start, code size, data size
+  uintptr_t data_start;
+#if defined(__arm__)
+  size_t cpu_feat = sh_util_get_arm_cpu_features();
+  if ((cpu_feat & SH_UTIL_ARM_CPU_FEATURE_VFPV3D16) || (cpu_feat & SH_UTIL_ARM_CPU_FEATURE_VFPV3D32)) {
+    sh_hub_trampo_code_start = (uintptr_t)&sh_hub_trampo_template;
+    data_start = (uintptr_t)(&sh_hub_trampo_template_data);
+  } else {
+    sh_hub_trampo_code_start = (uintptr_t)&sh_hub_trampo_template_ancient;
+    data_start = (uintptr_t)(&sh_hub_trampo_template_data_ancient);
+  }
+#if defined(__thumb__)
+  sh_hub_trampo_code_start = SH_UTIL_CLEAR_BIT0(sh_hub_trampo_code_start);
+#endif
+#elif defined(__aarch64__)
+  sh_hub_trampo_code_start = (uintptr_t)&sh_hub_trampo_template;
+  data_start = (uintptr_t)(&sh_hub_trampo_template_data);
+#endif
+  sh_hub_trampo_code_size = data_start - sh_hub_trampo_code_start;
+  sh_hub_trampo_data_size = sizeof(void *) + sizeof(void *);
+  uintptr_t trampo_size = sh_hub_trampo_code_size + sh_hub_trampo_data_size;
+
+  // init hub's trampoline manager
+  sh_trampo_init_mgr(&sh_hub_trampo_mgr, SH_HUB_TRAMPO_ANON_PAGE_NAME, trampo_size, 0);
+
+  return 0;
+
+err:
+  return SHADOWHOOK_ERRNO_INIT_HUB;
+}
+
+static int sh_hub_lazy_init_once(void) {
+  static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+  static int init_r = -1;
+
+  int r = __atomic_load_n(&init_r, __ATOMIC_ACQUIRE);
+  if (__predict_true(-1 != r)) return r;
+
+  pthread_mutex_lock(&lock);
+  r = __atomic_load_n(&init_r, __ATOMIC_RELAXED);
+  if (-1 == r) {
+    r = sh_hub_init();
+    __atomic_store_n(&init_r, r, __ATOMIC_RELEASE);
+  }
+  pthread_mutex_unlock(&lock);
+
+  return r;
+}
+
+static void *sh_hub_push_stack(sh_hub_t *self, void *return_address) {
+  uintptr_t hub_orig_addr = __atomic_load_n(&self->orig_addr, __ATOMIC_ACQUIRE);
+
+  // get stack, create stack
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)sh_safe_pthread_getspecific(sh_hub_stack_tls_key);
+  if (__predict_false(NULL == stack)) {
+    if (__predict_false(NULL == (stack = sh_hub_stack_create()))) goto end;
+    sh_safe_pthread_setspecific(sh_hub_stack_tls_key, (void *)stack);
+  }
+
+  // check whether a recursive call occurred
+  bool recursive = false;
+  for (size_t i = stack->frames_cnt; i > 0; i--) {
+    sh_hub_frame_t *frame = &stack->frames[i - 1];
+    if (__predict_false(0 == (frame->flags & SH_HUB_FRAME_FLAG_ALLOW_REENTRANT)) &&
+        __predict_false(frame->orig_addr == hub_orig_addr)) {
+      // recursive call found
+      recursive = true;
+      break;
+    }
+  }
+
+  // find and return the first enabled proxy's function in the proxy-list
+  // (does not include the original function)
+  if (__predict_true(!recursive)) {
+    sh_hub_proxy_t *proxy;
+    sh_hub_proxy_t *proxies_head = __atomic_load_n(&SLIST_FIRST(&self->proxies), __ATOMIC_ACQUIRE);
+    for (proxy = proxies_head; proxy; proxy = __atomic_load_n(&SLIST_NEXT(proxy, link), __ATOMIC_RELAXED)) {
+      if (__predict_true(__atomic_load_n(&proxy->enabled, __ATOMIC_RELAXED))) {
+        // push a new frame for the current proxy
+        if (__predict_false(stack->frames_cnt >= SH_HUB_STACK_FRAME_MAX)) goto end;
+        stack->frames_cnt++;
+        SH_LOG_DEBUG("hub: frames_cnt++ = %zu", stack->frames_cnt);
+        sh_hub_frame_t *frame = &stack->frames[stack->frames_cnt - 1];
+        SLIST_FIRST(&frame->proxies) = proxies_head;
+        frame->orig_addr = hub_orig_addr;
+        frame->return_address = return_address;
+        frame->flags = SH_HUB_FRAME_FLAG_NONE;
+
+        // return the first enabled proxy's function
+        SH_LOG_DEBUG("hub: push_stack() return first enabled proxy %p", proxy->func);
+        return proxy->func;
+      }
+    }
+  }
+
+  // if not found enabled proxy in the proxy-list, or recursive call found,
+  // just return the original-function
+end:
+  SH_LOG_DEBUG("hub: push_stack() return orig_addr %p", (void *)hub_orig_addr);
+  return (void *)hub_orig_addr;
+}
+
+void sh_hub_pop_stack(void *return_address) {
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)sh_safe_pthread_getspecific(sh_hub_stack_tls_key);
+  if (__predict_false(0 == stack->frames_cnt)) return;
+  sh_hub_frame_t *frame = &stack->frames[stack->frames_cnt - 1];
+
+  // only the first proxy will actually execute pop-stack()
+  if (__predict_true(frame->return_address == return_address)) {
+    stack->frames_cnt--;
+    SH_LOG_DEBUG("hub: frames_cnt-- = %zu", stack->frames_cnt);
+  }
+}
+
+int sh_hub_create(sh_hub_t **self) {
+  int r = sh_hub_lazy_init_once();
+  if (0 != r) return r;
+
+  sh_hub_t *obj = malloc(sizeof(sh_hub_t));
+  if (NULL == obj) goto err;
+  SLIST_INIT(&obj->proxies);
+  obj->proxies_size = 0;
+  obj->orig_addr = 0;
+
+  // alloc memory for trampoline
+  if (0 == (obj->trampo = sh_trampo_alloc(&sh_hub_trampo_mgr))) {
+    free(obj);
+    goto err;
+  }
+
+  // fill in code
+  SH_SIG_TRY(SIGSEGV, SIGBUS) {
+    memcpy((void *)obj->trampo, (void *)sh_hub_trampo_code_start, sh_hub_trampo_code_size);
+  }
+  SH_SIG_CATCH() {
+    sh_trampo_free(&sh_hub_trampo_mgr, obj->trampo);
+    free(obj);
+    SH_LOG_WARN("hub: fill in code crashed");
+    goto err;
+  }
+  SH_SIG_EXIT
+
+  // fill in data
+  void **data = (void **)(obj->trampo + sh_hub_trampo_code_size);
+  *data++ = (void *)sh_hub_push_stack;
+  *data = (void *)obj;
+
+  // clear CPU cache
+  sh_util_clear_cache(obj->trampo, sh_hub_trampo_code_size + sh_hub_trampo_data_size);
+
+  SH_LOG_INFO("hub: create trampo at %" PRIxPTR ", size %zu + %zu = %zu", obj->trampo,
+              sh_hub_trampo_code_size, sh_hub_trampo_data_size,
+              sh_hub_trampo_code_size + sh_hub_trampo_data_size);
+  *self = obj;
+  return 0;
+
+err:
+  *self = NULL;
+  return SHADOWHOOK_ERRNO_HUB_CREAT;
+}
+
+uintptr_t sh_hub_get_trampo_addr(sh_hub_t *self) {
+#if defined(__arm__) && defined(__thumb__)
+  return self->trampo + 1;
+#else
+  return self->trampo;
+#endif
+}
+
+uintptr_t *sh_hub_get_orig_addr(sh_hub_t *self) {
+  return &self->orig_addr;
+}
+
+void sh_hub_destroy(sh_hub_t *self) {
+  if (0 != self->trampo) sh_trampo_free(&sh_hub_trampo_mgr, self->trampo);
+
+  while (!SLIST_EMPTY(&self->proxies)) {
+    sh_hub_proxy_t *proxy = SLIST_FIRST(&self->proxies);
+    SLIST_REMOVE_HEAD(&self->proxies, link);
+    free(proxy);
+  }
+
+  free(self);
+}
+
+bool sh_hub_is_proxy_duplicated(sh_hub_t *self, uintptr_t proxy_func) {
+  sh_hub_proxy_t *proxy;
+  SLIST_FOREACH(proxy, &self->proxies, link) {
+    if (__atomic_load_n(&proxy->enabled, __ATOMIC_RELAXED) && proxy->func == (void *)proxy_func) return true;
+  }
+  return false;
+}
+
+int sh_hub_add_proxy(sh_hub_t *self, uintptr_t proxy_func) {
+  // check duplicated proxy function
+  if (sh_hub_is_proxy_duplicated(self, proxy_func)) return SHADOWHOOK_ERRNO_HOOK_DUP;
+
+  // try to re-enable an exists item
+  sh_hub_proxy_t *proxy;
+  SLIST_FOREACH(proxy, &self->proxies, link) {
+    if (proxy->func == (void *)proxy_func) {
+      self->proxies_size++;
+      if (!__atomic_load_n(&proxy->enabled, __ATOMIC_RELAXED))
+        __atomic_store_n(&proxy->enabled, true, __ATOMIC_RELEASE);
+      SH_LOG_INFO("hub: add(re-enable) func %" PRIxPTR, proxy_func);
+      return 0;
+    }
+  }
+
+  // create new item
+  if (NULL == (proxy = malloc(sizeof(sh_hub_proxy_t)))) return SHADOWHOOK_ERRNO_OOM;
+  proxy->func = (void *)proxy_func;
+  proxy->enabled = true;
+
+  // insert to the head of the proxy-list
+  // equivalent to: SLIST_INSERT_HEAD(&self->proxies, proxy, link);
+  // but: __ATOMIC_RELEASE ensures readers see only fully-constructed item
+  self->proxies_size++;
+  SLIST_NEXT(proxy, link) = SLIST_FIRST(&self->proxies);
+  __atomic_store_n(&SLIST_FIRST(&self->proxies), proxy, __ATOMIC_RELEASE);
+  SH_LOG_INFO("hub: add(new) func %" PRIxPTR, proxy_func);
+  return 0;
+}
+
+int sh_hub_del_proxy(sh_hub_t *self, uintptr_t proxy_func) {
+  sh_hub_proxy_t *proxy;
+  SLIST_FOREACH(proxy, &self->proxies, link) {
+    if (proxy->func == (void *)proxy_func && __atomic_load_n(&proxy->enabled, __ATOMIC_RELAXED)) {
+      self->proxies_size--;
+      __atomic_store_n(&proxy->enabled, false, __ATOMIC_RELEASE);
+      SH_LOG_INFO("hub: del func %" PRIxPTR, proxy_func);
+      return 0;
+    }
+  }
+
+  return SHADOWHOOK_ERRNO_UNHOOK_NOTFOUND;
+}
+
+size_t sh_hub_get_proxy_count(sh_hub_t *self) {
+  return self->proxies_size;
+}
+
+static sh_hub_frame_t *sh_hub_get_current_frame(void *return_address) {
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)sh_safe_pthread_getspecific(sh_hub_stack_tls_key);
+  if (0 == stack->frames_cnt) return NULL;
+  sh_hub_frame_t *frame = &stack->frames[stack->frames_cnt - 1];
+  return frame->return_address == return_address ? frame : NULL;
+}
+
+void sh_hub_allow_reentrant(void *return_address) {
+  sh_hub_frame_t *frame = sh_hub_get_current_frame(return_address);
+  if (NULL != frame) {
+    frame->flags |= SH_HUB_FRAME_FLAG_ALLOW_REENTRANT;
+    SH_LOG_DEBUG("hub: allow reentrant frame %p", return_address);
+  }
+}
+
+void sh_hub_disallow_reentrant(void *return_address) {
+  sh_hub_frame_t *frame = sh_hub_get_current_frame(return_address);
+  if (NULL != frame) {
+    frame->flags &= ~SH_HUB_FRAME_FLAG_ALLOW_REENTRANT;
+    SH_LOG_DEBUG("hub: disallow reentrant frame %p", return_address);
+  }
+}
+
+void *sh_hub_get_prev_func(void *func) {
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)sh_safe_pthread_getspecific(sh_hub_stack_tls_key);
+  if (0 == stack->frames_cnt) sh_safe_abort();  // called in a non-hook status?
+  sh_hub_frame_t *frame = &stack->frames[stack->frames_cnt - 1];
+
+  // find and return the next enabled proxy in the proxy-list
+  bool found = false;
+  sh_hub_proxy_t *proxy;
+  SLIST_FOREACH(proxy, &(frame->proxies), link) {
+    if (!found) {
+      if (proxy->func == func) found = true;
+    } else {
+      if (__atomic_load_n(&proxy->enabled, __ATOMIC_ACQUIRE)) {
+        break;
+      }
+    }
+  }
+  if (NULL != proxy) {
+    SH_LOG_DEBUG("hub: get_prev_func() return next enabled proxy %p", proxy->func);
+    return proxy->func;
+  }
+
+  SH_LOG_DEBUG("hub: get_prev_func() return orig_addr %p", (void *)frame->orig_addr);
+  // did not find, return the original-function
+  return (void *)frame->orig_addr;
+}
+
+void *sh_hub_get_return_address(void) {
+  sh_hub_stack_t *stack = (sh_hub_stack_t *)sh_safe_pthread_getspecific(sh_hub_stack_tls_key);
+  if (0 == stack->frames_cnt) sh_safe_abort();  // called in a non-hook status?
+  sh_hub_frame_t *frame = &stack->frames[stack->frames_cnt - 1];
+
+  return frame->return_address;
+}

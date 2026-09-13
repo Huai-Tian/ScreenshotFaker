@@ -270,12 +270,14 @@ object HookContext {
         config.templateFor(pkg)?.securePolicy
 
     /**
-     * 截屏应用进程的前台包解析（E1 截屏判定锚点；E3a 泛化共用）。
-     * getRunningTasks 特权查询，跳过截屏应用自己人任务——依赖 E1
-     * system_server 腿的 getTasks 白名单放行
-     * （[SecurePolicyHook.hookGetTasksPassthrough]）绕过 REAL_GET_TASKS
-     * 收紧（ColorOS 15 实测：无放行时只见自己任务，锚定恒 unresolved，
-     * 前台模板策略被全局态吞噬）。
+     * 截屏/录屏应用进程的前台包解析（E1 截屏判定锚点；E3a/E3c 泛化共用
+     * ——E3c 录屏音频策略的前台锚定同源于此）。
+     * getRunningTasks 特权查询，跳过截屏应用与 OEM 录屏器自己的任务（后者
+     * 刚从录屏 UI 启动时可能短暂置顶，被锚定为前台会使 per-app 音频模板
+     * 错配到录屏器自身）——依赖 E1 system_server 腿的 getTasks 白名单
+     * 放行（[SecurePolicyHook.hookGetTasksPassthrough]，含录屏器包）绕过
+     * REAL_GET_TASKS 收紧（ColorOS 15 实测：无放行时只见自己任务，锚定
+     * 恒 unresolved，前台模板策略被全局态吞噬）。
      * 解析失败 → null（策略解析经 [screenshotPolicy] 回落全局态）
      */
     fun screenshotForegroundPackage(): String? = runCatching {
@@ -287,7 +289,7 @@ object HookContext {
         @Suppress("DEPRECATION")
         am.getRunningTasks(10).asSequence()
             .mapNotNull { it.topActivity?.packageName }
-            .firstOrNull { it !in SCREENSHOT_PACKAGES }
+            .firstOrNull { it !in SCREENSHOT_PACKAGES && it !in RECORDER_PACKAGES }
     }.getOrNull()
 
     /** E2a：检测者的截屏侦听回调是否吞噬 */
