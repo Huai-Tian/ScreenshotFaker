@@ -1,6 +1,7 @@
 package fake.screenshot.hooks
 
 import android.util.Log
+import java.io.File
 
 /**
  * E3c-N Kotlin 桥：native 层（[libmediafx.so]）与策略层（[HookContext]）的
@@ -37,14 +38,42 @@ object AudioRecordNativeBridge {
      * 装配 native hook（幂等）。失败不抛出——库未加载/符号缺失均记录
      * 日志后静默返回（探针重试兜底；符号缺失则 read 诊断腿打点定位）。
      *
+     * so 加载双腿（真机实证 2026-09-13 gzvwnh：LspModuleClassLoader 于
+     * base.apk!/lib/arm64-v8a 找不到压缩存储的 libmediafx.so，单腿必败）：
+     * - 腿1 [System.loadLibrary]：模块 classloader 的 APK 内嵌直载路径，
+     *   仅支持未压缩（page-aligned）存储的 so——so 打包方式改为
+     *   useLegacyPackaging=false 时此腿直通
+     * - 腿2 [System.load]（nativeLibraryDir）：安装时解压的 so 目录
+     *   （useLegacyPackaging=true，/data/app/.../lib/<abi>，跨进程可读），
+     *   当前打包形态下的主路径
+     *
+     * 重复调用安全：同 classloader 内 Runtime 对已加载库路径幂等（探针
+     * 重试与装配尾双驱动无半加载状态）。
+     *
      * @return true = 主 hook（私有 obtainBuffer）已在位
      */
     fun install(): Boolean {
-        return runCatching {
+        val direct = runCatching {
             System.loadLibrary("mediafx")
             nativeInstall()
-        }.onFailure {
-            HookContext.log(Log.WARN, "E3c-N bridge unavailable: ${it.message}")
+        }
+        if (direct.getOrDefault(false)) return true
+
+        val fallback = runCatching {
+            val dir = HookContext.moduleApplicationInfo()?.nativeLibraryDir
+            val so = dir?.let { File(it, "libmediafx.so") }
+            if (so == null || !so.exists()) {
+                throw UnsatisfiedLinkError("libmediafx.so not found under nativeLibraryDir=$dir")
+            }
+            System.load(so.absolutePath)
+            nativeInstall()
+        }
+        return fallback.onFailure {
+            HookContext.log(
+                Log.WARN,
+                "E3c-N bridge unavailable (direct: ${direct.exceptionOrNull()?.message}; " +
+                        "fallback: ${it.message})"
+            )
         }.getOrDefault(false)
     }
 

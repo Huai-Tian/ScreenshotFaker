@@ -1,6 +1,7 @@
 package fake.screenshot.hooks
 
 import android.content.SharedPreferences
+import android.content.pm.ApplicationInfo
 import android.util.Log
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -539,4 +540,17 @@ object HookContext {
     fun log(priority: Int, msg: String, tr: Throwable? = null) {
         module?.log(priority, TAG, msg, tr)
     }
+
+    /**
+     * 模块自身 [android.content.pm.ApplicationInfo]（目标进程内经框架获取，
+     * 非 hook 进程的宿主信息）。nativeLibraryDir 指向安装时解压的 so 目录
+     * （/data/app/.../lib/<abi>，跨进程可读）——模块 so 在目标进程的回退
+     * 加载路径：LspModuleClassLoader 的 nativeLibraryDirectories 只含
+     * base.apk!/lib/<abi>（APK 内嵌直载，仅支持未压缩存储的 so），
+     * useLegacyPackaging 压缩存储时 System.loadLibrary 必败，
+     * 需 System.load(nativeLibraryDir/lib<name>.so) 兜底
+     * （真机实证 2026-09-13 gzvwnh：couldn't find "libmediafx.so"）
+     */
+    fun moduleApplicationInfo(): ApplicationInfo? =
+        runCatching { module?.getModuleApplicationInfo() }.getOrNull()
 }

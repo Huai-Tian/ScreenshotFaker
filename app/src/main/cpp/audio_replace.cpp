@@ -52,6 +52,8 @@
 //   v1 不覆盖——openStream 打点输入流属性 + read 计数为零即其指纹，
 //   v2 采纳 CamSwap 的 setDataCallback wrap 蓝本
 // - 会话：_ZN7android11AudioRecord4stopEv + AAudioStream_close
+// - gn0h3h 诊断：start 三候选 + processAudioBuffer + AudioRecordThread::
+//   threadLoop（回调模式数据路径定位，纯打点，见「gn0h3h 诊断腿」注释块）
 //
 // 热路径开销：trampoline + status 检查 + map 查找 + memset（~每 20ms/流），
 // 无 JNI（策略上调只在会话懒登记/TTL 时发生，attach 不 detach——AudioRecord
@@ -98,8 +100,19 @@ struct ArBuffer {
 #define SYM_READ "_ZN7android11AudioRecord4readEPvjb"
 #endif
 #define SYM_STOP "_ZN7android11AudioRecord4stopEv"
+// gn0h3h 轮诊断符号：stop 外部调用腿触发但 obtainBuffer/read 零触发
+// （TRANSFER_CALLBACK 模式：app 只调 start/stop，数据消费在 AudioRecordThread
+// 内部循环；obtainBuffer 疑被 LTO 内联进 processAudioBuffer）。start 三候选
+// 覆盖 AOSP 历代签名形态（AudioSystem::sync_event_t / android::sync_event_t /
+// legacy int,int——ABI 层等价，仅符号名差异，按序试装首个成功者）
+#define SYM_START_ASYS "_ZN7android11AudioRecord5startENS_11AudioSystem12sync_event_tEi"
+#define SYM_START_SYNC "_ZN7android11AudioRecord5startENS_12sync_event_tEi"
+#define SYM_START_INT "_ZN7android11AudioRecord5startEii"
+#define SYM_PAB "_ZN7android11AudioRecord18processAudioBufferEv"
+#define SYM_TL "_ZN7android17AudioRecordThread10threadLoopEv"
 #define LIB_AUDIOCLIENT "libaudioclient.so"
 #define LIB_AAUDIO "libaaudio.so"
+#define LIB_MEDIANDK "libmediandk.so"
 
 // ==================== 策略常量（对齐 HookConfig 三态） ====================
 
@@ -265,9 +278,64 @@ static void* g_stub_obtain_priv = nullptr;
 static void* g_stub_obtain_pub = nullptr;
 static void* g_stub_read = nullptr;
 static void* g_stub_stop = nullptr;
+static void* g_stub_start = nullptr;
+static void* g_stub_pab = nullptr;
+static void* g_stub_tl = nullptr;
+static void* g_stub_amc_queue = nullptr;
 static void* g_stub_aaudio_open = nullptr;
 static void* g_stub_aaudio_read = nullptr;
 static void* g_stub_aaudio_close = nullptr;
+
+// ==================== 诊断辅助（gn0h3h 轮：数据路径定位） ====================
+
+// 返回地址 → 调用方库名（1 帧回溯，dladdr 解析；__builtin_return_address
+// 自动处理 ARM64 PAC）。stop/start 等外部调用腿的调用方揭示录屏器音频
+// 框架的承载库（自有 lib / libaudioclientextimpl / libaudioclient 直调）
+static void log_caller_lib(const char* tag, int prio) {
+    void* ra = __builtin_return_address(0);
+    Dl_info info;
+    if (ra != nullptr && dladdr(ra, &info) != 0 && info.dli_fname != nullptr) {
+        const char* slash = strrchr(info.dli_fname, '/');
+        upcall_log(prio, "E3c-N %s caller: %s+0x%lx", tag,
+                   slash != nullptr ? slash + 1 : info.dli_fname,
+                   (unsigned long) ((char*) ra - (char*) info.dli_fbase));
+    } else {
+        upcall_log(prio, "E3c-N %s caller: <unresolved %p>", tag, ra);
+    }
+}
+
+// 对象内代码指针扫描（只读，每对象一次）：枚举对象前 448B 的 8 字节对齐
+// 指针，dladdr 能解析到 so 模块的值打日志——AudioRecord::mCbf（app 回调
+// 函数指针，指向录屏器自身代码/OPLUS 扩展库）由此显形，为 v2 回调 wrap
+// （CamSwap setDataCallback 蓝本）定位目标。数据指针（堆地址）dladdr 必败
+// 自然过滤；AudioRecord 非 polymorphic（无 vtable 噪音）
+static std::mutex g_dumped_mutex;
+static std::map<void*, int> g_dumped;
+
+static void dump_object_code_ptrs(const char* tag, void* obj) {
+    {
+        std::lock_guard<std::mutex> lk(g_dumped_mutex);
+        if (g_dumped.count(obj) != 0) return;
+        g_dumped[obj] = 1;
+    }
+    char line[512];
+    int pos = snprintf(line, sizeof(line), "E3c-N %s object scan (obj=%p):", tag, obj);
+    int entries = 0;
+    for (size_t off = 0; off < 448 && entries < 8; off += sizeof(void*)) {
+        void* p = *(void**) ((char*) obj + off);
+        if (p == nullptr) continue;
+        Dl_info info;
+        if (dladdr(p, &info) == 0 || info.dli_fname == nullptr) continue;  // 堆/无效
+        const char* slash = strrchr(info.dli_fname, '/');
+        const char* base = slash != nullptr ? slash + 1 : info.dli_fname;
+        int n = snprintf(line + pos, sizeof(line) - (size_t) pos, " [+%zu=%s+0x%lx]",
+                         off, base, (unsigned long) ((char*) p - (char*) info.dli_fbase));
+        if (n <= 0 || (size_t) (pos + n) >= sizeof(line) - 1) break;
+        pos += n;
+        entries++;
+    }
+    upcall_log(ANDROID_LOG_INFO, "%s%s", line, entries == 0 ? " (no code ptrs)" : "");
+}
 
 // ==================== hook 代理 ====================
 
@@ -335,15 +403,75 @@ static ssize_t proxy_read(void* thiz, void* buffer, size_t size, bool blocking) 
 }
 
 // 会话边界：stop 清会话（复用实例下一会话首次 obtain 重判策略，
-// 对齐 Java 层 stop 腿语义）
+// 对齐 Java 层 stop 腿语义）。gn0h3h 轮起附 caller 回溯：揭示录屏器
+// 音频框架的承载库（自有 lib / libaudioclientextimpl / 直调）
 static void proxy_stop(void* thiz) {
     SHADOWHOOK_STACK_SCOPE();
+    log_caller_lib("stop", ANDROID_LOG_INFO);
     SHADOWHOOK_CALL_PREV(proxy_stop, thiz);
     {
         std::lock_guard<std::mutex> lk(g_sessions_mutex);
         g_sessions.erase(thiz);
     }
     upcall_log(ANDROID_LOG_INFO, "E3c-N session cleared on stop (obj=%p)", thiz);
+}
+
+// ==================== gn0h3h 诊断腿（数据路径定位） ====================
+//
+// gn0h3h 真机日志（21:05:48 全 hook 在位 → 21:05:54 "AudioRecord" 线程
+// 出现（AudioRecordThread::run 命名，回调/OBTAIN 模式指纹）→ 录制 ~8s →
+// stop×3（同一对象，teardown 级联）→ obtainBuffer/read 全程零调用）：
+// 数据消费不经 libaudioclient 的 out-of-line obtainBuffer/read 符号
+// → obtainBuffer 被 LTO 内联进 processAudioBuffer 的最大嫌疑。本组
+// 代理纯打点定位（无覆写——回调模式下数据在 processAudioBuffer 内部
+// 经 mCbf 直达 app 回调，v2 按对象扫描出的 mCbf 地址 hook_func_addr
+// 包一层做 pre-callback 静音，CamSwap setDataCallback 蓝本）：
+// - start 三候选：session 级触发（低频全记）+ caller 回溯 + 对象扫描
+// - processAudioBuffer：内联嫌疑本体——本 hook 触发而 obtainBuffer 零
+//   触发 = 内联实锤
+// - AudioRecordThread::threadLoop：虚函数经 vtable 调用同样命中 inline
+//   hook（patch 在函数入口），回调循环在线指纹
+
+static int proxy_start(void* thiz, int event, int triggerSession) {
+    SHADOWHOOK_STACK_SCOPE();
+    int status = SHADOWHOOK_CALL_PREV(proxy_start, thiz, event, triggerSession);
+    upcall_log(ANDROID_LOG_INFO,
+               "E3c-N start() observed (obj=%p, event=%d, trigger=%d, status=%d)",
+               thiz, event, triggerSession, status);
+    log_caller_lib("start", ANDROID_LOG_INFO);
+    dump_object_code_ptrs("start", thiz);
+    return status;
+}
+
+static std::atomic<int64_t> g_pab_calls{0};
+
+static bool proxy_pab(void* thiz) {
+    SHADOWHOOK_STACK_SCOPE();
+    bool ret = SHADOWHOOK_CALL_PREV(proxy_pab, thiz);
+    int64_t n = g_pab_calls.fetch_add(1) + 1;
+    if (n == 1) {
+        upcall_log(ANDROID_LOG_INFO, "E3c-N processAudioBuffer first call (obj=%p)", thiz);
+        dump_object_code_ptrs("pab", thiz);
+    } else if ((n & 0xFFF) == 0) {  // 每 4096 次一条心跳（~80s@20ms）
+        upcall_log(ANDROID_LOG_INFO, "E3c-N processAudioBuffer heartbeat (n=%lld)",
+                   (long long) n);
+    }
+    return ret;
+}
+
+static std::atomic<int64_t> g_tl_calls{0};
+
+static bool proxy_tl(void* thiz) {
+    SHADOWHOOK_STACK_SCOPE();
+    bool ret = SHADOWHOOK_CALL_PREV(proxy_tl, thiz);
+    int64_t n = g_tl_calls.fetch_add(1) + 1;
+    if (n == 1) {
+        upcall_log(ANDROID_LOG_INFO, "E3c-N AudioRecordThread::threadLoop first call (obj=%p)",
+                   thiz);
+    } else if ((n & 0xFFF) == 0) {
+        upcall_log(ANDROID_LOG_INFO, "E3c-N threadLoop heartbeat (n=%lld)", (long long) n);
+    }
+    return ret;
 }
 
 // ==================== AAudio 腿（流属性诊断 + MMAP 兜底，CamSwap 蓝本） ====================
@@ -484,13 +612,18 @@ static void* hook_sym(const char* lib, const char* sym, void* proxy, void** orig
                       void** stub_slot, const char* label) {
     if (*stub_slot != nullptr) return *stub_slot;  // 已在位（幂等重入）
     void* stub = shadowhook_hook_sym_name(lib, sym, proxy, orig);
+    int err = shadowhook_get_errno();
     if (stub == nullptr) {
-        int err = shadowhook_get_errno();
         // NOT_FOUND = 库未加载（探针见到 so 加载会重试）或符号不存在
         // （OEM 改名——read=0 诊断腿会给出全量 dump 定位）
         const char* msg = shadowhook_to_errmsg(err);
         upcall_log(ANDROID_LOG_INFO, "E3c-N hook %s failed: errno=%d %s", label, err,
                    msg != nullptr ? msg : "");
+    } else if (err == SHADOWHOOK_ERRNO_PENDING) {
+        // 库未加载：返回值是 pending task（非 NULL）而非生效桩——不占据
+        // stub_slot，否则幂等检查会永久挡掉探针重试（dl 回调已随 linker
+        // init 降级失效，pending task 永不完成，重试必须新建 task）
+        upcall_log(ANDROID_LOG_INFO, "E3c-N hook %s pending (lib not loaded, probe will retry)", label);
     } else {
         *stub_slot = stub;
         upcall_log(ANDROID_LOG_INFO, "E3c-N hooked %s (%s)", label, sym);
@@ -517,16 +650,10 @@ static void refresh_bridge_ref(JNIEnv* env, jobject bridge) {
     pthread_mutex_unlock(&g_bridge_mutex);
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jobject thiz) {
-    if (g_vm == nullptr) return JNI_FALSE;
-
-    pthread_mutex_lock(&g_install_mutex);
-
-    // 热重载：新代桥实例接管上调（旧 classloader 的 HookContext 已注销
-    // listener，旧实例引用必须换掉，否则策略读取停留在旧配置）
-    refresh_bridge_ref(env, thiz);
-
+// 安装核心（幂等，g_install_mutex 持有下调用）：ShadowHook 初始化 + 全量
+// 符号 hook。由 JNI_OnLoad（自装）与 nativeInstall（探针重试）双驱动，
+// 桩句柄幂等保证同库单次安装
+static void install_hooks_locked() {
     if (!g_sh_inited.load()) {
         int r = shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
         if (r != 0) {
@@ -535,8 +662,7 @@ Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jo
             const char* msg = shadowhook_to_errmsg(shadowhook_get_errno());
             upcall_log(ANDROID_LOG_WARN, "E3c-N shadowhook_init failed: %d (%s)", r,
                        msg != nullptr ? msg : "");
-            pthread_mutex_unlock(&g_install_mutex);
-            return JNI_FALSE;
+            return;
         }
         g_sh_inited.store(1);
     }
@@ -545,6 +671,9 @@ Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jo
     static void* orig_obtain_pub = nullptr;
     static void* orig_read = nullptr;
     static void* orig_stop = nullptr;
+    static void* orig_start = nullptr;
+    static void* orig_pab = nullptr;
+    static void* orig_tl = nullptr;
     static void* orig_aaudio_open = nullptr;
     static void* orig_aaudio_read = nullptr;
     static void* orig_aaudio_close = nullptr;
@@ -565,6 +694,26 @@ Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jo
     hook_sym(LIB_AUDIOCLIENT, SYM_STOP, (void*) proxy_stop, &orig_stop,
              &g_stub_stop, "stop");
 
+    // gn0h3h 诊断腿：start 三候选（ABI 等价，首个成功者胜出；全败 = OEM
+    // 签名漂移，start 打点缺席但 pab/tl 仍独立有效）+ processAudioBuffer +
+    // AudioRecordThread::threadLoop（见「gn0h3h 诊断腿」注释块）
+    if (g_stub_start == nullptr) {
+        hook_sym(LIB_AUDIOCLIENT, SYM_START_ASYS, (void*) proxy_start,
+                 &orig_start, &g_stub_start, "start(asys)");
+    }
+    if (g_stub_start == nullptr) {
+        hook_sym(LIB_AUDIOCLIENT, SYM_START_SYNC, (void*) proxy_start,
+                 &orig_start, &g_stub_start, "start(sync)");
+    }
+    if (g_stub_start == nullptr) {
+        hook_sym(LIB_AUDIOCLIENT, SYM_START_INT, (void*) proxy_start,
+                 &orig_start, &g_stub_start, "start(int)");
+    }
+    hook_sym(LIB_AUDIOCLIENT, SYM_PAB, (void*) proxy_pab, &orig_pab,
+             &g_stub_pab, "processAudioBuffer");
+    hook_sym(LIB_AUDIOCLIENT, SYM_TL, (void*) proxy_tl, &orig_tl,
+             &g_stub_tl, "AudioRecordThread::threadLoop");
+
     // AAudio 腿：查询函数 dlsym 解析（openStream post-call 读取流属性）+
     // openStream/read/close 三 hook（libaaudio 未加载则 NOT_FOUND，探针重试）
     resolve_aaudio_queries();
@@ -574,14 +723,45 @@ Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jo
              &orig_aaudio_read, &g_stub_aaudio_read, "AAudioStream_read");
     hook_sym(LIB_AAUDIO, "AAudioStream_close", (void*) proxy_aaudio_close,
              &orig_aaudio_close, &g_stub_aaudio_close, "AAudioStream_close");
+}
 
+// 安装摘要（每库一次；首驱动方标注来源——onLoad=JNI_OnLoad 自装 /
+// install=nativeInstall 路径，热重载诊断指纹）
+static std::atomic<int> g_summary_logged{0};
+
+static void log_install_summary(const char* via) {
+    if (g_summary_logged.exchange(1) != 0) return;
     upcall_log(ANDROID_LOG_INFO,
-               "E3c-N installed (obtainPriv=%d, obtainPub=%d, read=%d, stop=%d, "
-               "aaudioOpen=%d, aaudioRead=%d, aaudioClose=%d)",
+               "E3c-N installed (via=%s, obtainPriv=%d, obtainPub=%d, read=%d, stop=%d, "
+               "start=%d, pab=%d, tl=%d, aaudioOpen=%d, aaudioRead=%d, aaudioClose=%d)",
+               via,
                g_stub_obtain_priv != nullptr ? 1 : 0, g_stub_obtain_pub != nullptr ? 1 : 0,
                g_stub_read != nullptr ? 1 : 0, g_stub_stop != nullptr ? 1 : 0,
+               g_stub_start != nullptr ? 1 : 0, g_stub_pab != nullptr ? 1 : 0,
+               g_stub_tl != nullptr ? 1 : 0,
                g_stub_aaudio_open != nullptr ? 1 : 0, g_stub_aaudio_read != nullptr ? 1 : 0,
                g_stub_aaudio_close != nullptr ? 1 : 0);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeInstall(JNIEnv* env, jobject thiz) {
+    if (g_vm == nullptr) {
+        // JNI_OnLoad 未被调用（本路径理论不可达：OnLoad 在 dlopen 期必然
+        // 执行；保留为装载链路 tripwire——lqxfdf 轮此路径静默 false 曾致
+        // 双腿加载成功却零日志，难以为继）
+        __android_log_print(ANDROID_LOG_WARN, "SF",
+                            "E3c-N nativeInstall refused: g_vm==null (JNI_OnLoad not exported/run)");
+        return JNI_FALSE;
+    }
+
+    pthread_mutex_lock(&g_install_mutex);
+
+    // 热重载：新代桥实例接管上调（旧 classloader 的 HookContext 已注销
+    // listener，旧实例引用必须换掉，否则策略读取停留在旧配置）
+    refresh_bridge_ref(env, thiz);
+
+    install_hooks_locked();
+    log_install_summary("install");
 
     jboolean core = g_stub_obtain_priv != nullptr ? JNI_TRUE : JNI_FALSE;
     pthread_mutex_unlock(&g_install_mutex);

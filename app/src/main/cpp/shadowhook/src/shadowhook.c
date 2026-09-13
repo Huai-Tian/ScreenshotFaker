@@ -87,14 +87,27 @@ int shadowhook_init(shadowhook_mode_t default_mode, bool debuggable) {
       sh_island_init();
       sh_enter_init();
       sh_switch_init();
-      if (__predict_false(0 != sh_linker_init())) GOTO_END(SHADOWHOOK_ERRNO_INIT_LINKER);
+      // ScreenshotFaker vendored 补丁：sh_linker_init 失败不再阻塞整体 init。
+      // sh_linker 子系统（hook linker soinfo::call_constructors/destructors 追踪
+      // dlopen 事件）仅服务"hook 尚未加载的库"（PENDING task 由 dl 回调唤醒）；
+      // 上游动态库形态依赖 APK 内 libshadowhook_nothing.so（soinfo 内存扫描
+      // 触发器），本 vendored 静态集成未打包该 so，且目标进程内 dlopen 无路径
+      // 形式受 caller namespace 搜索路径限制（模块 classloader namespace 只有
+      // base.apk!/lib/<abi>，压缩存储下不可用）→ dlopen(nothing) 必败、
+      // sh_linker_init 恒 -1（真机实证 2026-09-13 lqxfdf：errno 12 Init linker
+      // mod failed，所有 hook 被阻塞）。宿主只用"hook 已加载库"路径
+      // （sh_task_do → sh_linker_get_addr_info_by_name → xdl 查找 →
+      // sh_switch_hook，不依赖 dl 监控；探针轮询重试替代 dl 回调），降级安全：
+      // dl 监控失效仅意味着 PENDING task 永不完成（宿主不产生 PENDING 依赖）
+      if (__predict_false(0 != sh_linker_init()))
+        SH_LOG_ERROR("linker: init FAILED (dl-monitors disabled; hooking already-loaded libs remains functional)");
       if (__predict_false(0 != sh_task_init())) GOTO_END(SHADOWHOOK_ERRNO_INIT_TASK);
 
 #undef GOTO_END
 
       __atomic_store_n(&shadowhook_init_errno, SHADOWHOOK_ERRNO_OK, __ATOMIC_RELEASE);
     }
-  end:
+      end:
     pthread_mutex_unlock(&lock);
   }
 
@@ -182,8 +195,8 @@ static void *shadowhook_hook_addr_impl(const char *api_name, void *target_addr, 
                                        void **orig_addr, uint32_t flags, bool is_sym_addr, bool is_proc_start,
                                        uintptr_t caller_addr, char *record_lib_name, char *record_sym_name) {
   SH_LOG_INFO("shadowhook: %s(%s, %s, %p, %p, %" PRIu32 ") ...", api_name,
-              NULL == record_lib_name ? "unknown" : record_lib_name,
-              NULL == record_sym_name ? "unknown" : record_sym_name, target_addr, new_addr, flags);
+          NULL == record_lib_name ? "unknown" : record_lib_name,
+          NULL == record_sym_name ? "unknown" : record_sym_name, target_addr, new_addr, flags);
   sh_errno_reset();
 
   int r;
@@ -199,8 +212,8 @@ static void *shadowhook_hook_addr_impl(const char *api_name, void *target_addr, 
 
   // create task
   sh_task_t *task = sh_task_create_hook_by_target_addr(
-      (uintptr_t)target_addr, (uintptr_t)new_addr, (uintptr_t *)orig_addr, flags, is_sym_addr, is_proc_start,
-      (uintptr_t)caller_addr, record_lib_name, record_sym_name);
+          (uintptr_t)target_addr, (uintptr_t)new_addr, (uintptr_t *)orig_addr, flags, is_sym_addr, is_proc_start,
+          (uintptr_t)caller_addr, record_lib_name, record_sym_name);
   if (NULL == task) GOTO_ERR(SHADOWHOOK_ERRNO_OOM);
 
   // do hook
@@ -212,12 +225,12 @@ static void *shadowhook_hook_addr_impl(const char *api_name, void *target_addr, 
 
   // OK
   SH_LOG_INFO("shadowhook: %s(%p, %p, %" PRIu32 ") OK. return: %p", api_name, target_addr, new_addr, flags,
-              (void *)task);
+          (void *)task);
   SH_ERRNO_SET_RET(SHADOWHOOK_ERRNO_OK, (void *)task);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: %s(%p, %p, %" PRIu32 ") FAILED. %d - %s", api_name, target_addr, new_addr, flags,
-               r, sh_errno_to_errmsg(r));
+          r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_NULL(r);
 }
 
@@ -279,8 +292,8 @@ static void *shadowhook_hook_sym_name_impl(const char *lib_name, const char *sym
 
   // create task
   sh_task_t *task =
-      sh_task_create_hook_by_sym_name(lib_name, sym_name, (uintptr_t)new_addr, (uintptr_t *)orig_addr, flags,
-                                      hooked, hooked_arg, (uintptr_t)caller_addr);
+          sh_task_create_hook_by_sym_name(lib_name, sym_name, (uintptr_t)new_addr, (uintptr_t *)orig_addr, flags,
+                                          hooked, hooked_arg, (uintptr_t)caller_addr);
   if (NULL == task) GOTO_ERR(SHADOWHOOK_ERRNO_OOM);
 
   // do hook
@@ -292,12 +305,12 @@ static void *shadowhook_hook_sym_name_impl(const char *lib_name, const char *sym
 
   // OK
   SH_LOG_INFO("shadowhook: hook_sym_name(%s, %s, %p, %" PRIu32 ") OK. return: %p. %d - %s", lib_name,
-              sym_name, new_addr, flags, (void *)task, r, sh_errno_to_errmsg(r));
+          sym_name, new_addr, flags, (void *)task, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET(r, (void *)task);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: hook_sym_name(%s, %s, %p, %" PRIu32 ") FAILED. %d - %s", lib_name, sym_name,
-               new_addr, flags, r, sh_errno_to_errmsg(r));
+          new_addr, flags, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_NULL(r);
 }
 
@@ -346,7 +359,7 @@ int shadowhook_unhook(void *stub) {
   SH_LOG_INFO("shadowhook: unhook(%p) OK", stub);
   SH_ERRNO_SET_RET_ERRNUM(SHADOWHOOK_ERRNO_OK);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: unhook(%p) FAILED. %d - %s", stub, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_FAIL(r);
 }
@@ -356,8 +369,8 @@ static void *shadowhook_intercept_addr_impl(const char *api_name, void *target_a
                                             bool is_sym_addr, bool is_proc_start, uintptr_t caller_addr,
                                             char *record_lib_name, char *record_sym_name) {
   SH_LOG_INFO("shadowhook: %s(%s, %s, %p, %p, %p %" PRIu32 ") ...", api_name,
-              NULL == record_lib_name ? "unknown" : record_lib_name,
-              NULL == record_sym_name ? "unknown" : record_sym_name, target_addr, (void *)pre, data, flags);
+          NULL == record_lib_name ? "unknown" : record_lib_name,
+          NULL == record_sym_name ? "unknown" : record_sym_name, target_addr, (void *)pre, data, flags);
   sh_errno_reset();
 
   int r;
@@ -370,8 +383,8 @@ static void *shadowhook_intercept_addr_impl(const char *api_name, void *target_a
 
   // create task
   sh_task_t *task =
-      sh_task_create_intercept_by_target_addr((uintptr_t)target_addr, pre, data, flags, is_sym_addr,
-                                              is_proc_start, caller_addr, record_lib_name, record_sym_name);
+          sh_task_create_intercept_by_target_addr((uintptr_t)target_addr, pre, data, flags, is_sym_addr,
+                                                  is_proc_start, caller_addr, record_lib_name, record_sym_name);
   if (NULL == task) GOTO_ERR(SHADOWHOOK_ERRNO_OOM);
 
   // do intercept
@@ -386,7 +399,7 @@ static void *shadowhook_intercept_addr_impl(const char *api_name, void *target_a
               (void *)task);
   SH_ERRNO_SET_RET(SHADOWHOOK_ERRNO_OK, (void *)task);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: %s(%p, %p, %p) FAILED. %d - %s", api_name, target_addr, (void *)pre, data, r,
                sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_NULL(r);
@@ -445,7 +458,7 @@ static void *shadowhook_intercept_sym_name_impl(const char *lib_name, const char
                                                 shadowhook_intercepted_t intercepted, void *intercepted_arg,
                                                 uintptr_t caller_addr) {
   SH_LOG_INFO("shadowhook: intercept_sym_name(%s, %s, %p, %p %" PRIu32 ") ...", lib_name, sym_name,
-              (void *)pre, data, flags);
+          (void *)pre, data, flags);
   sh_errno_reset();
 
   int r;
@@ -470,7 +483,7 @@ static void *shadowhook_intercept_sym_name_impl(const char *lib_name, const char
               (void *)pre, data, (void *)task, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET(r, (void *)task);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: intercept_sym_name(%s, %s, %p, %p) FAILED. %d - %s", lib_name, sym_name,
                (void *)pre, data, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_NULL(r);
@@ -508,7 +521,7 @@ int shadowhook_unintercept(void *stub) {
   SH_LOG_INFO("shadowhook: unintercept(%p) OK", stub);
   SH_ERRNO_SET_RET_ERRNUM(SHADOWHOOK_ERRNO_OK);
 
-err:
+    err:
   SH_LOG_ERROR("shadowhook: unintercept(%p) FAILED. %d - %s", stub, r, sh_errno_to_errmsg(r));
   SH_ERRNO_SET_RET_FAIL(r);
 }
