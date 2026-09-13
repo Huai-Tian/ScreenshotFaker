@@ -231,7 +231,15 @@ object ProjectionReplaceHook {
                                     val h = acc.height(cfg) ?: 0
                                     if (w > 0 && h > 0) {
                                         pendingDims = (w to h) to System.currentTimeMillis()
-                                        HookContext.log(Log.INFO, "E3b auto-mirror VD registered ${w}x$h")
+                                        // 调用方包名显式打点（E3c 录屏器包名发现路径）：
+                                        // uid → 包名解析失败时打 uid（adb `pm list packages --uid`
+                                        // 可反查）
+                                        val caller = Binder.getCallingUid()
+                                        val pkgs = HookContext.packagesForUid(caller)
+                                        HookContext.log(
+                                            Log.INFO,
+                                            "E3b auto-mirror VD registered ${w}x$h (caller uid=$caller pkg=${pkgs?.firstOrNull() ?: "unresolved"})"
+                                        )
                                     }
                                 }
                             }

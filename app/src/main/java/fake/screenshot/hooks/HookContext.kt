@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit
  * map 查找。任何解码失败回落全关默认态（= 原生行为），绝不抛出。
  */
 object HookContext {
-    enum class ProcessKind { SYSTEM_SERVER, SCREENSHOT_APP, OTHER }
+    enum class ProcessKind { SYSTEM_SERVER, SCREENSHOT_APP, RECORDER_APP, OTHER }
 
     private const val TAG = "SF"
 
@@ -42,6 +42,19 @@ object HookContext {
         "com.oplus.screenshot",
     )
 
+    /**
+     * OEM 录屏器白名单（E3c 进程内腿宿主，独立于 [SCREENSHOT_PACKAGES]——
+     * 录屏器不装 E1/E3a：E1 的捕获放行语义只对截屏应用成立，误装会改
+     * 变录屏器对 secure 内容的原生行为）。系统应用可被 LSPosed scope。
+     * 包名来源：真机 LSPosed 日志实证（2026-09-13，E3b caller 打点 +
+     * MediaProjectionManagerServiceExtImpl 日志双重确认：uid=10111 独立
+     * 进程，MediaProjection 调用方即录屏器本体；录屏 AudioRecord 亦在此
+     * 进程——AudioBoost kWhatRemoveActiveAudioRecord pid 佐证）。第三方
+     * 录屏 app 不进此集（无法 scope，音频兜底走 E3c-2 策略腿）
+     */
+    val RECORDER_PACKAGES: Set<String> = setOf(
+        "com.oplus.screenrecorder",
+    )
     @Volatile
     private var config: HookConfig = HookConfig.DEFAULT
 
@@ -93,7 +106,14 @@ object HookContext {
             c.templates.any { it.recordVideoId != null } -> "template"
             else -> "off"
         }
-        return "templates=${c.templates.size}, replace=$replace, video=$video, " +
+        val audio = when {
+            c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null -> "global"
+            c.templates.any { it.recordAudioPolicy == HookConfig.AUDIO_REPLACE && it.recordAudioId != null } -> "template"
+            c.globalRecordAudioPolicy == HookConfig.AUDIO_MUTE ||
+                    c.templates.any { it.recordAudioPolicy == HookConfig.AUDIO_MUTE } -> "mute"
+            else -> "off"
+        }
+        return "templates=${c.templates.size}, replace=$replace, video=$video, audio=$audio, " +
                 "aggressive=${c.aggressiveFilter.size}, selfMedia=${c.aggressiveAllowSelfMedia.size}"
     }
 
@@ -215,10 +235,19 @@ object HookContext {
         reloadListeners.clear()
     }
 
-    /** 新代重建（onHotReloaded 内调用）：新 classloader 的单例从零装配 */
-    fun resetForHotReload(module: XposedModule, isSystemServer: Boolean) {
+    /**
+     * 新代重建（onHotReloaded 内调用）：新 classloader 的单例从零装配。
+     * 进程类别按包名重判（isSystemServer 真假无法区分 SCREENSHOT_APP 与
+     * RECORDER_APP——后者 hook 矩阵不同，错判会漏装/多装引擎）
+     */
+    fun resetForHotReload(module: XposedModule, isSystemServer: Boolean, pkg: String?) {
         prefs = null
-        init(module, if (isSystemServer) ProcessKind.SYSTEM_SERVER else ProcessKind.SCREENSHOT_APP)
+        val kind = when {
+            isSystemServer -> ProcessKind.SYSTEM_SERVER
+            pkg != null && pkg in RECORDER_PACKAGES -> ProcessKind.RECORDER_APP
+            else -> ProcessKind.SCREENSHOT_APP
+        }
+        init(module, kind)
     }
 
     // ==================== 查询面（引擎消费，全部无锁快照读） ====================
@@ -360,6 +389,49 @@ object HookContext {
     }
 
     /**
+     * E3c：前台者的音频策略三态（**独立解析，不从画面替换配置派生**——
+     * "音频替换"与"仅视频图像替换"是用户的独立选择）。显式模板策略 >
+     * 全局策略（同 [screenshotPolicy] 的"更具体者胜"）
+     */
+    fun recordAudioPolicy(fgPkg: String?): Int =
+        config.templateFor(fgPkg)?.recordAudioPolicy ?: config.globalRecordAudioPolicy
+
+    /**
+     * E3c：前台者的替换音频 id（仅策略为 REPLACE 时消费；REPLACE 落空
+     * 时调用方回落静音——显式选择替换后放行真实音频 = 泄漏）。优先级：
+     * 前台者显式模板音频 > 全局音频（全局策略为 REPLACE 时）。模板策略
+     * REPLACE 但模板 id 落空的回落链经此自然衔接（模板 null → 全局 id）
+     */
+    fun recordAudioId(fgPkg: String?): String? {
+        val c = config
+        c.templateFor(fgPkg)?.recordAudioId?.let { return it }
+        if (c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null) {
+            return c.globalRecordAudioId
+        }
+        return null
+    }
+
+    /** E3c：配置内全部待替换音频 id（预热/失效口径，音频 store 消费）。
+     *  仅含策略 REPLACE 且已配 id 的条目（MUTE/OFF 不引用音频内容） */
+    fun activeAudioIds(): Set<String> {
+        val c = config
+        return buildSet {
+            c.templates.forEach {
+                if (it.recordAudioPolicy == HookConfig.AUDIO_REPLACE) {
+                    it.recordAudioId?.let { id -> add(id) }
+                }
+            }
+            if (c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null) {
+                add(c.globalRecordAudioId)
+            }
+        }
+    }
+
+    /** E3c 音频远程文件读取（音频 store 消费，包内可见） */
+    fun openRemoteAudio(name: String): android.os.ParcelFileDescriptor? =
+        runCatching { module?.openRemoteFile(name) }.getOrNull()
+
+    /**
      * E3 图片远程文件读取（[ReplaceImageStore] 消费，包内可见）。
      * fd 由框架托管区派发，直接读流即得密文，无 binder 1MB 限制
      */
@@ -444,6 +516,19 @@ object HookContext {
         val m = module ?: return
         val list = names.toList()
         clazz.declaredMethods.filter { it.name in list }.forEach { m.deoptimize(it) }
+    }
+
+    /**
+     * 单个 Executable（方法或构造器）去优化。真机实证（2026-09-13
+     * ColorOS 15）：E3c 在录屏器进程 hook 构造器/startRecording 装配成功
+     * 但全天零回调——OEM 应用 AOT 编译把小方法（构造器/startRecording/
+     * build）内联进自身代码，hook trampoline 被绕过；方法体内日志照常
+     * 出现（内联合并不阻止 body 执行）。**凡 hook 的 Java 方法/构造器
+     * 必须去优化**（native 方法无字节码不可内联，豁免）
+     */
+    fun deoptimize(executable: Executable) {
+        val m = module ?: return
+        runCatching { m.deoptimize(executable) }
     }
 
     // ==================== 日志门面 ====================

@@ -2,6 +2,7 @@ package fake.screenshot
 
 import android.util.Log
 import android.util.Pair as AndroidPair
+import fake.screenshot.hooks.AudioRecordReplaceHook
 import fake.screenshot.hooks.CaptureDetectionHook
 import fake.screenshot.hooks.FreeformPierceHook
 import fake.screenshot.hooks.HookContext
@@ -68,10 +69,18 @@ class ScreenshotFaker : XposedModule() {
     override fun onPackageReady(param: PackageReadyParam) {
         super.onPackageReady(param)
         if (!param.isFirstPackage) return
-        if (param.packageName !in SCREENSHOT_PACKAGES) return
-        hookParam = AndroidPair.create(param.packageName, param.classLoader)
-        HookContext.init(this, ProcessKind.SCREENSHOT_APP)
-        installHooks()
+        val pkg = param.packageName
+        hookParam = AndroidPair.create(pkg, param.classLoader)
+        if (pkg in SCREENSHOT_PACKAGES) {
+            HookContext.init(this, ProcessKind.SCREENSHOT_APP)
+            installHooks()
+        } else if (pkg in HookContext.RECORDER_PACKAGES) {
+            // OEM 录屏器独立装配（仅 E3c）：不与截屏白名单混用——E1 的
+            // 捕获放行语义只对截屏应用成立，误装录屏器会改变其对 secure
+            // 内容的原生行为
+            HookContext.init(this, ProcessKind.RECORDER_APP)
+            installHooks()
+        }
     }
 
     /**
@@ -121,6 +130,17 @@ class ScreenshotFaker : XposedModule() {
                 // E3a ScreenshotReplaceHook —— 截图族 API 拦截返回模板图（前台者选图）
                 runCatching { ScreenshotReplaceHook.installScreenshotApp(p.first, p.second) }
                     .onFailure { HookContext.log(Log.ERROR, "E3a install failed for ${p.first}", it) }
+                // E3c AudioRecordReplaceHook —— 录屏音频策略引擎（OEM 录屏器
+                // 进程内腿：playback capture/REMOTE_SUBMIX 登记 + native_read
+                // 按独立三态策略填充 OFF/MUTE/REPLACE——与画面替换配置解耦，
+                // 用户可自由组合"音频替换"与"仅视频图像替换"）
+                runCatching { AudioRecordReplaceHook.installRecorderApp(p.first, p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E3c install failed for ${p.first}", it) }
+            }
+            ProcessKind.RECORDER_APP -> {
+                // E3c 独占装配（录屏器进程不装 E1/E3a，见 onPackageReady 注释）
+                runCatching { AudioRecordReplaceHook.installRecorderApp(p.first, p.second) }
+                    .onFailure { HookContext.log(Log.ERROR, "E3c install failed for ${p.first}", it) }
             }
             ProcessKind.OTHER -> return
         }
@@ -148,10 +168,10 @@ class ScreenshotFaker : XposedModule() {
      * 旧句柄中 id 不在新集合的（新版已移除的 hook）解除。
      */
     override fun onHotReloaded(param: HotReloadedParam) {
-        HookContext.resetForHotReload(this, param.isSystemServer)
         val saved = param.savedInstanceState
         if (saved is AndroidPair<*, *> && saved.first is String && saved.second is ClassLoader) {
             hookParam = AndroidPair.create(saved.first as String, saved.second as ClassLoader)
+            HookContext.resetForHotReload(this, param.isSystemServer, hookParam?.first)
             installHooks()
         }
         param.oldHookHandles.forEach { h ->
