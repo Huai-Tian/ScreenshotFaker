@@ -55,6 +55,34 @@
 // - gn0h3h 诊断：start 三候选 + processAudioBuffer + AudioRecordThread::
 //   threadLoop（回调模式数据路径定位，纯打点，见「gn0h3h 诊断腿」注释块）
 //
+// ==================== peo05t 实证 + v2 回调拦截（onMoreData） ====================
+// peo05t 真机日志（21:33:42 全 hook 在位，pab=1）：
+// - 21:33:48.755 processAudioBuffer 首调（obj=0xb400007c60c59900）→ 内联
+//   实锤：数据消费在 pab 内部完成，out-of-line obtainBuffer/read 符号零调用
+// - 21:33:48.757 对象扫描 [+0=libaudioclient.so+0xfc870(vtable)] [+144=
+//   libpermission.so+0x12370]——两轮日志（gn0h3h/peo05t）+144 偏移一致且
+//   指向值稳定 = AudioRecord::mCbf（sp<IAudioRecordCallback>），指向
+//   libpermission.so RELRO 段的全局回调对象（r--p 0x10000-0x13000，
+//   .data.rel.ro；两轮同址 = 全局静态对象跨录制会话复用）
+// - v2 路线：pab 首调时读 mCbf → 解引用得 vtable → dump 槽位 → 对
+//   vtable[6]（onMoreData）shadowhook_hook_func_addr 挂地址 → proxy 内
+//   pre-call 静音填充（Buffer.raw/mSize 由内联 obtainBuffer 已填好）
+// - 槽位依据（Itanium ABI，x86_64 GCC 与 arm64 NDK clang 双实验一致，
+//   /tmp/shim2/shim6.cpp 地址比较 + no-pie vtable 静态解析）：
+//   IAudioRecordCallback : public virtual RefBase 的 vtable（address point 起）：
+//     slot 0,1 = D1/D0 析构；slot 2-5 = RefBase 虚基类函数
+//     （onFirstRef/onLastStrongRef/onIncStrongAttempted/onLastWeakRef）；
+//     slot 6 = onMoreData(const AudioRecord::Buffer&)；
+//     slot 7-10 = onOverrun/onMarker/onNewPos/onNewIAudioRecord
+//   （gn0h3h 轮总结的 slot5 系模拟 RefBase 缺 onIncStrongAttempted/
+//    onLastWeakRef 两函数所致；真实布局以本次双架构实验为准）
+// - 布局漂移防御：vtable 全槽位 dump 入日志 + buffer_plausible 校验 +
+//   仅 slot6 单点 hook（误挂低频槽位时 buffer 参数为垃圾 → 校验拦截）
+// - onMoreData 返回 consumed bytes（0 = 全消费），转发原值不改语义
+// - proxy_pab 返回类型修正：AOSP 为 nsecs_t（下次唤醒时间），旧 bool
+//   签名截断返回值 → AudioRecordThread sleep 1ns 忙转（peo05t heartbeat
+//   ~73µs/次 vs 正常 ~20ms/次实锤）
+//
 // 热路径开销：trampoline + status 检查 + map 查找 + memset（~每 20ms/流），
 // 无 JNI（策略上调只在会话懒登记/TTL 时发生，attach 不 detach——AudioRecord
 // 采集线程可能是 ART 已附着线程，detach 会破坏 ART 线程归属）。
@@ -114,6 +142,22 @@ struct ArBuffer {
 #define LIB_AAUDIO "libaaudio.so"
 #define LIB_MEDIANDK "libmediandk.so"
 
+// v2 回调拦截（peo05t 实证，见文件头「v2 回调拦截」注释块）：
+// - MCBF_OFF：LP64 AudioRecord 对象内 mCbf（sp<IAudioRecordCallback>）
+//   的偏移，两轮真机日志实证 +144
+// - VT_SLOT_ON_MORE：IAudioRecordCallback vtable（address point 起）中
+//   onMoreData 的槽位——Itanium ABI，x86_64 GCC 与 arm64 clang 双实验一致
+#if defined(__LP64__)
+#define MCBF_OFF 144
+#define VT_SLOT_ON_MORE 6
+#define VT_DUMP_SLOTS 10  // dump slot 0..10（全虚函数覆盖）
+#else
+// 32 位不支持 v2（try_hook_onmore 主体已 #if 挡下，宏值仅为可编译占位）
+#define MCBF_OFF 0
+#define VT_SLOT_ON_MORE 0
+#define VT_DUMP_SLOTS 0
+#endif
+
 // ==================== 策略常量（对齐 HookConfig 三态） ====================
 
 enum {
@@ -148,6 +192,11 @@ struct Session {
 
 static std::mutex g_sessions_mutex;
 static std::map<void*, Session> g_sessions;
+
+// v2：mCbf 回调对象 → owner AudioRecord 映射（onMoreData 会话键回溯，
+// hook 安装时登记 / stop 清理；定义提前——proxy_stop 先于 v2 段使用）
+static std::mutex g_mcbf_mutex;
+static std::map<void*, void*> g_mcbf_owner;
 
 // ==================== 日志上调（低频，attach 不 detach） ====================
 
@@ -285,6 +334,10 @@ static void* g_stub_amc_queue = nullptr;
 static void* g_stub_aaudio_open = nullptr;
 static void* g_stub_aaudio_read = nullptr;
 static void* g_stub_aaudio_close = nullptr;
+// v2：onMoreData 地址 hook（mCbf 对象 vtable[6]）
+static void* g_stub_onmore = nullptr;
+static void* g_orig_onmore = nullptr;
+static void* g_last_vt = nullptr;  // 已 hook 的 vtable 地址（复用观测）
 
 // ==================== 诊断辅助（gn0h3h 轮：数据路径定位） ====================
 
@@ -404,7 +457,8 @@ static ssize_t proxy_read(void* thiz, void* buffer, size_t size, bool blocking) 
 
 // 会话边界：stop 清会话（复用实例下一会话首次 obtain 重判策略，
 // 对齐 Java 层 stop 腿语义）。gn0h3h 轮起附 caller 回溯：揭示录屏器
-// 音频框架的承载库（自有 lib / libaudioclientextimpl / 直调）
+// 音频框架的承载库（自有 lib / libaudioclientextimpl / 直调）；
+// v2 起同步清 mCbf→owner 映射（onMoreData 会话键回溯链失效防陈旧）
 static void proxy_stop(void* thiz) {
     SHADOWHOOK_STACK_SCOPE();
     log_caller_lib("stop", ANDROID_LOG_INFO);
@@ -412,6 +466,13 @@ static void proxy_stop(void* thiz) {
     {
         std::lock_guard<std::mutex> lk(g_sessions_mutex);
         g_sessions.erase(thiz);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_mcbf_mutex);
+        for (auto it = g_mcbf_owner.begin(); it != g_mcbf_owner.end();) {
+            if (it->second == thiz) it = g_mcbf_owner.erase(it);
+            else ++it;
+        }
     }
     upcall_log(ANDROID_LOG_INFO, "E3c-N session cleared on stop (obj=%p)", thiz);
 }
@@ -445,13 +506,170 @@ static int proxy_start(void* thiz, int event, int triggerSession) {
 
 static std::atomic<int64_t> g_pab_calls{0};
 
-static bool proxy_pab(void* thiz) {
+// ==================== v2：mCbf 回调拦截（onMoreData pre-call 静音） ====================
+// 映射表 g_mcbf_owner/g_mcbf_mutex 见「会话表」段（定义提前）
+
+// vtable 槽位 dump（每 vtable 一次）：dladdr 解析各槽位函数指针的归属库，
+// 布局漂移（OPLUS 定制回调类多继承/重排）由此暴露于日志
+static void dump_vtable_slots(void* cb, void** vt) {
+    char line[768];
+    int pos = snprintf(line, sizeof(line), "E3c-N mCbf vtable scan (cb=%p, vt=%p):", cb,
+                       (void*) vt);
+    for (int i = 0; i <= VT_DUMP_SLOTS; i++) {
+        void* f = vt[i];
+        if (f == nullptr) continue;
+        Dl_info info;
+        int n;
+        if (dladdr(f, &info) != 0 && info.dli_fname != nullptr) {
+            const char* slash = strrchr(info.dli_fname, '/');
+            const char* base = slash != nullptr ? slash + 1 : info.dli_fname;
+            n = snprintf(line + pos, sizeof(line) - (size_t) pos, " [%d=%s+0x%lx%s]", i, base,
+                         (unsigned long) ((char*) f - (char*) info.dli_fbase),
+                         i == VT_SLOT_ON_MORE ? "(hook)" : "");
+        } else {
+            n = snprintf(line + pos, sizeof(line) - (size_t) pos, " [%d=%p]", i, f);
+        }
+        if (n <= 0 || (size_t) (pos + n) >= sizeof(line) - 1) break;
+        pos += n;
+    }
+    upcall_log(ANDROID_LOG_INFO, "%s", line);
+}
+
+// pab 首调（AudioRecordThread 采集线程）时执行：mCbf → vtable → slot6 地址
+// hook。防御链：cb/vt/target 三级 dladdr（垃圾指针挡在解引用前）；
+// g_stub_onmore 幂等（全局静态回调对象跨会话复用，vtable 地址不变——
+// 变化时 WARN 观测，v2 扩展点）
+static size_t proxy_onmore(void* cbThis, const void* buffer);
+
+static void try_hook_onmore(void* ar_obj) {
+#if defined(__LP64__)
+    if (g_stub_onmore != nullptr) {
+        void* cb = *(void**) ((char*) ar_obj + MCBF_OFF);
+        if (cb != nullptr) {
+            void** vt = *(void***) cb;
+            if (vt != g_last_vt && vt != nullptr) {
+                Dl_info info;
+                if (dladdr(vt, &info) != 0 && info.dli_fname != nullptr) {
+                    upcall_log(ANDROID_LOG_WARN,
+                               "E3c-N mCbf vtable changed (obj=%p, vt=%p != %p) -> onMoreData "
+                               "hook may miss this session",
+                               ar_obj, (void*) vt, g_last_vt);
+                }
+            }
+        }
+        return;
+    }
+
+    void* cb = *(void**) ((char*) ar_obj + MCBF_OFF);
+    if (cb == nullptr) {
+        upcall_log(ANDROID_LOG_WARN, "E3c-N mCbf null at +%d (obj=%p) -> v2 skip", MCBF_OFF,
+                   ar_obj);
+        return;
+    }
+    Dl_info info;
+    if (dladdr(cb, &info) == 0 || info.dli_fname == nullptr) {
+        // 非 so 映射内的地址（堆回调对象）——v2 依赖全局对象假设，堆对象时
+        // vtable 解引用仍可行（对象第一字段必为 vptr），不挡，继续
+        upcall_log(ANDROID_LOG_INFO, "E3c-N mCbf not in module (cb=%p, heap?)", cb);
+    }
+    void** vt = *(void***) cb;
+    if (vt == nullptr || dladdr(vt, &info) == 0 || info.dli_fname == nullptr) {
+        upcall_log(ANDROID_LOG_WARN, "E3c-N mCbf vtable unresolved (cb=%p, vt=%p) -> v2 skip",
+                   cb, (void*) vt);
+        return;
+    }
+    dump_vtable_slots(cb, vt);
+
+    void* target = vt[VT_SLOT_ON_MORE];
+    if (target == nullptr || dladdr(target, &info) == 0 || info.dli_fname == nullptr) {
+        upcall_log(ANDROID_LOG_WARN, "E3c-N onMoreData slot %d invalid (vt=%p) -> v2 skip",
+                   VT_SLOT_ON_MORE, (void*) vt);
+        return;
+    }
+    void* orig = nullptr;
+    void* stub = shadowhook_hook_func_addr(target, (void*) proxy_onmore, &orig);
+    if (stub == nullptr) {
+        int err = shadowhook_get_errno();
+        const char* msg = shadowhook_to_errmsg(err);
+        upcall_log(ANDROID_LOG_WARN, "E3c-N hook onMoreData failed: errno=%d %s", err,
+                   msg != nullptr ? msg : "");
+        return;
+    }
+    g_orig_onmore = orig;
+    g_stub_onmore = stub;
+    g_last_vt = vt;
+    {
+        std::lock_guard<std::mutex> lk(g_mcbf_mutex);
+        g_mcbf_owner[cb] = ar_obj;
+    }
+    upcall_log(ANDROID_LOG_INFO, "E3c-N hooked onMoreData (cb=%p, owner=%p, target=%p)",
+               cb, ar_obj, target);
+#endif  // __LP64__
+}
+
+static std::atomic<int64_t> g_onmore_calls{0};
+static std::atomic<int64_t> g_onmore_fills{0};
+
+// onMoreData(this=mCbf 对象, const AudioRecord::Buffer&)：pre-call 静音——
+// processAudioBuffer 内联 obtainBuffer 已把 chunk 就绪，此处覆写后原回调
+// 消费的就是静音数据。返回 consumed bytes 转发原值（0=全消费语义不变）
+static size_t proxy_onmore(void* cbThis, const void* buffer) {
     SHADOWHOOK_STACK_SCOPE();
-    bool ret = SHADOWHOOK_CALL_PREV(proxy_pab, thiz);
+    ArBuffer* b = (ArBuffer*) buffer;
+
+    void* owner = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(g_mcbf_mutex);
+        auto it = g_mcbf_owner.find(cbThis);
+        if (it != g_mcbf_owner.end()) owner = it->second;
+    }
+
+    int64_t n = g_onmore_calls.fetch_add(1) + 1;
+    if (n == 1) {
+        upcall_log(ANDROID_LOG_INFO,
+                   "E3c-N onMoreData first call (cb=%p, owner=%p, fc=%zu, size=%zu, raw=%p)",
+                   cbThis, owner, b != nullptr ? b->frameCount : 0,
+                   b != nullptr ? b->mSize : 0, b != nullptr ? b->raw : nullptr);
+    } else if ((n & 0x3FFF) == 0) {  // 每 16384 次一条心跳（~5min@20ms）
+        upcall_log(ANDROID_LOG_INFO, "E3c-N onMoreData heartbeat (n=%lld, fills=%lld)",
+                   (long long) n, (long long) g_onmore_fills.load());
+    }
+
+    // pre-call 静音填充（owner miss 时以 cbThis 为会话键兜底——同 proxy
+    // 可能拦截到非本路径登记的回调对象，如多录制器共享 slot6 函数）
+    void* session_key = owner != nullptr ? owner : cbThis;
+    if (b != nullptr && b->mSize > 0 && session_active(session_key) &&
+        buffer_plausible(b)) {
+        memset(b->raw, 0, b->mSize);
+        int64_t f = g_onmore_fills.fetch_add(1) + 1;
+        if (f == 1) {
+            upcall_log(ANDROID_LOG_INFO,
+                       "E3c-N first onMoreData fill (cb=%p, owner=%p, %zu frames / %zu bytes)",
+                       cbThis, owner, b->frameCount, b->mSize);
+        } else if ((f & 0x3FFF) == 0) {
+            upcall_log(ANDROID_LOG_INFO, "E3c-N onMoreData fill heartbeat (n=%lld)",
+                       (long long) f);
+        }
+    }
+
+    size_t ret = SHADOWHOOK_CALL_PREV(proxy_onmore, cbThis, buffer);
+    return ret;
+}
+
+// AOSP android15：nsecs_t AudioRecord::processAudioBuffer()——返回下次预期
+// 唤醒时间（AudioRecordThread 据此 sleep）。bool 签名截断（返回 1ns）致
+// 忙转（peo05t heartbeat ~73µs/次实锤），LP64 int64_t 转发修复
+static int64_t proxy_pab(void* thiz) {
+    SHADOWHOOK_STACK_SCOPE();
+    int64_t ret = SHADOWHOOK_CALL_PREV(proxy_pab, thiz);
     int64_t n = g_pab_calls.fetch_add(1) + 1;
     if (n == 1) {
-        upcall_log(ANDROID_LOG_INFO, "E3c-N processAudioBuffer first call (obj=%p)", thiz);
+        upcall_log(ANDROID_LOG_INFO, "E3c-N processAudioBuffer first call (obj=%p, ret=%lld ns)",
+                   thiz, (long long) ret);
         dump_object_code_ptrs("pab", thiz);
+        // v2：数据路径实锤处（pab 触发而 obtainBuffer/read 零调用），就地
+        // 解析 mCbf vtable 并挂 onMoreData——采集线程自身安装，无竞态
+        try_hook_onmore(thiz);
     } else if ((n & 0xFFF) == 0) {  // 每 4096 次一条心跳（~80s@20ms）
         upcall_log(ANDROID_LOG_INFO, "E3c-N processAudioBuffer heartbeat (n=%lld)",
                    (long long) n);
@@ -733,12 +951,12 @@ static void log_install_summary(const char* via) {
     if (g_summary_logged.exchange(1) != 0) return;
     upcall_log(ANDROID_LOG_INFO,
                "E3c-N installed (via=%s, obtainPriv=%d, obtainPub=%d, read=%d, stop=%d, "
-               "start=%d, pab=%d, tl=%d, aaudioOpen=%d, aaudioRead=%d, aaudioClose=%d)",
+               "start=%d, pab=%d, tl=%d, onmore=%d, aaudioOpen=%d, aaudioRead=%d, aaudioClose=%d)",
                via,
                g_stub_obtain_priv != nullptr ? 1 : 0, g_stub_obtain_pub != nullptr ? 1 : 0,
                g_stub_read != nullptr ? 1 : 0, g_stub_stop != nullptr ? 1 : 0,
                g_stub_start != nullptr ? 1 : 0, g_stub_pab != nullptr ? 1 : 0,
-               g_stub_tl != nullptr ? 1 : 0,
+               g_stub_tl != nullptr ? 1 : 0, g_stub_onmore != nullptr ? 1 : 0,
                g_stub_aaudio_open != nullptr ? 1 : 0, g_stub_aaudio_read != nullptr ? 1 : 0,
                g_stub_aaudio_close != nullptr ? 1 : 0);
 }
