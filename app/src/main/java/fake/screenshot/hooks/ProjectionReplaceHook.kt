@@ -1,11 +1,17 @@
 package fake.screenshot.hooks
 
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.ImageFormat
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
+import android.media.ImageReader
 import android.media.MediaPlayer
 import android.os.Binder
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.Process
 import android.system.Os
 import android.system.OsConstants
@@ -115,6 +121,22 @@ object ProjectionReplaceHook {
         @Volatile var player: MediaPlayer? = null
         @Volatile var videoFd: FileDescriptor? = null
         @Volatile var removed = false
+        /** 帧中继（round 13）：解码器 → ImageReader（YUV）→ 本进程转
+         *  RGB 半分辨率位图 → canvas 中心裁剪铺满 layer。几何完全自控，
+         *  规避 OEM 对解码器直挂图层的满幅钳制。释放责任同 player */
+        @Volatile var relayReader: ImageReader? = null
+        @Volatile var relayThread: HandlerThread? = null
+        @Volatile var relaySurface: Surface? = null
+        @Volatile var relayDead = false
+        /** 中继线程独占的工作集（bitmap/平面拷贝/像素输出）与统计 */
+        var relayBitmap: Bitmap? = null
+        var relayY: ByteArray? = null
+        var relayU: ByteArray? = null
+        var relayV: ByteArray? = null
+        var relayOut: IntArray? = null
+        var relayLogged = false
+        var relayFrames = 0
+        var relayFails = 0
         val lock = Any()
     }
 
@@ -382,104 +404,152 @@ object ProjectionReplaceHook {
     private fun startVideo(session: Session, videoId: String, w: Int, h: Int) {
         var player: MediaPlayer? = null
         var fd: FileDescriptor? = null
+        var relayThread: HandlerThread? = null
+        var relayReader: ImageReader? = null
         var started = false
         runCatching {
             if (session.removed) {
                 HookContext.log(Log.INFO, "E3b video aborted before load (session removed) for $videoId")
                 return@runCatching
             }
-            val loaded = ReplaceVideoStore.playableFd(videoId) ?: run {
+            val taken = ReplaceVideoStore.takePlayable(videoId) ?: run {
                 // 失败细节（远程缺失/解密失败/memfd 不可用）已在
                 // ReplaceVideoStore.load 内分级 WARN，此处只标记接管中止
                 HookContext.log(Log.WARN, "E3b video source unavailable, stay on first frame for $videoId")
                 return@runCatching
             }
-            fd = loaded.first
             if (session.removed) {
-                HookContext.log(Log.INFO, "E3b video aborted after load (session removed) for $videoId")
+                HookContext.log(Log.INFO, "E3b video aborted after take (session removed) for $videoId")
                 return@runCatching
             }
-            val p = MediaPlayer()
-            player = p
-            // ---- Stage 1: 数据源（三形式回退链；OEM 的 fd 形式失败根因
-            // 未明——system_server 进程环境与 App 差异，逐形式试错并
-            // 留分级日志供下轮定位）----
-            var sourceSet = false
-            try {
-                p.setDataSource(loaded.first, 0L, loaded.second)
-                sourceSet = true
-            } catch (e: Exception) {
-                HookContext.log(
-                    Log.WARN,
-                    "E3b setDataSource(fd,0,${loaded.second}) failed: ${e.javaClass.simpleName}: ${e.message}"
-                )
-                // 回退 1：单参 fd 形式（长度语义不同——读到 EOF）
-                runCatching { Os.lseek(loaded.first, 0, OsConstants.SEEK_SET) }
+            val p: MediaPlayer
+            if (taken.player != null) {
+                // ---- 快路径：warm 预装配的 prepared player（round 7——
+                // 会话侧 setDataSource→prepare→解码首帧的 ~0.5s 暴露窗口
+                // 是录屏开头静态图残影的根因，提前到空闲窗口装配后此处
+                // 只剩 setSurface + start，残影窗口压缩到解码首帧级别）----
+                p = taken.player
+                player = p
+                HookContext.log(Log.INFO, "E3b fast path: prepared player taken for $videoId")
+            } else {
+                // ---- 慢路径：warm 未命中（首次录屏/缓存被取走/指纹
+                // 逐出后的惰性重建），会话线程内全装配。fd 所有权：
+                // MediaDataSource 形式成功 → fd 转交 dataSource（fd 置
+                // null，release 时关）；其余形式/失败 → fd 留会话层兜底关----
+                p = MediaPlayer()
+                player = p
+                val srcFd = taken.fd!!
+                fd = srcFd
+                var sourceSet = false
                 try {
-                    p.setDataSource(loaded.first)
+                    p.setDataSource(MemfdDataSource(srcFd, taken.length))
                     sourceSet = true
-                    HookContext.log(Log.INFO, "E3b setDataSource(fd) fallback succeeded for $videoId")
-                } catch (e2: Exception) {
+                    fd = null
+                } catch (e: Exception) {
                     HookContext.log(
                         Log.WARN,
-                        "E3b setDataSource(fd) failed: ${e2.javaClass.simpleName}: ${e2.message}"
+                        "E3b setDataSource(MediaDataSource) failed: ${e.javaClass.simpleName}: ${e.message}"
                     )
-                    // 回退 2：/proc/self/fd/N 路径形式（native open(2) 本地
-                    // 打开，绕开 fd 直传路径的任何 OEM 限制）
-                    fdIntOf(loaded.first)?.let { intFd ->
-                        try {
-                            p.setDataSource("/proc/self/fd/$intFd")
-                            sourceSet = true
-                            HookContext.log(Log.INFO, "E3b setDataSource(/proc/self/fd) fallback succeeded for $videoId")
-                        } catch (e3: Exception) {
-                            HookContext.log(
-                                Log.WARN,
-                                "E3b setDataSource(/proc/self/fd/$intFd) failed: ${e3.javaClass.simpleName}: ${e3.message}"
-                            )
-                        }
-                    }
-                    // 三形式皆败：memfd 内容取证（前 64 字节 hex——验证
-                    // 解密产物确为 MP4 头 'ftyp'，区分内容坏 vs 环境坏）
-                    if (!sourceSet) {
-                        HookContext.log(Log.WARN, "E3b all setDataSource forms failed for $videoId, dumping memfd head")
-                        dumpMemfdHead(loaded.first, videoId)
-                        throw e2
-                    }
+                }
+                if (!sourceSet) {
+                    // 回退：fd 直传形式（读取偏移复位；fd 形式不接管 fd，
+                    // 会话层兜底关闭语义不变）
+                    runCatching { Os.lseek(srcFd, 0, OsConstants.SEEK_SET) }
+                    p.setDataSource(srcFd, 0L, taken.length)
+                    HookContext.log(Log.INFO, "E3b setDataSource(fd) fallback for $videoId")
+                }
+                // ---- setter 全部在 prepare 前（round 7 拉伸根因：OEM
+                // NuPlayer 在 prepare 时锁定 scaling mode，之后设置无效
+                // → 视频帧 stretch 到 buffer。round 5 把它挪到 prepare 后
+                // 是误判真凶后的错误顺序——真凶是 SELinux，已由
+                // MediaDataSource 形式修复）。fail-soft：循环/静音/缩放
+                // 失败不阻断播放----
+                try {
+                    p.setLooping(true)
+                } catch (e: Exception) {
+                    HookContext.log(Log.WARN, "E3b setLooping failed: ${e.javaClass.simpleName}: ${e.message} (continue without loop)")
+                }
+                try {
+                    p.setVolume(0f, 0f)
+                } catch (e: Exception) {
+                    HookContext.log(Log.WARN, "E3b setVolume failed: ${e.javaClass.simpleName}: ${e.message} (continue, audio risk)")
+                }
+                try {
+                    p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
+                } catch (e: Exception) {
+                    HookContext.log(Log.WARN, "E3b setVideoScalingMode failed: ${e.javaClass.simpleName}: ${e.message} (continue, default fit)")
+                }
+                // ---- prepare（解复用 + 解码器装配）----
+                try {
+                    p.prepare()
+                } catch (e: Exception) {
+                    HookContext.log(Log.WARN, "E3b prepare failed: ${e.javaClass.simpleName}: ${e.message}")
+                    throw e
                 }
             }
-            // ---- Stage 2: 渲染面（同一 layer 双 producer 接力：首帧 Surface
-            // 已 release，此处新建 Surface 挂 player）----
-            try {
-                p.setSurface(Surface(session.layer))
-            } catch (e: Exception) {
-                HookContext.log(Log.WARN, "E3b setSurface failed: ${e.javaClass.simpleName}: ${e.message}")
-                throw e
+            // ---- 帧中继装配（round 13 拉伸终解）：round 8-12 五轮实测
+            // 证伪了一切 layer 几何手段（builder 尺寸 / 事后事务 / 帧确立
+            //  post / 边界内信箱均无效，视频 buffer 恒被 OEM 缩放到显示
+            //  空间满幅）。改由本进程全权接管渲染：解码器输出到
+            //  ImageReader（YUV_420_888，不参与 SF 合成，OEM 钳制无从
+            //  施加），中继线程逐帧取最新帧 → CPU 半分辨率 YUV→RGB（含
+            //  旋转元数据换算）→ canvas 中心裁剪铺满 layer 全屏 buffer
+            //  （buffer == frame == 显示空间，SF 缩放退化为恒等——占位图
+            //  canvas post 六轮实测恒正确，同一渲染面）。CPU 半分辨率
+            //  （540x960 ≈ 52 万像素/帧）换取 30fps 余量，画质略软可接受
+            //  （替换内容语义下流畅优先于锐度）。中继失败 fail-soft：停
+            //  绘冻结末帧（好于真实内容）；装配失败回落解码器直挂 layer
+            //  （round 8 语义：拉伸但可用）----
+            val vw = p.videoWidth
+            val vh = p.videoHeight
+            runCatching {
+                if (vw <= 0 || vh <= 0) throw IllegalStateException("stream dims $vw x $vh")
+                val rot = taken.rotation
+                // 解码器输出为旋转前 buffer（竖拍视频 sensor 横置）：按旋
+                // 转元数据定 reader 初始尺寸（codec 侧 setBuffersGeometry
+                // 失配时 BufferQueue 自愈重分配，转换侧按实际帧尺寸自适应）
+                val dbw = if (rot == 90 || rot == 270) vh else vw
+                val dbh = if (rot == 90 || rot == 270) vw else vh
+                val th = HandlerThread("sf-e3b-relay").apply { start() }
+                relayThread = th
+                val rd = ImageReader.newInstance(dbw, dbh, ImageFormat.YUV_420_888, 4)
+                rd.setOnImageAvailableListener(
+                    { r -> onRelayFrame(session, r, vw, vh, rot, w, h) },
+                    Handler(th.looper)
+                )
+                relayReader = rd
+                p.setSurface(rd.surface)
+                HookContext.log(Log.INFO, "E3b relay reader ${dbw}x${dbh} rot=$rot for $videoId")
+                // 接管前导帧：firstFrame（快路径）→ 与视频首帧内容几何
+                // 一致，无缝；无则纯黑（慢路径）——屏幕不残留替换图（残
+                // 影语义）
+                postLead(session, taken.firstFrame, w, h)
+            }.onFailure {
+                HookContext.log(
+                    Log.WARN,
+                    "E3b relay setup failed (direct surface, stretched fallback): ${it.message}"
+                )
+                relayThread?.let { t -> runCatching { t.quitSafely() } }
+                relayThread = null
+                runCatching { relayReader?.close() }
+                relayReader = null
+                runCatching { p.setSurface(Surface(session.layer)) }
             }
-            p.setLooping(true)
-            // 静音铁律：替换视频音频外放 = 替换行为即刻暴露
-            p.setVolume(0f, 0f)
-            // 裁剪铺满 layer buffer 尺寸（显示空间），无黑边
-            p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
-            // ---- Stage 3: prepare（解复用 + 解码器装配）----
-            try {
-                p.prepare()
-            } catch (e: Exception) {
-                HookContext.log(Log.WARN, "E3b prepare failed: ${e.javaClass.simpleName}: ${e.message}")
-                throw e
-            }
+            // ---- 共同尾段：登记 + start ----
             var aborted = false
             synchronized(session.lock) {
                 if (session.removed) aborted = true
                 else {
                     session.player = p
-                    session.videoFd = loaded.first
+                    session.videoFd = fd
+                    session.relayReader = relayReader
+                    session.relayThread = relayThread
                 }
             }
             if (aborted) {
                 HookContext.log(Log.INFO, "E3b video aborted after prepare (session removed) for $videoId")
                 return@runCatching
             }
-            // ---- Stage 4: start ----
             try {
                 p.start()
             } catch (e: Exception) {
@@ -487,7 +557,10 @@ object ProjectionReplaceHook {
                 throw e
             }
             started = true
-            HookContext.log(Log.INFO, "E3b video started on mirror buffer ${w}x$h (video=$videoId)")
+            HookContext.log(
+                Log.INFO,
+                "E3b video started on mirror buffer ${w}x$h (video=$videoId, stream=${p.videoWidth}x${p.videoHeight})"
+            )
         }.onFailure {
             HookContext.log(Log.WARN, "E3b video start failed for $videoId: ${it.message}")
             // 异常路径回滚登记（若已登记）：就地释放，不待会话清理
@@ -495,10 +568,14 @@ object ProjectionReplaceHook {
                 if (session.player === player) {
                     session.player = null
                     session.videoFd = null
+                    session.relayReader = null
+                    session.relayThread = null
                 }
             }
             runCatching { player?.release() }
             fd?.let { runCatching { Os.close(it) } }
+            relayReader?.let { r -> runCatching { r.close() } }
+            relayThread?.let { t -> runCatching { t.quitSafely() } }
             started = false
         }
         // 早退路径（removed 中断/数据源失败）：player 未登记，就地释放
@@ -507,51 +584,309 @@ object ProjectionReplaceHook {
                 if (session.player == null) {
                     runCatching { player?.release() }
                     fd?.let { runCatching { Os.close(it) } }
+                    relayReader?.let { r -> runCatching { r.close() } }
+                    relayThread?.let { t -> runCatching { t.quitSafely() } }
                 }
             }
         }
     }
 
-    /** FileDescriptor → 原始 int fd（libcore getInt$，system_server 反射无限制） */
-    private fun fdIntOf(fd: FileDescriptor): Int? = runCatching {
-        FileDescriptor::class.java.getMethod("getInt$").let { m ->
-            m.isAccessible = true
-            m.invoke(fd) as Int
-        }
-    }.getOrNull()
+    /** 中继绘制双线性插值（半分辨率位图放大） */
+    private val relayPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
-    /** memfd 头 64 字节 hex 取证（Os.read 不经流封装不关 fd） */
-    private fun dumpMemfdHead(fd: FileDescriptor, videoId: String) {
-        runCatching {
-            val probe = ByteArray(64)
-            Os.lseek(fd, 0, OsConstants.SEEK_SET)
-            var off = 0
-            while (off < probe.size) {
-                val n = Os.read(fd, probe, off, probe.size - off)
-                if (n <= 0) break
-                off += n
+    /**
+     * 帧中继核心（round 16，中继线程）：取最新帧 → 实际几何解析
+     * （[copyPlaneSafe] + limit 联立解，不信任 image 报告几何）→ 半分辨
+     * 率 YUV→RGB（含旋转换算）→ 中心裁剪铺满 layer 全屏 canvas。单帧
+     * 失败可恢复（过渡帧跳帧），连续 3 次失败判死（[failRelay]，冻结
+     * 末帧 fail-soft），绝不外抛（listener 线程死亡 = 后续帧全部丢弃，
+     * 录制内容停留在末帧——好于真实内容）
+     */
+    private fun onRelayFrame(
+        session: Session,
+        reader: ImageReader,
+        vw: Int,
+        vh: Int,
+        rot: Int,
+        w: Int,
+        h: Int
+    ) {
+        if (session.removed || session.relayDead) return
+        val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
+        try {
+            session.relayFrames++
+            val bw = image.width
+            val bh = image.height
+            if (bw <= 0 || bh <= 0) return
+            // 过渡帧防御：codec setBuffersGeometry 重分配瞬间 planes 可能
+            // 为 null 元素 / buffer 未就绪——跳帧可恢复（连败计数保护）
+            val planes = image.planes
+            if (planes.size < 3 || planes[0] == null || planes[1] == null || planes[2] == null) {
+                failRelay(session, "planes invalid (${planes.size})")
+                return
             }
-            Os.lseek(fd, 0, OsConstants.SEEK_SET)
-            HookContext.log(
-                Log.WARN,
-                "E3b memfd head for $videoId: ${probe.joinToString(" ") { String.format("%02x", it) }}"
+            if (planes[0].buffer == null || planes[1].buffer == null || planes[2].buffer == null) {
+                failRelay(session, "plane buffer null")
+                return
+            }
+            // ---- 实际几何解析（round 16）：OEM plane limit/stride 布局与
+            // image 报告几何错配（round 15 实测 3 连败 BufferUnderflow，
+            // reader 重建条件未触发——U rowStride 与报告宽一致，炸点在
+            // 行距×行数越 limit，错配不在宽度维度）。本进程不再信任
+            // image 报告几何：先按标准布局 limit 公式（limit = stride*
+            // (rows-1)+行有效宽）预检报告几何可读性，越界则由 Y/U 两
+            // 平面 limit 与 stride 联立解出实际 buffer 几何（NV12/NV21
+            // semi-planar 与 I420 planar 两系公式），解出即真相——两种
+            // codec 旋转行为（预旋转/非预旋转输出）均自适。解不出（OEM
+            // limit 无公式）回落报告几何 + [copyPlaneSafe] 防御拷贝
+            // （limit 收缩 + 末行复制），任何布局下中继不判死 ----
+            val yPlane = planes[0]
+            val uPlane = planes[1]
+            val yR = yPlane.rowStride
+            val uR = uPlane.rowStride
+            val vR = planes[2].rowStride
+            val uS = uPlane.pixelStride
+            val vS = planes[2].pixelStride
+            val yBuf = yPlane.buffer
+            val uBuf = uPlane.buffer
+            val yLim = yBuf.limit()
+            val uLim = uBuf.limit()
+            // 可完整读取行数（limit 语义内）
+            fun rowsReadable(lim: Int, stride: Int, cw: Int): Int =
+                if (stride > 0 && lim >= cw) (lim - cw) / stride + 1 else 0
+            var gw = bw
+            var gh = bh
+            if (rowsReadable(yLim, yR, bw) < bh ||
+                rowsReadable(uLim, uR, ((bw + 1) / 2) * uS) < (bh + 1) / 2
+            ) {
+                val semi = uS >= 2
+                val denom = if (semi) yR - uR / 2 else yR - uR
+                // hSol 先行范围校验（防 yR*(hSol-1) 中间溢出——异常解可
+                // 达千万级）
+                val hSol = if (denom != 0) {
+                    if (semi) {
+                        (yLim - uLim - uR + yR) / denom
+                    } else {
+                        (yLim + yR - 2 * uLim - 2 * uR) / denom
+                    }
+                } else -1
+                if (hSol in 16..4320) {
+                    val wSol = if (semi) {
+                        yLim - yR * (hSol - 1)
+                    } else {
+                        2 * (uLim - uR * (hSol / 2 - 1))
+                    }
+                    if (wSol in 16..4320) {
+                        gw = wSol
+                        gh = hSol
+                    }
+                }
+            }
+            // 旋转有效性自检：元数据称 90/270 但 buffer 已是后置方向（个别
+            // codec 预旋转输出）→ 按无旋转处理，防双重旋转（实际几何下判定）
+            val rotEff = if ((rot == 90 || rot == 270) && gw == vw && gh == vh && vw != vh) 0 else rot
+            val evw = if (rotEff == 90 || rotEff == 270) gh else gw
+            val evh = if (rotEff == 90 || rotEff == 270) gw else gh
+            val hw = (evw + 1) / 2
+            val hh = (evh + 1) / 2
+            val yW = gw
+            val cW = (gw + 1) / 2
+            val cH = (gh + 1) / 2
+            // 平面整块拷出（防御拷贝：limit 语义内收缩，不足行复制末可用
+            // 行——OEM 非标布局下画面局部异常但中继存活）
+            val yNeed = yW * gh
+            val uNeed = cW * uS * cH
+            val vNeed = cW * vS * cH
+            val yArr = session.relayY.ensure(yNeed).also { copyPlaneSafe(yPlane, it, yR, yW, gh) }
+            val uArr = session.relayU.ensure(uNeed).also { copyPlaneSafe(uPlane, it, uR, cW * uS, cH) }
+            val vArr = session.relayV.ensure(vNeed).also { copyPlaneSafe(planes[2], it, vR, cW * vS, cH) }
+            val uRow = cW * uS
+            val vRow = cW * vS
+            val out = session.relayOut.ensure(hw * hh)
+            var idx = 0
+            for (oy in 0 until hh) {
+                val ry = (oy * 2).coerceAtMost(evh - 1)
+                for (ox in 0 until hw) {
+                    val rx = (ox * 2).coerceAtMost(evw - 1)
+                    val sx: Int
+                    val sy: Int
+                    when (rotEff) {
+                        90 -> { sx = ry; sy = gh - 1 - rx }
+                        180 -> { sx = gw - 1 - rx; sy = gh - 1 - ry }
+                        270 -> { sx = gw - 1 - ry; sy = rx }
+                        else -> { sx = rx; sy = ry }
+                    }
+                    val y0 = yArr[sy * yW + sx].toInt() and 0xFF
+                    val su = sx shr 1
+                    val sv = sy shr 1
+                    val u0 = uArr[sv * uRow + su * uS].toInt() and 0xFF
+                    val v0 = vArr[sv * vRow + su * vS].toInt() and 0xFF
+                    // BT.601 有限范围近似（替换内容语义下精度足够）
+                    val r = y0 + ((1436 * (v0 - 128)) shr 10)
+                    val g = y0 - (((351 * (u0 - 128)) + (728 * (v0 - 128))) shr 10)
+                    val b = y0 + ((1815 * (u0 - 128)) shr 10)
+                    out[idx++] =
+                        (0xFF shl 24) or (clamp8(r) shl 16) or (clamp8(g) shl 8) or clamp8(b)
+                }
+            }
+            var bmp = session.relayBitmap
+            if (bmp == null || bmp.width != hw || bmp.height != hh) {
+                bmp = Bitmap.createBitmap(hw, hh, Bitmap.Config.ARGB_8888)
+                session.relayBitmap = bmp
+            }
+            bmp.setPixels(out, 0, hw, 0, 0, hw, hh)
+            // 中心裁剪（后置方向坐标）→ 半分辨率位图坐标 → 铺满全屏
+            val strip = cropStrip(evw, evh, w, h)
+            val src = Rect(
+                (strip.left + 1) / 2, (strip.top + 1) / 2,
+                (strip.right + 1) / 2, (strip.bottom + 1) / 2
             )
+            val surface = session.relaySurface
+                ?: Surface(session.layer).also { session.relaySurface = it }
+            val canvas = surface.lockHardwareCanvas()
+            try {
+                canvas.drawBitmap(bmp, src, Rect(0, 0, w, h), relayPaint)
+            } finally {
+                surface.unlockCanvasAndPost(canvas)
+            }
+            if (!session.relayLogged) {
+                session.relayLogged = true
+                HookContext.log(Log.INFO, "E3b relay frame #${session.relayFrames} ok (${gw}x$gh rotEff=$rotEff)")
+            }
+        } catch (t: Throwable) {
+            failRelay(session, "${t.javaClass.simpleName}: ${t.message}", t)
+        } finally {
+            runCatching { image.close() }
         }
     }
 
-    /** 摘除并释放单会话（player + memfd + layer） */
+    /**
+     * 中继单帧失败处理：可恢复语义（round 14）——过渡帧（codec 几何
+     * 重分配瞬间的 null plane/buffer）跳帧即愈，连续 3 次失败才判死
+     * （冻结末帧 fail-soft）。日志带异常类名与堆栈首行（round 13 只打
+     * message 为 null 无法取证）
+     */
+    private fun failRelay(session: Session, why: String, t: Throwable? = null) {
+        session.relayFails++
+        val at = t?.stackTrace?.firstOrNull()?.let { " at ${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" } ?: ""
+        HookContext.log(Log.WARN, "E3b relay fail #${session.relayFails} (frame #${session.relayFrames}): $why$at")
+        if (session.relayFails >= 3) {
+            session.relayDead = true
+            HookContext.log(Log.WARN, "E3b relay dead after 3 consecutive failures (frozen last frame)")
+        }
+    }
+
+    /** 接管前导帧：firstFrame 中心裁剪铺满（快路径无缝）；null 纯黑。
+     *  与中继共用 relaySurface（同一 BufferQueue 生产者，避免多实例） */
+    private fun postLead(session: Session, lead: Bitmap?, w: Int, h: Int) {
+        runCatching {
+            val sf = session.relaySurface
+                ?: Surface(session.layer).also { session.relaySurface = it }
+            val c = sf.lockHardwareCanvas()
+            try {
+                if (lead != null) {
+                    c.drawBitmap(lead, cropStrip(lead.width, lead.height, w, h), Rect(0, 0, w, h), relayPaint)
+                } else {
+                    c.drawColor(Color.BLACK)
+                }
+            } finally {
+                sf.unlockCanvasAndPost(c)
+            }
+        }.onFailure {
+            HookContext.log(Log.WARN, "E3b lead post failed: ${it.message}")
+        }
+    }
+
+    /** 中心裁剪条（源后置方向坐标）：源比目标相对更宽 → 裁列；更窄 → 裁行 */
+    private fun cropStrip(sw: Int, sh: Int, dw: Int, dh: Int): Rect {
+        val a = sw.toFloat() / sh
+        val t = dw.toFloat() / dh
+        return when {
+            a > t + 0.001f -> {
+                val cw = (sh * t).toInt().coerceIn(1, sw)
+                Rect((sw - cw) / 2, 0, (sw + cw) / 2, sh)
+            }
+            a < t - 0.001f -> {
+                val ch = (sw / t).toInt().coerceIn(1, sh)
+                Rect(0, (sh - ch) / 2, sw, (sh + ch) / 2)
+            }
+            else -> Rect(0, 0, sw, sh)
+        }
+    }
+
+    /**
+     * 防御性平面拷贝（round 16）：按 plane buffer 的 limit 语义计算可完整
+     * 读取的行数——读取量不足时先尝试扩 limit 到 capacity（OEM 保守
+     * limit 不含末行 stride 偏移的常见变体；capacity 为 gralloc 分配上界，
+     * 读入最多含 padding 无害），仍不足则截断行数并以末可用行复制填充
+     * （画面底部重复纹理，好于中继判死）。绝不抛 BufferUnderflow。
+     * 返回实际读取行数（0 = 一行都读不了，arr 保持零值）
+     */
+    private fun copyPlaneSafe(
+        plane: android.media.Image.Plane,
+        arr: ByteArray,
+        rowStride: Int,
+        cw: Int,
+        h: Int
+    ): Int {
+        val buf = plane.buffer
+        val lim = buf.limit()
+        var rows = if (rowStride > 0 && lim >= cw) (lim - cw) / rowStride + 1 else 0
+        if (rows < h && rowStride > 0) {
+            val cap = buf.capacity()
+            if (cap > lim && cap >= (h - 1).toLong() * rowStride + cw) {
+                buf.limit(cap)
+                rows = h
+            }
+        }
+        rows = rows.coerceIn(0, h)
+        if (rows <= 0) return 0
+        var pos = 0
+        for (row in 0 until rows) {
+            buf.position(row * rowStride)
+            buf.get(arr, pos, cw)
+            pos += cw
+        }
+        if (rows < h) {
+            val last = (rows - 1) * cw
+            for (row in rows until h) {
+                System.arraycopy(arr, last, arr, pos, cw)
+                pos += cw
+            }
+        }
+        return rows
+    }
+
+    private fun clamp8(c: Int): Int = if (c < 0) 0 else if (c > 255) 255 else c
+
+    /** ByteArray 容量确保（尺寸变化时重分配；中继线程独占无竞态） */
+    private fun ByteArray?.ensure(n: Int): ByteArray =
+        if (this != null && size >= n) this else ByteArray(n)
+
+    /** IntArray 容量确保（同上） */
+    private fun IntArray?.ensure(n: Int): IntArray =
+        if (this != null && size >= n) this else IntArray(n)
+
+    /** 摘除并释放单会话（player + memfd + 中继资源 + layer），异步重建预热缓存 */
     private fun removeLayer(mirrorSc: Any) {
         val session = layers.remove(mirrorSc) ?: return
         synchronized(session.lock) { session.removed = true }
         runCatching {
             session.player?.release()
             session.videoFd?.let { runCatching { Os.close(it) } }
+            session.relayReader?.let { r -> runCatching { r.close() } }
+            session.relayThread?.let { t -> runCatching { t.quitSafely() } }
+            session.relaySurface?.let { s -> runCatching { s.release() } }
+            session.relayBitmap?.let { b -> runCatching { b.recycle() } }
             SurfaceControl.Transaction().use { t ->
                 t.reparent(session.layer, null)
                 t.apply()
             }
             session.layer.release()
         }
+        // re-warm：快路径取走的 prepared player 已随会话销毁，后台重建
+        // 供下次录屏（连续录屏间零装配等待）
+        ReplaceVideoStore.rewarm()
     }
 
     /**

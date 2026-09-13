@@ -135,8 +135,8 @@ object ReplaceVideoManager {
         staging: Boolean = false
     ): ImportResult =
         withContext(Dispatchers.IO) {
-            // 1) 源校验与本地拷贝（一次性流式；Uri 只开一次——OEM provider
-            //    流可能是一次性的，同图片 decodeForCrop 的教训）
+            // 1) 源拷贝（一次性流式；Uri 只开一次——OEM provider 流可能
+            //    是一次性的，同图片 decodeForCrop 的教训）
             val local = if (staging) stagingFile(context, videoId) else localFile(context, videoId)
             local.parentFile?.mkdirs()
             val copied = runCatching {
@@ -147,6 +147,7 @@ object ReplaceVideoManager {
             }.getOrDefault(false)
             if (!copied) {
                 local.delete()
+                Log.w(TAG, "import[$videoId]: copy failed (provider open/read error)")
                 return@withContext ImportResult.ReadFailed
             }
 
@@ -156,8 +157,8 @@ object ReplaceVideoManager {
                 return@withContext ImportResult.TooLarge
             }
 
-            // 3) 可播放性校验（有视频轨 + 时长 > 0；MediaMetadataRetriever
-            //    对损坏文件抛 RuntimeException 或返回空元数据）
+            // 3) 可播放性校验（有视频轨 + 时长 > 0；MMR 对损坏文件抛
+            //    RuntimeException 或返回空元数据）
             val valid = runCatching {
                 MediaMetadataRetriever().use { r ->
                     r.setDataSource(local.absolutePath)
@@ -171,13 +172,16 @@ object ReplaceVideoManager {
             }.getOrDefault(false)
             if (!valid) {
                 local.delete()
+                Log.w(TAG, "import[$videoId]: validate failed (no/invalid video track)")
                 return@withContext ImportResult.Invalid
             }
 
             // 4) 首帧缩略图（失败不阻断——UI 图标兜底）
             val thumb = if (staging) stagingThumbFile(context, videoId)
             else thumbFile(context, videoId)
-            runCatching { generateThumb(local, thumb) }
+            if (!runCatching { generateThumb(local, thumb) }.isSuccess) {
+                Log.w(TAG, "import[$videoId]: thumb failed (icon fallback)")
+            }
 
             // 5) 远程流式密文（服务未连接/写失败 → 本地已保底，绑定补投；
             //    staging 不推——转正时统一投递）
@@ -289,13 +293,27 @@ object ReplaceVideoManager {
             Log.w(TAG, "pushRemote: openRemoteFile failed for $videoId: ${e.message}")
             return null
         }
+        // post-truncate 时序修正（jqa4k3 实测 EBADF）：encryptTo 的
+        // cos.close() 连带关 pfd（AutoCloseOutputStream 链式关闭），流关闭
+        // 后再 ftruncate 原句柄必 EBADF——truncate 目标改用 dup 独立 fd
+        //（不随流关闭），pre-truncate 失败时的兜底语义保持（残留尾部令
+        // GCM tag 错位恒败）
         val counting = CountingOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(pfd))
-        counting.use {
-            runCatching { android.system.Os.ftruncate(pfd.fileDescriptor, 0L) }
-                .onFailure { Log.w(TAG, "pushRemote: pre-truncate failed for $videoId: ${it.message}") }
-            VideoEnvelope.encryptTo(local.inputStream(), it)
-            runCatching { android.system.Os.ftruncate(pfd.fileDescriptor, counting.count) }
-                .onFailure { Log.w(TAG, "pushRemote: post-truncate failed for $videoId: ${it.message}") }
+        val tailFd = runCatching { android.system.Os.dup(pfd.fileDescriptor) }.getOrNull()
+        try {
+            counting.use {
+                runCatching { android.system.Os.ftruncate(pfd.fileDescriptor, 0L) }
+                    .onFailure { Log.w(TAG, "pushRemote: pre-truncate failed for $videoId: ${it.message}") }
+                VideoEnvelope.encryptTo(local.inputStream(), it)
+            }
+            if (tailFd != null) {
+                runCatching { android.system.Os.ftruncate(tailFd, counting.count) }
+                    .onFailure { Log.w(TAG, "pushRemote: post-truncate failed for $videoId: ${it.message}") }
+                runCatching { android.system.Os.close(tailFd) }
+            }
+        } catch (e: Exception) {
+            tailFd?.let { runCatching { android.system.Os.close(it) } }
+            throw e
         }
         Log.i(TAG, "pushRemote: pushed ${counting.count} cipher bytes for $videoId")
         name

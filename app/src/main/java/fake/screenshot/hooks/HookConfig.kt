@@ -189,6 +189,7 @@ object HookConfigCodec {
                         put("w", tpl.maskPresentationDetection)
                         put("f", tpl.pierceFreeform)
                         tpl.imageId?.let { img -> put("g", img) }
+                        tpl.recordVideoId?.let { vid -> put("vg", vid) }
                     })
                 }
             })

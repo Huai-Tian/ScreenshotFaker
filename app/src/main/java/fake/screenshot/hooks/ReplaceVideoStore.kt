@@ -1,6 +1,12 @@
 package fake.screenshot.hooks
 
+import android.graphics.Bitmap
+import android.media.MediaDataSource
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
@@ -15,6 +21,8 @@ import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -35,8 +43,7 @@ object VideoEnvelope {
 
     /** 分块缓冲 1MB（CipherInputStream 路径实测 0.2 MB/s 吞吐、35s/6.5MB
      *  ——Conscrypt 流实现对底层流的读取粒度不受控；手动分块使 read/
-     *  update/write 三侧调用数与缓冲对齐。吞吐回归由 [DecryptStats] 的
-     *  读侧/总耗时分离打点观测） */
+     *  update/write 三侧调用数与缓冲对齐） */
     private const val IO_BUFFER = 1024 * 1024
 
     // 独立种子的混淆层密钥（与 ReplaceImageCodec/HookConfigCodec 同哲学）
@@ -61,23 +68,18 @@ object VideoEnvelope {
 
     /**
      * 流式解密（hook 侧播放用）：读 nonce 头 → 分块 cipher.update →
-     * doFinal（GCM tag 在此校验，不符抛 AEADBadTagException → false）。
-     * 返回 [DecryptStats]（读侧耗时分离——读 MB/s 异常低 = LSPosed
-     * 远程 fd 读路径瓶颈，与密码学无关）
+     * doFinal（GCM tag 在此校验，不符抛 AEADBadTagException → false）
      */
     fun decryptTo(envelope: InputStream, out: OutputStream): DecryptStats {
         val nonce = ByteArray(NONCE_LEN)
-        if (!readFully(envelope, nonce)) return DecryptStats(false, 0L, 0L)
+        if (!readFully(envelope, nonce)) return DecryptStats(false, 0L)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, nonce))
         val buf = ByteArray(IO_BUFFER)
         var bytes = 0L
-        var readNanos = 0L
         return try {
             while (true) {
-                val t0 = System.nanoTime()
                 val n = envelope.read(buf)
-                readNanos += System.nanoTime() - t0
                 if (n < 0) break
                 if (n == 0) continue
                 cipher.update(buf, 0, n)?.takeIf { it.isNotEmpty() }?.let {
@@ -89,12 +91,12 @@ object VideoEnvelope {
                 out.write(it)
                 bytes += it.size
             }
-            DecryptStats(true, bytes, readNanos)
+            DecryptStats(true, bytes)
         } catch (_: IOException) {
-            DecryptStats(false, bytes, readNanos)
+            DecryptStats(false, bytes)
         } catch (_: GeneralSecurityException) {
             // AEADBadTagException（tag 不符——历史截断残留/写半途中断）
-            DecryptStats(false, bytes, readNanos)
+            DecryptStats(false, bytes)
         }
     }
 
@@ -110,8 +112,8 @@ object VideoEnvelope {
         return true
     }
 
-    /** 解密统计：ok + 明文字节数 + 底层读累计纳秒（吞吐分离观测） */
-    class DecryptStats(val ok: Boolean, val bytes: Long, val readNanos: Long)
+    /** 解密统计：ok + 明文字节数 */
+    class DecryptStats(val ok: Boolean, val bytes: Long)
 }
 
 /**
@@ -122,13 +124,17 @@ object VideoEnvelope {
  * 盘、内存页由内核 tmpfs 管理可回收），以**单槽正缓存**持有（实测解密
  * 吞吐受远程读路径制约——6.5MB 耗时 35s，逐会话重解密不可接受）：
  *
- * - 预热：配置同步后台线程解密全局视频入缓存（冷启动/配置推送与录屏
- *   间的空闲窗口通常以分钟计，35s 级解密完全被吸收）
- * - 会话：[playableFd] dup 交付（零拷贝零解密），模板视频首用/缓存逐出
- *   后走惰性解密
+ * - 预热：配置同步/会话结束后台线程解密全局视频入缓存，并完成 player
+ *   全装配（setDataSource + setters + prepareAsync——round 7 实测会话
+ *   侧装配+解码首帧延迟使录屏开头暴露静态图约 0.5s，提前到空闲窗口
+ *   消除）；scaling/loop/volume setter 必须在 prepare 前调用（OEM
+ *   NuPlayer 在 prepare 时锁定 scaling mode，之后设置无效 = 视频拉伸）
+ * - 会话：[takePlayable] 优先交付 prepared player（转移所有权，缓存
+ *   清空——会话结束 re-warm），无 player 条目回退 dup 交付（会话侧
+ *   自行装配，兼容 warm 未完成即开录的窗口）
  * - 失效：指纹感知（同图片口径）——远程文件变化（App 侧换视频/自愈重
  *   投）即逐出重解，不依赖配置 reload；负缓存同图片（坏视频/文件缺失
- *   不逐会话重试 IO）
+ *   /prepare 失败不逐会话重试 IO）
  */
 object ReplaceVideoStore {
 
@@ -137,18 +143,43 @@ object ReplaceVideoStore {
 
     fun remoteName(videoId: String): String = "$REMOTE_PREFIX$videoId"
 
-    /** 正缓存条目：已解密 memfd（fd 归缓存所有，会话取 dup） */
-    private class Entry(val fd: FileDescriptor, val length: Long, val fingerprint: Long)
+    /** 会话取用结果：player（prepared 快路径）与 fd（慢路径）二选一非空；
+     *  firstFrame = warm 期 MMR 提取的视频第 0 帧（快路径独有，占位无缝）；
+     *  rotation = 容器旋转元数据（中继 reader 定尺寸与 YUV 旋转换算用） */
+    class TakeResult(
+        val player: MediaPlayer?,
+        val fd: FileDescriptor?,
+        val length: Long,
+        val firstFrame: Bitmap?,
+        val rotation: Int
+    )
+
+    /**
+     * 正缓存条目：已解密 memfd（fd 归缓存所有）+ 可选 prepared player
+     * （其 MemfdDataSource 持独立 dup fd，release 即关）。[dispose] 统一
+     * 释放（幂等性靠调用方单次调用约定）
+     */
+    private class Entry(
+        val fd: FileDescriptor,
+        val length: Long,
+        val fingerprint: Long,
+        val player: MediaPlayer?,
+        val firstFrame: Bitmap? = null,
+        val rotation: Int = 0
+    ) {
+        fun dispose() {
+            runCatching { player?.release() }
+            runCatching { Os.close(fd) }
+        }
+    }
 
     /** 负缓存：id → 失败时的远程文件指纹（reload 重置；指纹感知同图片） */
     private val failed = ConcurrentHashMap<String, Long>()
 
     /**
      * 单槽正缓存（[lock] 全局互斥）。单槽 = 内存上限锁定单视频明文
-     * （App 侧 100MB 约束），不随模板数放大；逐出关闭原 fd——会话经
-     * [dupOf] 持有的 dup 是独立 fd，不受影响（dup 共享文件描述与偏移：
-     * 顺序会话安全；并发同视频双会话的 seek 竞态不支持——单活动录屏
-     * 的现实约束）
+     * （App 侧 100MB 约束），不随模板数放大；prepared player 条目被
+     * 会话取走即清空（所有权转移），会话结束由引擎触发 re-warm
      */
     private val lock = Any()
     private var cached: Entry? = null
@@ -166,13 +197,13 @@ object ReplaceVideoStore {
     }
 
     /**
-     * 播放就绪数据源：正缓存命中（指纹一致）→ dup 交付；未命中 → 流式
-     * 解密入缓存后 dup。返回 (fd, 明文字节长度)，fd 的 close 责任归调用
-     * 方（会话生命周期，E3b 在 MediaPlayer.release 后 Os.close）。
-     * null = 任一环节失败（负缓存登记 + 分级 WARN），调用方 fail-open
-     * 回落静态图
+     * 会话取用（所有权转移语义）：prepared player 命中 → 转移（缓存清
+     * 空，re-warm 由会话结束触发）；无 player 条目 → dup 交付（缓存保
+     * 留）。null = 任一环节失败（负缓存登记 + 分级 WARN），调用方
+     * fail-open 回落静态图。fd/player 的 close 责任归调用方（player 的
+     * release 触发其 MemfdDataSource.close 关自有 dup）
      */
-    fun playableFd(videoId: String): Pair<FileDescriptor, Long>? {
+    fun takePlayable(videoId: String): TakeResult? {
         if (isNegativelyCached(videoId)) {
             HookContext.log(Log.WARN, "E3b video negatively cached for $videoId (remote fingerprint unchanged)")
             return null
@@ -181,24 +212,34 @@ object ReplaceVideoStore {
             if (isNegativelyCached(videoId)) return null
             val fp = fingerprintOf(videoId)
             cached?.takeIf { cachedId == videoId && it.fingerprint == fp }?.let { hit ->
-                dupOf(hit)?.let { return it to hit.length }
+                hit.player?.let { p ->
+                    cached = null
+                    cachedId = null
+                    return TakeResult(p, null, hit.length, hit.firstFrame, hit.rotation)
+                }
+                dupOf(hit)?.let { return TakeResult(null, it, hit.length, null, hit.rotation) }
                 // dup 失败（fd 耗尽极端态）：落重解路径（保守但可用）
             }
-            val entry = loadEntry(videoId) ?: run {
+            val entry = loadEntry(videoId, withPlayer = false) ?: run {
                 failed[videoId] = fp
                 return null
             }
-            runCatching { cached?.let { Os.close(it.fd) } }
+            runCatching { cached?.let { it.dispose() } }
             cached = entry
             cachedId = videoId
-            dupOf(entry)?.let { return it to entry.length }
+            dupOf(entry)?.let { return TakeResult(null, it, entry.length, null, entry.rotation) }
             // dup 失败：丢弃条目按失败处理（下次重试）
-            runCatching { Os.close(entry.fd) }
+            entry.dispose()
             cached = null
             cachedId = null
             failed[videoId] = fp
             return null
         }
+    }
+
+    /** 会话结束后 re-warm（配置 reload 亦触发）：重建 prepared player 缓存 */
+    fun rewarm() {
+        warmAsync()
     }
 
     /** 缓存条目 → 会话 fd：dup（独立 fd，缓存逐出不受影响）+ 归零偏移
@@ -236,24 +277,47 @@ object ReplaceVideoStore {
         val ids = HookContext.activeVideoIds()
         synchronized(lock) {
             if (cachedId != null && ids.isNotEmpty() && cachedId !in ids) {
-                runCatching { cached?.let { Os.close(it.fd) } }
+                runCatching { cached?.let { it.dispose() } }
                 cached = null
                 cachedId = null
             }
         }
         if (ids.isEmpty()) return
+        warmAsync()
+    }
+
+    /**
+     * 后台预热：全局视频解密 + player 全装配入缓存（已命中同 id 条目则
+     * 跳过——re-warm 与 reload 的并发去重）。负缓存指纹感知（App 侧
+     * 换视频自愈后自动重试）
+     */
+    private fun warmAsync() {
+        val gid = HookContext.globalVideoId() ?: return
         Thread({
-            val gid = HookContext.globalVideoId() ?: ids.firstOrNull() ?: return@Thread
-            runCatching { playableFd(gid)?.first?.let { Os.close(it) } }
+            if (isNegativelyCached(gid)) return@Thread
+            synchronized(lock) {
+                if (cachedId == gid && cached != null) return@Thread
+                val fp = fingerprintOf(gid)
+                val entry = loadEntry(gid, withPlayer = true) ?: run {
+                    failed[gid] = fp
+                    return@Thread
+                }
+                runCatching { cached?.let { it.dispose() } }
+                cached = entry
+                cachedId = gid
+                HookContext.log(Log.INFO, "E3b video warmed (prepared=${entry.player != null}) for $gid")
+            }
         }, "sf-vid-warm").apply { isDaemon = true }.start()
     }
 
     /**
-     * 单 id 全链路：远程密文 → memfd。指纹在解密完成后取（文件在解密
-     * 中途被覆写的极端竞态：存新指纹，下次访问指纹不符自然逐出重解，
-     * 方向安全）。吞吐打点分读侧/总耗时（见 [VideoEnvelope.decryptTo]）
+     * 单 id 全链路：远程密文 → memfd（+ 可选 prepared player）。指纹在
+     * 解密完成后取（文件在解密中途被覆写的极端竞态：存新指纹，下次访问
+     * 指纹不符自然逐出重解，方向安全）。withPlayer=true 时 prepare 失败
+     * → 整条作废返回 null（MediaDataSource 形式下 prepare 失败基本 =
+     * 内容坏，负缓存不逐会话重试）
      */
-    private fun loadEntry(videoId: String): Entry? = runCatching {
+    private fun loadEntry(videoId: String, withPlayer: Boolean): Entry? = runCatching {
         val pfd = HookContext.openRemoteVideo(remoteName(videoId)) ?: run {
             HookContext.log(Log.WARN, "E3b video remote file absent for $videoId")
             return null
@@ -262,7 +326,7 @@ object ReplaceVideoStore {
             HookContext.log(Log.WARN, "E3b memfd_create unavailable for $videoId")
             return null
         }
-        val out = CountingFileOutputStream(fd)
+        val out = FileOutputStream(fd)
         val t0 = android.os.SystemClock.elapsedRealtime()
         val stats = pfd.use { raw ->
             VideoEnvelope.decryptTo(ParcelFileDescriptor.AutoCloseInputStream(raw), out)
@@ -273,18 +337,105 @@ object ReplaceVideoStore {
             HookContext.log(Log.WARN, "E3b video decrypt failed for $videoId")
             return null
         }
-        val total = stats.bytes * 1000.0 / ms.coerceAtLeast(1) / 1024 / 1024
-        val readMs = stats.readNanos / 1_000_000.0
-        val read = if (readMs >= 1.0) stats.bytes * 1000.0 / readMs / 1024 / 1024 else -1.0
-        HookContext.log(
-            Log.INFO,
-            "E3b video decrypted ${stats.bytes} bytes in ${ms}ms (total %.1f MB/s, read %.1f MB/s) for $videoId"
-                .format(total, read)
-        )
-        Entry(fd, stats.bytes, fingerprintOf(videoId))
+        HookContext.log(Log.INFO, "E3b video decrypted ${stats.bytes} bytes in ${ms}ms for $videoId")
+        val player = if (withPlayer) buildPlayer(fd, stats.bytes, videoId) else null
+        if (withPlayer && player == null) {
+            runCatching { Os.close(fd) }
+            return null
+        }
+        // 第 0 帧（warm 独有，无缝接管前导帧）+ 旋转元数据（中继 reader
+        // 定尺寸与 YUV 旋转换算）。提取失败 fail-soft（帧 null / rot 0）
+        val meta = extractMeta(fd, stats.bytes, videoId, wantFrame = withPlayer)
+        Entry(fd, stats.bytes, fingerprintOf(videoId), player, meta.firstFrame, meta.rotation)
     }.onFailure {
         HookContext.log(Log.WARN, "E3b video load failed for $videoId: ${it.message}")
     }.getOrNull()
+
+    /**
+     * prepared player 装配（warm 阶段，会话建立时零装配零等待）：
+     * setDataSource(MemfdDataSource, 独立 dup) → 全 setter（**必须在
+     * prepare 前**——OEM NuPlayer prepare 时锁定 scaling mode，后设无
+     * 效即视频拉伸）→ prepareAsync + latch。失败 release（dup fd 随
+     * dataSource.close 关闭）
+     */
+    private fun buildPlayer(fd: FileDescriptor, length: Long, videoId: String): MediaPlayer? {
+        return try {
+            val dup = Os.dup(fd)
+            val p = MediaPlayer()
+            p.setDataSource(MemfdDataSource(dup, length))
+            p.setLooping(true)
+            // 静音铁律：替换视频音频外放 = 替换行为即刻暴露
+            p.setVolume(0f, 0f)
+            // 裁剪铺满 layer buffer（显示空间），无黑边；prepare 前调用
+            p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
+            val latch = CountDownLatch(1)
+            var ok = false
+            p.setOnPreparedListener { _ ->
+                ok = true
+                latch.countDown()
+            }
+            p.setOnErrorListener { _, what, extra ->
+                HookContext.log(Log.WARN, "E3b warm prepare error what=$what extra=$extra for $videoId")
+                latch.countDown()
+                true
+            }
+            p.prepareAsync()
+            if (!latch.await(3, TimeUnit.SECONDS) || !ok) {
+                runCatching { p.release() }
+                HookContext.log(Log.WARN, "E3b warm prepare not ready in 3s for $videoId")
+                null
+            } else {
+                HookContext.log(Log.INFO, "E3b warm player prepared ${p.videoWidth}x${p.videoHeight} for $videoId")
+                p
+            }
+        } catch (e: Exception) {
+            HookContext.log(Log.WARN, "E3b warm build failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    /** 元数据提取结果：第 0 帧（可空）+ 容器旋转 */
+    private class Meta(val firstFrame: Bitmap?, val rotation: Int)
+
+    /**
+     * 视频元数据提取（MMR，warm/加载期）：第 0 帧（占位无缝用）+ 旋转
+     * 元数据（中继 reader 定尺寸与 YUV 旋转换算用）。MMR +
+     * MemfdDataSource——与播放器同架构（读取经 binder 回调在本进程，
+     * media.extractor 不触 fd，无 SELinux 跨域问题）。独立 dup fd，
+     * MMR.release 后显式 dataSource.close（幂等——MMR 是否代关不确定，
+     * 双保险）。失败返 (null, 0)（fail-soft）
+     */
+    private fun extractMeta(fd: FileDescriptor, length: Long, videoId: String, wantFrame: Boolean): Meta {
+        var ds: MemfdDataSource? = null
+        return try {
+            val mmr = MediaMetadataRetriever()
+            try {
+                ds = MemfdDataSource(Os.dup(fd), length)
+                mmr.setDataSource(ds)
+                val rot = runCatching {
+                    mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                        ?.trim()?.toIntOrNull() ?: 0
+                }.getOrNull() ?: 0
+                val frame = if (wantFrame) {
+                    runCatching {
+                        mmr.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    }.getOrNull()
+                } else null
+                HookContext.log(
+                    Log.INFO,
+                    "E3b meta for $videoId: first frame ${frame?.let { "${it.width}x${it.height}" } ?: "null"}, rotation=$rot"
+                )
+                Meta(frame, rot)
+            } finally {
+                runCatching { mmr.release() }
+                ds?.close()
+            }
+        } catch (e: Exception) {
+            HookContext.log(Log.WARN, "E3b meta extract failed: ${e.javaClass.simpleName}: ${e.message}")
+            ds?.close()
+            Meta(null, 0)
+        }
+    }
 
     // ==================== memfd（双候选反射，版本容错） ====================
 
@@ -323,25 +474,44 @@ object ReplaceVideoStore {
             if (os == null || m == null) null else bind(os, m)
         }.getOrNull()
     }
+}
 
-    /** FileOutputStream + 长度计数（诊断辅助；会话长度以 stats 为准） */
-    private class CountingFileOutputStream(fd: FileDescriptor) : OutputStream() {
-        private val out = FileOutputStream(fd)
-        var count = 0L
-            private set
+/**
+ * memfd 数据源（E3b 数据源主形式，round 6 根因修复）：所有读取经 binder
+ * 回调发生在持有 memfd 的 system_server 本进程（Os.pread 不动共享偏移，
+ * 天然线程安全），mediaserver / media.extractor 从不直接触碰 fd——绕开
+ * 跨域 memfd 读取的 SELinux 限制（创建域标签的文件不容 mediaserver
+ * pread，fd 直传形式 setDataSource 通过但 prepare 秒败 0x80000000 且
+ * 无 AVC 痕迹）。close 关闭自有 dup（player 释放数据源时回调；
+ * setDataSource 失败路径由调用方关闭），幂等
+ */
+internal class MemfdDataSource(
+    private val fd: FileDescriptor,
+    private val length: Long
+) : MediaDataSource() {
+    @Volatile
+    private var closed = false
 
-        override fun write(b: Int) {
-            out.write(b)
-            count++
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        if (size == 0) return 0
+        if (closed || position >= length) return -1
+        val want = minOf(size.toLong(), length - position).toInt()
+        return try {
+            when (val n = Os.pread(fd, buffer, offset, want, position)) {
+                0 -> -1
+                else -> n
+            }
+        } catch (e: ErrnoException) {
+            throw IOException(e.message ?: "pread errno ${e.errno}")
         }
+    }
 
-        override fun write(b: ByteArray, off: Int, len: Int) {
-            out.write(b, off, len)
-            count += len
+    override fun getSize(): Long = length
+
+    override fun close() {
+        if (!closed) {
+            closed = true
+            runCatching { Os.close(fd) }
         }
-
-        // 不实现 close：FileOutputStream.close 会关底层 memfd fd——fd 归
-        // 缓存生命周期管理（Android FileDescriptor 无 finalizer 自动回收，
-        // 丢弃包装对象不泄漏）
     }
 }

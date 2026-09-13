@@ -149,22 +149,25 @@ fun TemplateCompose(navController: NavController) {
     ) { uri ->
         if (uri != null) persistScope.launch {
             videoImporting = true
-            when (ReplaceVideoManager.save(context, ReplaceVideoManager.GLOBAL_ID, uri)) {
-                ReplaceVideoManager.ImportResult.Ok -> {
-                    TemplateManager.saveConfig(
-                        context,
-                        config.copy(globalRecordVideoId = ReplaceVideoManager.GLOBAL_ID)
-                    )
-                    videoRev++
+            try {
+                when (ReplaceVideoManager.save(context, ReplaceVideoManager.GLOBAL_ID, uri)) {
+                    ReplaceVideoManager.ImportResult.Ok -> {
+                        TemplateManager.saveConfig(
+                            context,
+                            config.copy(globalRecordVideoId = ReplaceVideoManager.GLOBAL_ID)
+                        )
+                        videoRev++
+                    }
+                    ReplaceVideoManager.ImportResult.TooLarge ->
+                        Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
+                    ReplaceVideoManager.ImportResult.Invalid ->
+                        Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
+                    ReplaceVideoManager.ImportResult.ReadFailed ->
+                        Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
                 }
-                ReplaceVideoManager.ImportResult.TooLarge ->
-                    Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
-                ReplaceVideoManager.ImportResult.Invalid ->
-                    Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
-                ReplaceVideoManager.ImportResult.ReadFailed ->
-                    Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
+            } finally {
+                videoImporting = false
             }
-            videoImporting = false
         }
     }
 
@@ -468,27 +471,35 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
         }
 
         // 视频导入消费（key 块内：可写 recordVideoId）：videoId = 模板 id，
-        // 落暂存（保存才转正）
+        // 落暂存（保存才转正）。置空 pendingVideoUri 必须在消费完成后的
+        // finally（且条件置空）——effect 开头先置空会改变本 LaunchedEffect
+        // 的 key 而取消自身，save 结果被 CancellationException 丢弃
+        // （guonsv 实测：日志全 done 但 UI 回退未配置；更早的"永久卡
+        // 导入中"是同一 bug——无 finally 时 videoImporting 无法复位）
         LaunchedEffect(pendingVideoUri) {
             val uri = pendingVideoUri ?: return@LaunchedEffect
-            pendingVideoUri = null
             val tplId = templateId.takeIf { it.isNotEmpty() } ?: return@LaunchedEffect
             videoImporting = true
-            when (ReplaceVideoManager.save(context, tplId, uri, staging = true)) {
-                ReplaceVideoManager.ImportResult.Ok -> {
-                    recordVideoId = tplId
-                    videoCleared = false
-                    videoStaged = true
-                    videoRev++
+            try {
+                when (ReplaceVideoManager.save(context, tplId, uri, staging = true)) {
+                    ReplaceVideoManager.ImportResult.Ok -> {
+                        recordVideoId = tplId
+                        videoCleared = false
+                        videoStaged = true
+                        videoRev++
+                    }
+                    ReplaceVideoManager.ImportResult.TooLarge ->
+                        Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
+                    ReplaceVideoManager.ImportResult.Invalid ->
+                        Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
+                    ReplaceVideoManager.ImportResult.ReadFailed ->
+                        Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
                 }
-                ReplaceVideoManager.ImportResult.TooLarge ->
-                    Toast.makeText(context, R.string.replace_video_too_large, Toast.LENGTH_SHORT).show()
-                ReplaceVideoManager.ImportResult.Invalid ->
-                    Toast.makeText(context, R.string.replace_video_invalid, Toast.LENGTH_SHORT).show()
-                ReplaceVideoManager.ImportResult.ReadFailed ->
-                    Toast.makeText(context, R.string.replace_video_read_failed, Toast.LENGTH_SHORT).show()
+            } finally {
+                videoImporting = false
+                // 条件置空：导入中途又选了新视频（key 已变新 uri）时不误抹
+                if (pendingVideoUri == uri) pendingVideoUri = null
             }
-            videoImporting = false
         }
 
         Column(modifier = Modifier.fillMaxSize()) {
