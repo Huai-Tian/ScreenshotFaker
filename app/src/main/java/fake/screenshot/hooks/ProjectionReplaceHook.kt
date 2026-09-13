@@ -46,11 +46,11 @@ import java.lang.reflect.Modifier
  *   前台命中替换策略时创建 buffer layer，reparent 到 mirror 子树并
  *   置顶——SF 合成 VD 输出时假图层盖住 mirror 的真实内容。
  *   内容源按配置两级：仅图（历史行为）→ 静态假图；命中录屏视频 →
- *   同步先 post 替换图或黑屏首帧（图加载失败兜底），后台线程流式
- *   解密视频信封到 memfd（[ReplaceVideoStore]）后 MediaPlayer 接管
- *   同一 layer（looping / 静音 / CROPPING 缩放铺满）——视频 prepare
- *   期间录屏开头即假内容，零真实内容窗口。视频任一环节失败 → 停留
- *   首帧（fail-open 到图/黑屏）
+ *   同步先 post 视频 0 帧（warm 首帧命中）或黑屏（不画替换图——残影
+ *   根除），后台线程流式解密视频信封到 memfd（[ReplaceVideoStore]）
+ *   后 MediaPlayer 接管同一 layer（looping / 静音 / CROPPING 缩放铺满
+ *   ）——视频 prepare 期间录屏开头即假内容，零真实内容窗口。视频任
+ *   一环节失败 → 回落替换图（无图停留黑屏占位）
  * - hook DMS#releaseVirtualDisplay*（录屏停止）：全量清会话——视频
  *   会话持有 MediaPlayer 解码线程与 memfd 不可泄漏（静态图时代文档化
  *   接受的单 layer 泄漏面在视频语义下不可接受）
@@ -128,6 +128,10 @@ object ProjectionReplaceHook {
         @Volatile var relayThread: HandlerThread? = null
         @Volatile var relaySurface: Surface? = null
         @Volatile var relayDead = false
+        /** 图回落位图（视频会话 fail-open 到图，round 17）：overlayMirror
+         *  帧解析的最终替换图引用。初始占位不再画图（残影根除）后，图
+         *  仅在视频失败路径经 [postFallback] 出现 */
+        @Volatile var fallbackImage: Bitmap? = null
         /** 中继线程独占的工作集（bitmap/平面拷贝/像素输出）与统计 */
         var relayBitmap: Bitmap? = null
         var relayY: ByteArray? = null
@@ -308,7 +312,9 @@ object ProjectionReplaceHook {
      * 假图层装配（两级内容源）。同会话前台快照一次解析：图（E3a 同源
      * 策略）与视频（E3b 专属）分属两级配置，仅视频命中 → 黑屏首帧 +
      * 视频接管；仅图命中 → 历史行为（图必须就位才挂，加载失败 = 原生
-     * 内容——不引入新行为）；两者命中 → 图为首帧、视频接管
+     * 内容——不引入新行为）；两者命中 → 视频 0 帧（warm 首帧命中）或
+     * 黑屏占位 + 视频接管，图降级为视频失败的回落（round 17 残影根除：
+     * 此前双命中画替换图，视频接管前可见数十至数百 ms 即录屏开头残影）
      */
     private fun overlayMirror(mirrorSc: Any, w: Int, h: Int) {
         if (!HookContext.hasReplacePolicy()) return
@@ -351,17 +357,36 @@ object ProjectionReplaceHook {
                 .build()
         )
         // 同步首帧（buffer 先 post——layer 从 show 起即有内容，录屏开头
-        // 零真实内容窗口）：图命中 → 替换图拉伸铺满（无缺角）；未命中
-        // （仅视频配置）→ 黑屏。视频线程 prepared 后首帧到达，同一
-        // layer 的 buffer 自然被接管。
+        // 零真实内容窗口）：
+        // - 无视频会话：图命中 → 替换图拉伸铺满（无缺角，历史行为）
+        // - 视频会话：不画替换图（残影根除）——warm 首帧 peek 命中 →
+        //   视频 0 帧中心裁剪（与中继帧同几何，帧 0 无缝）；未命中 →
+        //   黑屏。图记入 session 作失败回落（[postFallback]）
         // Surface 非 Closeable（无 use 扩展），手动 release——已 post 的
         // buffer 仍挂在 layer 上，Surface 释放不影响显示
+        session.fallbackImage = fake
         val surface = Surface(session.layer)
         try {
             val canvas = surface.lockHardwareCanvas()
-            if (fake != null) canvas.drawBitmap(fake, null, Rect(0, 0, bw, bh), null)
-            else canvas.drawColor(Color.BLACK)
-            surface.unlockCanvasAndPost(canvas)
+            try {
+                if (videoId != null) {
+                    val lead = ReplaceVideoStore.peekFirstFrame(videoId)
+                    if (lead != null) {
+                        canvas.drawBitmap(
+                            lead, cropStrip(lead.width, lead.height, bw, bh),
+                            Rect(0, 0, bw, bh), relayPaint
+                        )
+                    } else {
+                        canvas.drawColor(Color.BLACK)
+                    }
+                } else if (fake != null) {
+                    canvas.drawBitmap(fake, null, Rect(0, 0, bw, bh), null)
+                } else {
+                    canvas.drawColor(Color.BLACK)
+                }
+            } finally {
+                surface.unlockCanvasAndPost(canvas)
+            }
         } finally {
             surface.release()
         }
@@ -396,7 +421,8 @@ object ProjectionReplaceHook {
      * 视频接管（后台线程）：memfd 数据源 → MediaPlayer 挂会话 layer。
      * 全程 runCatching（system_server 铁律：任何异常不可上抛）；removed
      * 多查（解密前 / prepare 后）——中途会话被清（reload / VD release
-     * 并发）就就地释放；失败停留首帧（图/黑屏），fail-open。
+     * 并发）就就地释放；失败回落替换图（[postFallback]——无图停留黑屏
+     * 占位），fail-open。
      * player 登记与 removed 判定经 [Session.lock] 互斥：登记成功后
      * start 途中被清理，释放责任归 [removeLayer]；登记前被清理则就地
      * 释放（removeLayer 侧当时读到 null player 未动作，无双释放）
@@ -414,8 +440,9 @@ object ProjectionReplaceHook {
             }
             val taken = ReplaceVideoStore.takePlayable(videoId) ?: run {
                 // 失败细节（远程缺失/解密失败/memfd 不可用）已在
-                // ReplaceVideoStore.load 内分级 WARN，此处只标记接管中止
-                HookContext.log(Log.WARN, "E3b video source unavailable, stay on first frame for $videoId")
+                // ReplaceVideoStore.load 内分级 WARN，此处回落替换图
+                HookContext.log(Log.WARN, "E3b video source unavailable, fallback image for $videoId")
+                postFallback(session, w, h)
                 return@runCatching
             }
             if (session.removed) {
@@ -521,8 +548,8 @@ object ProjectionReplaceHook {
                 p.setSurface(rd.surface)
                 HookContext.log(Log.INFO, "E3b relay reader ${dbw}x${dbh} rot=$rot for $videoId")
                 // 接管前导帧：firstFrame（快路径）→ 与视频首帧内容几何
-                // 一致，无缝；无则纯黑（慢路径）——屏幕不残留替换图（残
-                // 影语义）
+                // 一致，无缝；null（慢路径）不绘制，占位保持黑屏或
+                // peek 0 帧（残影语义由 overlayMirror 初始占位承担）
                 postLead(session, taken.firstFrame, w, h)
             }.onFailure {
                 HookContext.log(
@@ -577,6 +604,8 @@ object ProjectionReplaceHook {
             relayReader?.let { r -> runCatching { r.close() } }
             relayThread?.let { t -> runCatching { t.quitSafely() } }
             started = false
+            // 回落替换图（fail-open 到图；无图保持黑屏占位）
+            postFallback(session, w, h)
         }
         // 早退路径（removed 中断/数据源失败）：player 未登记，就地释放
         if (!started) {
@@ -776,24 +805,47 @@ object ProjectionReplaceHook {
         }
     }
 
-    /** 接管前导帧：firstFrame 中心裁剪铺满（快路径无缝）；null 纯黑。
-     *  与中继共用 relaySurface（同一 BufferQueue 生产者，避免多实例） */
+    /** 接管前导帧：firstFrame 中心裁剪铺满（快路径无缝）；null 不绘制
+     *  ——慢路径占位已是黑屏或 peek 命中的视频 0 帧（round 17 初始占位
+     *  不画图后，此处重画黑屏反而会把 0 帧盖回黑屏，如 rewarm 未完成
+     *  的下一会话）。与中继共用 relaySurface（同一 BufferQueue 生产者，
+     *  避免多实例） */
     private fun postLead(session: Session, lead: Bitmap?, w: Int, h: Int) {
+        val bmp = lead ?: return
         runCatching {
             val sf = session.relaySurface
                 ?: Surface(session.layer).also { session.relaySurface = it }
             val c = sf.lockHardwareCanvas()
             try {
-                if (lead != null) {
-                    c.drawBitmap(lead, cropStrip(lead.width, lead.height, w, h), Rect(0, 0, w, h), relayPaint)
-                } else {
-                    c.drawColor(Color.BLACK)
-                }
+                c.drawBitmap(bmp, cropStrip(bmp.width, bmp.height, w, h), Rect(0, 0, w, h), relayPaint)
             } finally {
                 sf.unlockCanvasAndPost(c)
             }
         }.onFailure {
             HookContext.log(Log.WARN, "E3b lead post failed: ${it.message}")
+        }
+    }
+
+    /**
+     * 视频失败回落替换图（fail-open 到图，round 17 残影根除的语义补全：
+     * 初始占位不再画图后，图只在视频失败时出现）。拉伸铺满（E3a 图语
+     * 义，无缺角）；无图（仅视频配置）不绘制——保持黑屏占位。统一走
+     * relaySurface（单生产者实例，postLead 前调用时按需创建）
+     */
+    private fun postFallback(session: Session, w: Int, h: Int) {
+        val img = session.fallbackImage ?: return
+        if (session.removed) return
+        runCatching {
+            val sf = session.relaySurface
+                ?: Surface(session.layer).also { session.relaySurface = it }
+            val c = sf.lockHardwareCanvas()
+            try {
+                c.drawBitmap(img, null, Rect(0, 0, w, h), relayPaint)
+            } finally {
+                sf.unlockCanvasAndPost(c)
+            }
+        }.onFailure {
+            HookContext.log(Log.WARN, "E3b fallback post failed: ${it.message}")
         }
     }
 

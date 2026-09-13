@@ -188,6 +188,20 @@ object ReplaceVideoStore {
     @Volatile
     private var installed = false
 
+    /** 首帧只读镜像（binder 线程零阻塞 peek 专用，round 17）：warm 成功
+     *  写入（id → 视频 0 帧），reload 全清。与 [cached] 弱一致——不追踪
+     *  消费（消费后同 id peek 显示的仍是该视频 0 帧，内容正确仅多持一
+     *  张位图；换视频必经配置变更 → reload 清空，新 warm 完成前 peek
+     *  落空 → 调用方画黑屏，无错内容风险）。读侧无锁——mirror 创建帧
+     *  在 binder 线程（可能持 DMS 锁），不可阻塞等 warm 解密 */
+    @Volatile
+    private var peekFrame: Pair<String, Bitmap>? = null
+
+    /** 非消费式首帧 peek：warm 命中同 id → 视频 0 帧（mirror 创建帧同步
+     *  占位用，与中继帧 0 同内容无缝）；未命中 → null（调用方画黑屏） */
+    fun peekFirstFrame(videoId: String): Bitmap? =
+        peekFrame?.takeIf { it.first == videoId }?.second
+
     /** 引擎装配入口（幂等）：订阅配置 reload（失效清理 + 预热） */
     fun ensureInstalled() {
         if (installed) return
@@ -274,6 +288,7 @@ object ReplaceVideoStore {
      */
     private fun reload() {
         failed.clear()
+        peekFrame = null
         val ids = HookContext.activeVideoIds()
         synchronized(lock) {
             if (cachedId != null && ids.isNotEmpty() && cachedId !in ids) {
@@ -305,6 +320,7 @@ object ReplaceVideoStore {
                 runCatching { cached?.let { it.dispose() } }
                 cached = entry
                 cachedId = gid
+                entry.firstFrame?.let { peekFrame = gid to it }
                 HookContext.log(Log.INFO, "E3b video warmed (prepared=${entry.player != null}) for $gid")
             }
         }, "sf-vid-warm").apply { isDaemon = true }.start()
