@@ -67,7 +67,7 @@ fun SettingsCompose(navController: NavController) {
     // 状态管理
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val checkUpdate by ConfigManager.rememberValue(context, "check_update", true)
+    val checkUpdate by ConfigManager.rememberValue(context, "check_update", false)
     val enableFlagSecure by ConfigManager.rememberValue(context, "enable_flag_secure", true)
     val encryptOutputs by ConfigManager.rememberValue(context, "encrypt_outputs", false)
     val hideIcon by ConfigManager.rememberValue(context, "hide_icon", false)
