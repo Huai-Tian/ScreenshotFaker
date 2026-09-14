@@ -57,6 +57,12 @@ import java.lang.reflect.Modifier
  * - 录屏会话锁定：内容源在 mirror 创建帧按当时前台解析（换图/换策略
  *   由配置 reload 重挂当前 mirror 生效；会话内前台切换不追踪——
  *   录屏是持续行为，逐帧切换语义反而暴露替换特征）
+ * - 方向自适应（2026-09-14 二轮定稿：替换不跟随系统旋转）：假图层
+ *   buffer 恒为方形（显示空间长边）——旋转后 mirror 坐标系宽高互换，
+ *   方形恒覆盖全部可见区域（旧定向 buffer 旋转后只盖左半 = 真实内容
+ *   暴露的根因）；内容统一中心裁剪铺满当前方向可见条（[cropStrip]，
+ *   不旋转不变形），方向看护线程 50ms 轮询尺寸变化刷新条带几何（视频
+ *   中继帧自动跟随）——全程零真实内容窗口
  *
  * 前台解析：system_server 内 LocalServices → ActivityTaskManagerInternal
  * #getTopApp → WindowProcessController.mName（processName，普通应用
@@ -83,6 +89,10 @@ object ProjectionReplaceHook {
 
     /** 活跃假图层登记上限（防多 VD 并发会话的 map 无界增长） */
     private const val LAYERS_CAP = 8
+
+    /** 方向看护轮询间隔（旋转后条带几何刷新延迟上界；反射读两字段，
+     *  20Hz 在 system_server 开销可忽略） */
+    private const val ORIENT_POLL_MS = 50L
 
     // ---- 反射单点缓存（install 解析一次，services.jar 类须经 system_server CL）----
 
@@ -111,6 +121,11 @@ object ProjectionReplaceHook {
     @Volatile
     private var lastMirror: Any? = null
 
+    /** 方向看护线程（活跃会话存在期间运行；见 [ensureOrientationWatch]） */
+    @Volatile
+    private var orientWatch: Thread? = null
+    private val orientLock = Any()
+
     /**
      * 录屏会话资源：假图层（常驻）+ 视频播放器与 memfd（视频会话）。
      * [lock] 序化 player 登记与 removed 判定（[removeLayer] 同锁）——
@@ -118,6 +133,12 @@ object ProjectionReplaceHook {
      * + memfd 泄漏）
      */
     private class Session(val layer: SurfaceControl) {
+        /** 图层 buffer = 方形边长（显示空间长边；旋转不重建——全覆盖关键） */
+        @Volatile var bufS = 0
+        /** 可见条带尺寸 = 当前方向显示逻辑尺寸（方向看护刷新；中继/
+         *  占位/回落绘制实时跟随——横竖屏自适应核心） */
+        @Volatile var dstW = 0
+        @Volatile var dstH = 0
         @Volatile var player: MediaPlayer? = null
         @Volatile var videoFd: FileDescriptor? = null
         @Volatile var removed = false
@@ -132,8 +153,9 @@ object ProjectionReplaceHook {
          *  帧解析的最终替换图引用。初始占位不再画图（残影根除）后，图
          *  仅在视频失败路径经 [postFallback] 出现 */
         @Volatile var fallbackImage: Bitmap? = null
-        /** 中继线程独占的工作集（bitmap/平面拷贝/像素输出）与统计 */
-        var relayBitmap: Bitmap? = null
+        /** 中继工作集（bitmap 供看护线程方向重画共享读，[Session.lock]
+         *  外仅读引用；平面拷贝/像素输出中继线程独占）与统计 */
+        @Volatile var relayBitmap: Bitmap? = null
         var relayY: ByteArray? = null
         var relayU: ByteArray? = null
         var relayV: ByteArray? = null
@@ -350,26 +372,35 @@ object ProjectionReplaceHook {
         // 已有登记（reload 重挂路径）：先摘旧会话
         removeLayer(mirrorSc)
 
-        // 假图层 buffer 尺寸 = mirror 树的显示空间（物理 logical，含旋转），
-        // VD 请求分辨率仅作解析失败时的兜底（等比缩放的录屏降分辨率场景
-        // 退化为左上角覆盖，好于无图——hook 侧日志可见以便定位）
+        // 可见条带尺寸 = mirror 树的显示空间（物理 logical，含旋转），VD
+        // 请求分辨率仅作解析失败时的兜底（logical 链解析失败时兜底尺寸
+        // 偏小 → blanket 外暴露，与历史一致——hook 侧日志可见以便定位）
         val (bw, bh) = displayLogicalSize() ?: run {
             HookContext.log(Log.WARN, "E3b display logical size unresolved, fallback to VD ${w}x$h")
             w to h
         }
+        // 方形 blanket（2026-09-14 二轮）：buffer 取显示空间长边为方形——
+        // 旋转时 mirror 坐标系宽高互换，定向 buffer 只盖左半（实测暴露
+        // 根因）；方形恒覆盖两个方向的可见区域（条带外区域被 mirror 裁剪
+        // 不可见），旋转零重建零空窗
+        val bs = maxOf(bw, bh)
         val session = Session(
             SurfaceControl.Builder()
                 .setName("sf-e3b")
-                .setBufferSize(bw, bh)
+                .setBufferSize(bs, bs)
                 .setFormat(PixelFormat.RGBA_8888)
                 .build()
         )
+        // 会话几何登记（bufS 供看护线程判定显示尺寸是否超出 blanket；
+        // dst 供中继/占位/回落帧实时读取——看护刷新后所有绘制自动跟随）
+        session.bufS = bs
+        session.dstW = bw
+        session.dstH = bh
         // 同步首帧（buffer 先 post——layer 从 show 起即有内容，录屏开头
-        // 零真实内容窗口）：
-        // - 无视频会话：图命中 → 替换图拉伸铺满（无缺角，历史行为）
-        // - 视频会话：不画替换图（残影根除）——warm 首帧 peek 命中 →
-        //   视频 0 帧中心裁剪（与中继帧同几何，帧 0 无缝）；未命中 →
-        //   黑屏。图记入 session 作失败回落（[postFallback]）
+        // 零真实内容窗口）：全方形黑底 + 当前方向条带内容（中心裁剪铺
+        // 满，与中继帧/回落图同几何）。无视频会话：图命中 → 替换图条带；
+        // 视频会话：peek 命中 → 视频 0 帧条带（与中继帧无缝），未命中 →
+        // 纯黑底；图记入 session 作失败回落（[postFallback]）
         // Surface 非 Closeable（无 use 扩展），手动 release——已 post 的
         // buffer 仍挂在 layer 上，Surface 释放不影响显示
         session.fallbackImage = fake
@@ -377,20 +408,14 @@ object ProjectionReplaceHook {
         try {
             val canvas = surface.lockHardwareCanvas()
             try {
-                if (videoId != null) {
-                    val lead = ReplaceVideoStore.peekFirstFrame(videoId)
-                    if (lead != null) {
-                        canvas.drawBitmap(
-                            lead, cropStrip(lead.width, lead.height, bw, bh),
-                            Rect(0, 0, bw, bh), relayPaint
-                        )
-                    } else {
-                        canvas.drawColor(Color.BLACK)
-                    }
-                } else if (fake != null) {
-                    canvas.drawBitmap(fake, null, Rect(0, 0, bw, bh), null)
-                } else {
-                    canvas.drawColor(Color.BLACK)
+                canvas.drawColor(Color.BLACK)
+                val lead: Bitmap? =
+                    if (videoId != null) ReplaceVideoStore.peekFirstFrame(videoId) else fake
+                if (lead != null) {
+                    canvas.drawBitmap(
+                        lead, cropStrip(lead.width, lead.height, bw, bh),
+                        Rect(0, 0, bw, bh), relayPaint
+                    )
                 }
             } finally {
                 surface.unlockCanvasAndPost(canvas)
@@ -412,16 +437,18 @@ object ProjectionReplaceHook {
             }
         }
         layers[mirrorSc] = session
+        // 方向看护（横竖屏切换的条带几何刷新，见 [redrawStrip]）
+        ensureOrientationWatch()
         if (videoId != null) {
             // 视频接管走后台线程：缓存命中（配置同步预热）零解密等待，
             // 未命中才流式解密（打点 MB/s 供回归观测）；不占 binder 调用
             // 线程（mirror 创建路径可能持 DMS 锁）
-            Thread({ startVideo(session, videoId, bw, bh) }, "sf-e3b-video")
+            Thread({ startVideo(session, videoId) }, "sf-e3b-video")
                 .apply { isDaemon = true }.start()
         }
         HookContext.log(
             Log.INFO,
-            "E3b session overlaid on mirror buffer ${bw}x$bh (vd=${w}x$h, image=${imageId ?: "none"}, video=${videoId ?: "none"})"
+            "E3b session overlaid on mirror buffer ${bs}x${bs} (view ${bw}x${bh}, vd=${w}x$h, image=${imageId ?: "none"}, video=${videoId ?: "none"})"
         )
     }
 
@@ -435,7 +462,7 @@ object ProjectionReplaceHook {
      * start 途中被清理，释放责任归 [removeLayer]；登记前被清理则就地
      * 释放（removeLayer 侧当时读到 null player 未动作，无双释放）
      */
-    private fun startVideo(session: Session, videoId: String, w: Int, h: Int) {
+    private fun startVideo(session: Session, videoId: String) {
         var player: MediaPlayer? = null
         var fd: FileDescriptor? = null
         var relayThread: HandlerThread? = null
@@ -450,7 +477,7 @@ object ProjectionReplaceHook {
                 // 失败细节（远程缺失/解密失败/memfd 不可用）已在
                 // ReplaceVideoStore.load 内分级 WARN，此处回落替换图
                 HookContext.log(Log.WARN, "E3b video source unavailable, fallback image for $videoId")
-                postFallback(session, w, h)
+                postFallback(session)
                 return@runCatching
             }
             if (session.removed) {
@@ -549,7 +576,7 @@ object ProjectionReplaceHook {
                 relayThread = th
                 val rd = ImageReader.newInstance(dbw, dbh, ImageFormat.YUV_420_888, 4)
                 rd.setOnImageAvailableListener(
-                    { r -> onRelayFrame(session, r, vw, vh, rot, w, h) },
+                    { r -> onRelayFrame(session, r, vw, vh, rot) },
                     Handler(th.looper)
                 )
                 relayReader = rd
@@ -558,7 +585,7 @@ object ProjectionReplaceHook {
                 // 接管前导帧：firstFrame（快路径）→ 与视频首帧内容几何
                 // 一致，无缝；null（慢路径）不绘制，占位保持黑屏或
                 // peek 0 帧（残影语义由 overlayMirror 初始占位承担）
-                postLead(session, taken.firstFrame, w, h)
+                postLead(session, taken.firstFrame)
             }.onFailure {
                 HookContext.log(
                     Log.WARN,
@@ -594,7 +621,7 @@ object ProjectionReplaceHook {
             started = true
             HookContext.log(
                 Log.INFO,
-                "E3b video started on mirror buffer ${w}x$h (video=$videoId, stream=${p.videoWidth}x${p.videoHeight})"
+                "E3b video started on mirror buffer ${session.dstW}x${session.dstH} (video=$videoId, stream=${p.videoWidth}x${p.videoHeight})"
             )
         }.onFailure {
             HookContext.log(Log.WARN, "E3b video start failed for $videoId: ${it.message}")
@@ -613,7 +640,7 @@ object ProjectionReplaceHook {
             relayThread?.let { t -> runCatching { t.quitSafely() } }
             started = false
             // 回落替换图（fail-open 到图；无图保持黑屏占位）
-            postFallback(session, w, h)
+            postFallback(session)
         }
         // 早退路径（removed 中断/数据源失败）：player 未登记，就地释放
         if (!started) {
@@ -644,11 +671,13 @@ object ProjectionReplaceHook {
         reader: ImageReader,
         vw: Int,
         vh: Int,
-        rot: Int,
-        w: Int,
-        h: Int
+        rot: Int
     ) {
         if (session.removed || session.relayDead) return
+        // 目标尺寸实时读会话（方向看护刷新后随之翻转——横竖屏自适应核心）
+        val w = session.dstW
+        val h = session.dstH
+        if (w <= 0 || h <= 0) return
         val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return
         try {
             session.relayFrames++
@@ -772,7 +801,9 @@ object ProjectionReplaceHook {
                 session.relayBitmap = bmp
             }
             bmp.setPixels(out, 0, hw, 0, 0, hw, hh)
-            // 中心裁剪（后置方向坐标）→ 半分辨率位图坐标 → 铺满全屏
+            // 中心裁剪铺满当前方向可见条（方形 blanket 左上 [0,w]×[0,h]；
+            // 条带外区域本方向不可见，旋转由看护线程刷新条带几何）→
+            // 半分辨率位图坐标
             val strip = cropStrip(evw, evh, w, h)
             val src = Rect(
                 (strip.left + 1) / 2, (strip.top + 1) / 2,
@@ -780,12 +811,16 @@ object ProjectionReplaceHook {
             )
             val surface = session.relaySurface
                 ?: Surface(session.layer).also { session.relaySurface = it }
-            val canvas = surface.lockHardwareCanvas()
-            try {
-                canvas.drawBitmap(bmp, src, Rect(0, 0, w, h), relayPaint)
-            } finally {
-                surface.unlockCanvasAndPost(canvas)
+            synchronized(session.lock) {
+                val canvas = surface.lockHardwareCanvas()
+                try {
+                    canvas.drawBitmap(bmp, src, Rect(0, 0, w, h), relayPaint)
+                } finally {
+                    surface.unlockCanvasAndPost(canvas)
+                }
             }
+            // 成功帧归零连败计数（真实"连续 3 次"语义）
+            session.relayFails = 0
             if (!session.relayLogged) {
                 session.relayLogged = true
                 HookContext.log(Log.INFO, "E3b relay frame #${session.relayFrames} ok (${gw}x$gh rotEff=$rotEff)")
@@ -813,21 +848,26 @@ object ProjectionReplaceHook {
         }
     }
 
-    /** 接管前导帧：firstFrame 中心裁剪铺满（快路径无缝）；null 不绘制
-     *  ——慢路径占位已是黑屏或 peek 命中的视频 0 帧（round 17 初始占位
-     *  不画图后，此处重画黑屏反而会把 0 帧盖回黑屏，如 rewarm 未完成
-     *  的下一会话）。与中继共用 relaySurface（同一 BufferQueue 生产者，
-     *  避免多实例） */
-    private fun postLead(session: Session, lead: Bitmap?, w: Int, h: Int) {
+    /** 接管前导帧：firstFrame 与中继帧同几何（中心裁剪铺满，快路径
+     *  无缝）；null 不绘制——慢路径占位已是黑屏或 peek 命中的视频 0 帧
+     *  （round 17 初始占位不画图后，此处重画黑屏反而会把 0 帧盖回黑屏，
+     *  如 rewarm 未完成的下一会话）。与中继共用 relaySurface（同一
+     *  BufferQueue 生产者，避免多实例） */
+    private fun postLead(session: Session, lead: Bitmap?) {
         val bmp = lead ?: return
+        val w = session.dstW
+        val h = session.dstH
+        if (w <= 0 || h <= 0) return
         runCatching {
             val sf = session.relaySurface
                 ?: Surface(session.layer).also { session.relaySurface = it }
-            val c = sf.lockHardwareCanvas()
-            try {
-                c.drawBitmap(bmp, cropStrip(bmp.width, bmp.height, w, h), Rect(0, 0, w, h), relayPaint)
-            } finally {
-                sf.unlockCanvasAndPost(c)
+            synchronized(session.lock) {
+                val c = sf.lockHardwareCanvas()
+                try {
+                    c.drawBitmap(bmp, cropStrip(bmp.width, bmp.height, w, h), Rect(0, 0, w, h), relayPaint)
+                } finally {
+                    sf.unlockCanvasAndPost(c)
+                }
             }
         }.onFailure {
             HookContext.log(Log.WARN, "E3b lead post failed: ${it.message}")
@@ -836,21 +876,26 @@ object ProjectionReplaceHook {
 
     /**
      * 视频失败回落替换图（fail-open 到图，round 17 残影根除的语义补全：
-     * 初始占位不再画图后，图只在视频失败时出现）。拉伸铺满（E3a 图语
-     * 义，无缺角）；无图（仅视频配置）不绘制——保持黑屏占位。统一走
+     * 初始占位不再画图后，图只在视频失败时出现）。中心裁剪铺满（不旋转
+     * 不变形）；无图（仅视频配置）不绘制——保持黑屏占位。统一走
      * relaySurface（单生产者实例，postLead 前调用时按需创建）
      */
-    private fun postFallback(session: Session, w: Int, h: Int) {
+    private fun postFallback(session: Session) {
         val img = session.fallbackImage ?: return
         if (session.removed) return
+        val w = session.dstW
+        val h = session.dstH
+        if (w <= 0 || h <= 0) return
         runCatching {
             val sf = session.relaySurface
                 ?: Surface(session.layer).also { session.relaySurface = it }
-            val c = sf.lockHardwareCanvas()
-            try {
-                c.drawBitmap(img, null, Rect(0, 0, w, h), relayPaint)
-            } finally {
-                sf.unlockCanvasAndPost(c)
+            synchronized(session.lock) {
+                val c = sf.lockHardwareCanvas()
+                try {
+                    c.drawBitmap(img, cropStrip(img.width, img.height, w, h), Rect(0, 0, w, h), relayPaint)
+                } finally {
+                    sf.unlockCanvasAndPost(c)
+                }
             }
         }.onFailure {
             HookContext.log(Log.WARN, "E3b fallback post failed: ${it.message}")
@@ -947,6 +992,98 @@ object ProjectionReplaceHook {
         // re-warm：快路径取走的 prepared player 已随会话销毁，后台重建
         // 供下次录屏（连续录屏间零装配等待）
         ReplaceVideoStore.rewarm()
+    }
+
+    // ==================== 方向自适应（横竖屏切换） ====================
+
+    /**
+     * 方向看护（旋转事件源，2026-09-14 二轮定稿：替换不跟随系统旋转）：
+     * 会话存在期间 50ms 轮询显示逻辑尺寸，变化即刷新会话条带几何并重画
+     * （[redrawStrip]）——方形 blanket 保证覆盖零空窗，此处只负责内容
+     * 几何跟上。轮询而非 hook 显示遍历：事件驱动路径在 DMS 持锁遍历内
+     * 触发回调，锁序风险高于 50ms 检测延迟。无会话时线程自灭
+     * （system_server 不养常驻轮询），下次会话重建——经 [orientLock]
+     * 双检无丢会话窗口
+     */
+    private fun ensureOrientationWatch() {
+        synchronized(orientLock) {
+            if (orientWatch?.isAlive == true) return
+            orientWatch = Thread({ watchOrientation() }, "sf-e3b-orient")
+                .apply { isDaemon = true }
+                .also { it.start() }
+        }
+    }
+
+    private fun watchOrientation() {
+        while (true) {
+            if (runCatching { Thread.sleep(ORIENT_POLL_MS) }.isFailure) return
+            if (layers.isEmpty()) {
+                synchronized(orientLock) {
+                    if (layers.isEmpty()) {
+                        orientWatch = null
+                        return
+                    }
+                }
+            }
+            val dm = displayLogicalSize() ?: continue
+            val snapshot = synchronized(layers) { layers.entries.map { it.key to it.value } }
+            for ((mirrorSc, s) in snapshot) {
+                if (s.removed || s.dstW <= 0 || s.dstH <= 0) continue
+                if (dm.first == s.dstW && dm.second == s.dstH) continue
+                if (maxOf(dm.first, dm.second) > s.bufS) {
+                    // 显示尺寸超出方形 blanket（折叠展开/外接屏等旋转之外
+                    // 的显示变化）：条带盖不住，整会话重挂（策略与内容源
+                    // 按当前前台重解析）
+                    runCatching {
+                        removeLayer(mirrorSc)
+                        overlayMirror(mirrorSc, dm.first, dm.second)
+                    }.onFailure {
+                        HookContext.log(Log.WARN, "E3b remount on display change failed: ${it.message}")
+                    }
+                } else {
+                    // 旋转（长边不变）：方形 blanket 仍全覆盖零空窗——刷新
+                    // 条带尺寸并同步重画；视频会话随后的中继帧自动接续
+                    s.dstW = dm.first
+                    s.dstH = dm.second
+                    runCatching { redrawStrip(s) }
+                }
+            }
+        }
+    }
+
+    /**
+     * 方向变化条带重画（看护线程）：relayBitmap（中继末帧，半分辨率）/
+     * 回落图，中心裁剪铺满新方向条带；两者皆无（prepare 中的视频会话）
+     * 画黑。与中继/视频线程的绘制经 [Session.lock] 互斥（同一
+     * relaySurface 的 canvas 非线程安全）；relayBitmap 与会话清理的
+     * recycle 竞态由 runCatching 兜底（失败仅丢一帧重画，图层保持
+     * 陈旧假内容——无暴露）
+     */
+    private fun redrawStrip(session: Session) {
+        if (session.removed) return
+        val w = session.dstW
+        val h = session.dstH
+        if (w <= 0 || h <= 0) return
+        runCatching {
+            val lead = session.relayBitmap ?: session.fallbackImage
+            val sf = session.relaySurface
+                ?: Surface(session.layer).also { session.relaySurface = it }
+            synchronized(session.lock) {
+                val c = sf.lockHardwareCanvas()
+                try {
+                    if (lead != null) {
+                        c.drawBitmap(lead, cropStrip(lead.width, lead.height, w, h), Rect(0, 0, w, h), relayPaint)
+                    } else {
+                        c.drawColor(Color.BLACK)
+                    }
+                } finally {
+                    sf.unlockCanvasAndPost(c)
+                }
+            }
+            HookContext.log(Log.INFO, "E3b session strip geometry rotated to ${w}x$h")
+        }.onFailure {
+            HookContext.log(Log.WARN, "E3b strip redraw failed: ${it.message}")
+        }
     }
 
     /**

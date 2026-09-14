@@ -151,10 +151,19 @@ object ScreenshotReplaceHook {
         val imageId = HookContext.replacementImageId(foregroundPackage()) ?: return null
         val fake = ReplaceImageStore.bitmapFor(imageId) ?: return null
         if (hitLogged.add(imageId)) {
-            HookContext.log(Log.INFO, "E3a replacing capture with image=$imageId (${targetW}x$targetH)")
+            HookContext.log(Log.INFO, "E3a replacing capture with image=$imageId (${targetW}x${targetH})")
         }
-        return if (fake.width == targetW && fake.height == targetH) fake
-        else Bitmap.createScaledBitmap(fake, targetW, targetH, true)
+        // 方向自适应（2026-09-14 用户定稿）：替换图不跟随系统旋转——
+        // 内容方向与截屏方向互异时输出尺寸对调（横屏 2412x1080 → 输出
+        // 1080x2412），同一张图的截屏产物与"内容同方向状态下的截屏"完全
+        // 一致，与手机当前方向无关。方形图（任一侧）视为方向匹配不交换。
+        // 三条 hook 腿均返回 Bitmap 对象，输出尺寸可自由改变
+        val swap = targetW != targetH && fake.width != fake.height &&
+                (fake.width > fake.height) != (targetW > targetH)
+        val outW = if (swap) targetH else targetW
+        val outH = if (swap) targetW else targetH
+        return if (fake.width == outW && fake.height == outH) fake
+        else Bitmap.createScaledBitmap(fake, outW, outH, true)
     }
 
     // ==================== 前台解析 ====================
