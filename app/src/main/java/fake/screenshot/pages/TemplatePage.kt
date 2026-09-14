@@ -10,6 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -47,7 +49,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -97,7 +98,7 @@ import kotlin.math.max
 
 /**
  * 模板页（HMA 三级结构第一级，布局仿 HMA TemplateManageFragment）：
- * 全局设置卡 + 新建入口行 + 模板列表（语义图标 + 配置摘要 + 已应用数，
+ * 默认设置卡 + 新建入口行 + 模板列表（语义图标 + 配置摘要 + 已应用数，
  * 删除入口在编辑页 Toolbar 菜单，HMA 式）。TopAppBar info 菜单弹使用
  * 说明。配置唯一权威源经 [TemplateManager] 读写（加密 DataStore → 自动
  * 导出 RemotePreferences），UI 无独立状态——列表渲染 config 流，编辑页
@@ -190,20 +191,29 @@ fun TemplateCompose(navController: NavController) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            stringResource(R.string.global_settings),
+                            stringResource(R.string.default_settings),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(Modifier.height(8.dp))
-                        Text(
-                            stringResource(R.string.global_secure_policy),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        SecurePolicySelector(config.globalSecurePolicy, { v ->
-                            scope.launch {
-                                TemplateManager.saveConfig(context, config.copy(globalSecurePolicy = v))
-                            }
-                        })
+                        // 截屏限制：标签占左余宽，紧凑三态 chips 靠右同一
+                        // 水平线（与模板编辑页同款设计）
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                stringResource(R.string.secure_policy),
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1f)
+                            )
+                            SecurePolicySelector(config.globalSecurePolicy, { v ->
+                                scope.launch {
+                                    TemplateManager.saveConfig(context, config.copy(globalSecurePolicy = v))
+                                }
+                            })
+                        }
                         Spacer(Modifier.height(12.dp))
                         HorizontalDivider()
                         Spacer(Modifier.height(12.dp))
@@ -242,24 +252,27 @@ fun TemplateCompose(navController: NavController) {
                         )
                         // E3c 录屏替换的声音三态（声音源 = 上面导入的替换
                         // 视频自带音轨，无独立音频入口）：录屏替换开启且
-                        // 已导入视频后才出现；显式模板策略覆盖全局（更具体者胜）
+                        // 已导入视频后才出现；标签左 + 紧凑 chips 右同一
+                        // 水平线（与截屏限制行同款）；显式模板策略覆盖
+                        // 全局（更具体者胜）
                         if (config.globalRecordVideoEnabled && config.globalRecordVideoId != null) {
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                stringResource(R.string.record_audio_policy),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            AudioPolicySelector(config.globalRecordAudioPolicy, { v ->
-                                scope.launch {
-                                    TemplateManager.saveConfig(context, config.copy(globalRecordAudioPolicy = v))
-                                }
-                            })
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                stringResource(R.string.audio_policy_hint),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Spacer(Modifier.height(12.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    stringResource(R.string.record_audio_policy),
+                                    style = MaterialTheme.typography.titleSmall,
+                                    maxLines = 1,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                AudioPolicySelector(config.globalRecordAudioPolicy, { v ->
+                                    scope.launch {
+                                        TemplateManager.saveConfig(context, config.copy(globalRecordAudioPolicy = v))
+                                    }
+                                })
+                            }
                         }
                         Spacer(Modifier.height(12.dp))
                         HorizontalDivider()
@@ -726,9 +739,10 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                         Text(
                             stringResource(R.string.record_audio_policy),
                             style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
                             modifier = Modifier.weight(1f)
                         )
-                        AudioPolicySelector(audioPolicy, { audioPolicy = it }, compact = true)
+                        AudioPolicySelector(audioPolicy, { audioPolicy = it })
                     }
                 }
                 // 截屏限制：标签占左余宽，紧凑三态 chips 靠右同一水平线（无滚动）
@@ -739,9 +753,10 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                     Text(
                         stringResource(R.string.secure_policy),
                         style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
                         modifier = Modifier.weight(1f)
                     )
-                    SecurePolicySelector(policy, { policy = it }, compact = true)
+                    SecurePolicySelector(policy, { policy = it })
                 }
                 SwitchRow(stringResource(R.string.mask_capture_detection), maskCapture) { maskCapture = it }
                 SwitchRow(stringResource(R.string.mask_record_detection), maskRecord) { maskRecord = it }
@@ -1174,73 +1189,85 @@ private fun screenAspectRatio(context: Context): Float {
 }
 
 /**
- * E1 三态选择器（全局卡与编辑页共用）。
- * compact = 编辑页同排紧凑态：小字号 + 28dp 矮 chip + 4dp 间距，
- * 三 chip 靠右不换行；默认态保持全局卡的原生观感
+ * 紧凑三态 pill：自定义代替 FilterChip——后者固定 ~32dp 水平内边距，
+ * 三枚即 ~100dp，窄屏下把左侧标签（"截屏限制"）挤成两行折角；本件
+ * 10dp 内边距 + 24dp 高 + labelSmall，标签与三 chips 同排单行的前提
+ */
+@Composable
+private fun CompactChip(selected: Boolean, onClick: () -> Unit, label: String) {
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        modifier = Modifier
+            .height(24.dp)
+            .clip(shape)
+            .then(
+                if (selected) Modifier.background(MaterialTheme.colorScheme.secondaryContainer)
+                else Modifier.border(1.dp, MaterialTheme.colorScheme.outline, shape)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/**
+ * E1 三态选择器（默认设置卡与编辑页共用）：标签左、chips 右同排单行
+ * （[CompactChip] 紧凑宽度是单行成立的前提）
  */
 @Composable
 private fun SecurePolicySelector(
     policy: Int,
     onChange: (Int) -> Unit,
-    modifier: Modifier = Modifier,
-    compact: Boolean = false
+    modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         listOf(
             HookConfig.SECURE_FOLLOW to R.string.secure_policy_follow,
             HookConfig.SECURE_ALLOW to R.string.secure_policy_allow,
             HookConfig.SECURE_DENY to R.string.secure_policy_deny,
         ).forEach { (value, label) ->
-            FilterChip(
+            CompactChip(
                 selected = policy == value,
                 onClick = { onChange(value) },
-                label = {
-                    Text(
-                        stringResource(label),
-                        style = if (compact) MaterialTheme.typography.labelMedium
-                        else MaterialTheme.typography.labelLarge
-                    )
-                },
-                modifier = if (compact) Modifier.height(28.dp) else Modifier
+                label = stringResource(label)
             )
         }
     }
 }
 
 /**
- * E3c 音频三态选择器（全局卡与编辑页共用）：原声 / 替换 / 叠加。
+ * E3c 音频三态选择器（默认设置卡与编辑页共用）：原声 / 替换 / 叠加。
  * 录屏替换的声音部分——仅在录屏视频替换已配置处出现（调用方 gate）
  */
 @Composable
 private fun AudioPolicySelector(
     policy: Int,
     onChange: (Int) -> Unit,
-    modifier: Modifier = Modifier,
-    compact: Boolean = false
+    modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         listOf(
             HookConfig.AUDIO_OFF to R.string.audio_policy_off,
             HookConfig.AUDIO_REPLACE to R.string.audio_policy_replace,
             HookConfig.AUDIO_MIX to R.string.audio_policy_mix,
         ).forEach { (value, label) ->
-            FilterChip(
+            CompactChip(
                 selected = policy == value,
                 onClick = { onChange(value) },
-                label = {
-                    Text(
-                        stringResource(label),
-                        style = if (compact) MaterialTheme.typography.labelMedium
-                        else MaterialTheme.typography.labelLarge
-                    )
-                },
-                modifier = if (compact) Modifier.height(28.dp) else Modifier
+                label = stringResource(label)
             )
         }
     }
