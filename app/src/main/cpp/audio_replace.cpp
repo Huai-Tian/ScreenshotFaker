@@ -460,15 +460,6 @@ static void* g_stub_pab = nullptr;
 static void* g_stub_cbf = nullptr;
 static void* g_orig_cbf = nullptr;
 
-// 热重载让位标志：模块热更新后 LSPosed 把新实例注入本进程，但本实例
-// （旧代码）仍持钩且配置推送桥已断——策略读取停留在旧值，继续填充 =
-// 用陈旧策略污染产物（实测：用户已切原声，旧实例仍按上次同步的 MIX
-// 叠加）。Kotlin 桥 watcher 检测到新实例 APK 映射后调 nativeDisable()：
-// 本实例所有填充短路透传（不 unhook——摘钩有崩溃风险），音频回到原生
-// 直到进程重启（新实例接管的正常路径）。fail-open 方向正确：宁可暂时
-// 不替换，不可替换错内容
-static std::atomic<bool> g_disabled{false};
-
 // ==================== hook 代理 ====================
 
 // 公有 obtainBuffer 去重守卫：公有版（waitCount 包装）内部转发私有版——
@@ -485,7 +476,7 @@ static int proxy_obtain_priv(void* thiz, void* buf, const struct timespec* reque
                              struct timespec* elapsed, size_t* nonContig) {
     SHADOWHOOK_STACK_SCOPE();
     int status = SHADOWHOOK_CALL_PREV(proxy_obtain_priv, thiz, buf, requested, elapsed, nonContig);
-    if (status == 0 && buf != nullptr && !g_disabled.load(std::memory_order_relaxed)) {
+    if (status == 0 && buf != nullptr) {
         // NO_ERROR 才有有效 chunk（错误路径 mSize=0）
         ArBuffer* b = (ArBuffer*) buf;
         if (b->mSize > 0) {
@@ -508,8 +499,7 @@ static int proxy_obtain_pub(void* thiz, void* buf, int32_t waitCount, size_t* no
     int status = SHADOWHOOK_CALL_PREV(proxy_obtain_pub, thiz, buf, waitCount, nonContig);
     bool handled = tl_priv_handled;
     tl_priv_handled = false;
-    if (status == 0 && buf != nullptr && !handled &&
-        !g_disabled.load(std::memory_order_relaxed)) {
+    if (status == 0 && buf != nullptr && !handled) {
         ArBuffer* b = (ArBuffer*) buf;
         if (b->mSize > 0) fill_if_active(thiz, b);
     }
@@ -580,9 +570,8 @@ static void proxy_cbf(int event, void* user, void* info) {
 
     // pre-call 三态填充（仅 EVENT_MORE_DATA；会话键 = 最近 AudioRecord
     // 对象，pab 必先于 cbf 触发故非 null；打点由 fill_if_active/session_fill
-    // 统一负责——first fill 日志含 policy）。热重载让位后透传（g_disabled）
-    if (!g_disabled.load(std::memory_order_relaxed) &&
-        event == CB_EVENT_MORE_DATA && b != nullptr && b->mSize > 0) {
+    // 统一负责——first fill 日志含 policy）
+    if (event == CB_EVENT_MORE_DATA && b != nullptr && b->mSize > 0) {
         void* owner = g_last_ar_obj.load();
         if (owner != nullptr) fill_if_active(owner, b);
     }
@@ -722,17 +711,6 @@ static void log_install_summary() {
                g_stub_obtain_pub != nullptr ? 1 : 0,
                g_stub_stop != nullptr ? 1 : 0,
                g_stub_pab != nullptr ? 1 : 0);
-}
-
-// 热重载让位（Kotlin 桥 watcher 调用，一次性）：填充短路透传（见
-// g_disabled 注释）
-extern "C" JNIEXPORT void JNICALL
-Java_fake_screenshot_hooks_AudioRecordNativeBridge_nativeDisable(JNIEnv* /*env*/, jobject /*thiz*/) {
-    if (!g_disabled.exchange(true)) {
-        upcall_log(ANDROID_LOG_WARN,
-                   "E3c-N disabled: newer module instance hot-loaded into this process; "
-                   "stale-policy fills stopped (passthrough until process restart)");
-    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

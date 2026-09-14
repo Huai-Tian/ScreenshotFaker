@@ -509,18 +509,6 @@ object ProjectionReplaceHook {
                 } catch (e: Exception) {
                     HookContext.log(Log.WARN, "E3b setVolume failed: ${e.javaClass.simpleName}: ${e.message} (continue, audio risk)")
                 }
-                // 采集排除铁律（同 ReplaceVideoStore.buildPlayer，2aqwvd 轮实证：
-                // setVolume(0) 挡不住系统声音采集，需 usage 排除出 playback
-                // capture 白名单）
-                runCatching {
-                    p.setAudioAttributes(
-                        android.media.AudioAttributes.Builder()
-                            .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                            .build()
-                    )
-                }.onFailure {
-                    HookContext.log(Log.WARN, "E3b setAudioAttributes failed: ${it.message} (audio capture risk)")
-                }
                 try {
                     p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
                 } catch (e: Exception) {
@@ -533,9 +521,6 @@ object ProjectionReplaceHook {
                     HookContext.log(Log.WARN, "E3b prepare failed: ${e.javaClass.simpleName}: ${e.message}")
                     throw e
                 }
-                // 音轨摘除（同 ReplaceVideoStore.buildPlayer，n1dncd 轮实证：
-                // usage 白名单挡不住 ColorOS 系统声音采集，源头消灭音轨输出）
-                ReplaceVideoStore.deselectAudioTracks(p, videoId)
             }
             // ---- 帧中继装配（round 13 拉伸终解）：round 8-12 五轮实测
             // 证伪了一切 layer 几何手段（builder 尺寸 / 事后事务 / 帧确立

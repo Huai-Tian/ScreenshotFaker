@@ -46,8 +46,8 @@ object AudioRecordNativeBridge {
      * 路径）仍在位且其 hook 未摘除，新实例再 hook 同符号 = 两条独立
      * ShadowHook 链叠加（实证：stop caller 解析到 libmediafx.so 自身），
      * 数据路径被打断 → 产物静音）。检测到异路径 libmediafx.so 映射时
-     * 本实例放弃安装（旧实例继续持有 hook，但见 [startSuccessorWatch]——
-     * 旧实例会自检让位；进程重启后自然单实例）。
+     * 本实例放弃安装并清除宿主进程（[evictStaleInstance]——杀进程，
+     * 下次启动即为纯新实例单例态）。
      *
      * so 加载双腿（真机实证 2026-09-13 gzvwnh：LspModuleClassLoader 于
      * base.apk!/lib/arm64-v8a 找不到压缩存储的 libmediafx.so，单腿必败）：
@@ -71,7 +71,6 @@ object AudioRecordNativeBridge {
         }
         if (direct.getOrDefault(false)) {
             loadedHere = true
-            startSuccessorWatch()
             return true
         }
 
@@ -91,17 +90,12 @@ object AudioRecordNativeBridge {
                         "fallback: ${it.message})"
             )
         }.map {
-            if (it) {
-                loadedHere = true
-                startSuccessorWatch()
-            }
+            if (it) loadedHere = true
             it
         }.getOrDefault(false)
     }
 
     private external fun nativeInstall(): Boolean
-
-    private external fun nativeDisable()
 
     /**
      * 陈旧实例清除（cgj1um 轮定案 2026-09-14）：模块热更新后旧实例的
@@ -140,54 +134,6 @@ object AudioRecordNativeBridge {
             "E3cStaleEvict",
         ).apply { isDaemon = true }.start()
     }
-
-    /**
-     * 后继实例自检（本实例持钩期间的后台守护，install 成功后启动）。
-     *
-     * 背景（n5q4ns 轮实证 2026-09-14）：模块热更新后新实例 skip install
-     * 放弃持钩，本实例（旧代码）继续填充——但本实例的配置推送桥
-     * （RemotePreferences listener）已随热重载断链，queryPolicy 停留在
-     * 旧值：用户已切"原声"，旧实例仍按上次同步的 MIX 给两路流叠加。
-     *
-     * 指纹：新实例注入时其 LspModuleClassLoader mmap 了**另一份模块 APK**
-     * （路径含包名、以 .apk 结尾，且 ≠ 本实例 sourceDir）——新实例不
-     * load so（skip install 前即放弃），maps 无第二份 libmediafx.so，唯一
-     * 可观测痕迹就是这份 APK 映射。30s 周期检测，命中即 [nativeDisable]
-     * 停止陈旧策略填充（透传原声直到进程重启；fail-open 方向正确：宁可
-     * 暂时不替换，不可替换错内容）
-     */
-    @Volatile
-    private var watchStarted = false
-
-    private fun startSuccessorWatch() {
-        if (watchStarted) return
-        synchronized(this) {
-            if (watchStarted) return
-            watchStarted = true
-        }
-        val ownApk = HookContext.moduleApplicationInfo()?.sourceDir
-        Thread(
-            {
-                while (true) {
-                    val successor = runCatching {
-                        File("/proc/self/maps").readLines().any { l ->
-                            MODULE_APK.containsMatchIn(l) && !l.endsWith(".dex") &&
-                                    (ownApk == null || !l.contains(ownApk))
-                        }
-                    }.getOrDefault(false)
-                    if (successor) {
-                        runCatching { nativeDisable() }
-                        return@Thread
-                    }
-                    runCatching { Thread.sleep(30_000) }
-                }
-            },
-            "E3cSuccessorWatch",
-        ).apply { isDaemon = true }.start()
-    }
-
-    /** 本模块 APK 的 maps 指纹（包名 + apk 后缀；dex 条目排除） */
-    private val MODULE_APK = Regex("fake\\.screenshot[^ ]*\\.apk")
 
     /**
      * 异路径 libmediafx.so 映射检测（热重载双实例守卫）：maps 中存在

@@ -359,14 +359,13 @@ object ReplaceVideoStore {
             return null
         }
         HookContext.log(Log.INFO, "E3b video decrypted ${stats.bytes} bytes in ${ms}ms for $videoId")
-        // ---- 音轨剥除（5k5pel 轮实证 2026-09-14）：deselectTrack 对音频轨
-        // 返回 -38（MediaPlayer 的 track select/deselect 仅支持字幕轨，AOSP
-        // 即如此）；usage 白名单 + setVolume(0) 亦被 ColorOS 系统声音采集
-        // 绕过（audioserver 层直采，取样先于应用音量衰减）。唯一可靠封法 =
-        // 解码器源头无音频流：重封装出纯视频副本，音频解码器与 AudioTrack
-        // 根本不存在，任何采集机制都无数据可采。声音由 ReplaceAudioStore
-        // 从视频文件直供 PCM（E3c 三态），播放器只供画面，功能无损。无
-        // 音轨文件零成本直通；失败回落原 fd（画面优先，泄漏风险同旧版）
+        // ---- 音轨剥除（真机实证 2026-09-14）：ColorOS 系统声音采集绕过
+        // 一切应用层排除手段（usage 白名单/音量衰减均在其取样点之后），
+        // 唯一可靠封法 = 解码器源头无音频流：重封装出纯视频副本，音频
+        // 解码器与 AudioTrack 根本不存在，任何采集机制都无数据可采。声音
+        // 由 ReplaceAudioStore 从视频文件直供 PCM（E3c 三态），播放器只供
+        // 画面，功能无损。无音轨文件零成本直通；失败回落原 fd（画面优先，
+        // 泄漏风险同旧版）
         // ----
         var playFd = fd
         var playLen = stats.bytes
@@ -401,23 +400,9 @@ object ReplaceVideoStore {
             val p = MediaPlayer()
             p.setDataSource(MemfdDataSource(dup, length))
             p.setLooping(true)
-            // 静音铁律：替换视频音频外放 = 替换行为即刻暴露
+            // 静音铁律：替换视频音频外放 = 替换行为即刻暴露（remux 失败
+            // 回落带音轨原 fd 时的最后防线；remux 成功时播放器本无音频轨）
             p.setVolume(0f, 0f)
-            // 采集排除铁律（2aqwvd 轮实证 2026-09-14：setVolume(0) 挡不住录屏器
-            // 的"系统声音"采集——播放采集在音量衰减前取样，替换视频音轨以
-            // 默认 MEDIA usage 进入采集 = "原声模式出现叠加"的根因；此前的
-            // "叠加测试成功"实为泄漏冒充，E3c 全程零填充）。playback capture
-            // 白名单仅 MEDIA/GAME/UNKNOWN，SONIFICATION 一律不采集——
-            // usage 与音量 0 双保险，可闻面与采集面各自独立封死
-            runCatching {
-                p.setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                        .build()
-                )
-            }.onFailure {
-                HookContext.log(Log.WARN, "E3b setAudioAttributes failed: ${it.message} (audio capture risk)")
-            }
             // 裁剪铺满 layer buffer（显示空间），无黑边；prepare 前调用
             p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
             val latch = CountDownLatch(1)
@@ -438,45 +423,11 @@ object ReplaceVideoStore {
                 null
             } else {
                 HookContext.log(Log.INFO, "E3b warm player prepared ${p.videoWidth}x${p.videoHeight} for $videoId")
-                deselectAudioTracks(p, videoId)
                 p
             }
         } catch (e: Exception) {
             HookContext.log(Log.WARN, "E3b warm build failed: ${e.javaClass.simpleName}: ${e.message}")
             null
-        }
-    }
-
-    /**
-     * 音频轨摘除（n1dncd 轮实证 2026-09-14）：usage 白名单 + setVolume(0)
-     * 双保险后，原声模式产物**仍**含替换视频声音——ColorOS 的"系统声音"
-     * 采集不走 AOSP playback capture 白名单（audioserver 层直采，取样点
-     * 在应用音量衰减与 usage 过滤之前），应用层排除手段全部失效；此前的
-     * "叠加测试成功"实为泄漏冒充。唯一可靠封法 = 源头消灭：prepared 后
-     * deselect 全部音频轨 → NuPlayer 不创建 AudioTrack → AudioFlinger
-     * 无 track → 采集面物理无数据。播放器本就只供画面（声音由
-     * ReplaceAudioStore 从视频文件直供 PCM，E3c 三态填充），对功能无损。
-     * fail-soft：单轨 deselect 失败仅记录（usage/音量 0 兜底仍在）
-     */
-    fun deselectAudioTracks(p: MediaPlayer, videoId: String) {
-        runCatching {
-            val tracks = p.trackInfo
-            var deselected = 0
-            for (i in tracks.indices) {
-                if (tracks[i].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                    runCatching { p.deselectTrack(i) }
-                        .onSuccess { deselected++ }
-                        .onFailure {
-                            HookContext.log(
-                                Log.WARN,
-                                "E3b deselectTrack #$i failed: ${it.message} (capture leak risk)"
-                            )
-                        }
-                }
-            }
-            HookContext.log(Log.INFO, "E3b audio tracks deselected ($deselected audio in ${tracks.size} tracks) for $videoId")
-        }.onFailure {
-            HookContext.log(Log.WARN, "E3b audio deselect failed: ${it.message} (capture leak risk)")
         }
     }
 
