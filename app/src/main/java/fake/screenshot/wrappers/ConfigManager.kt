@@ -187,7 +187,8 @@ object ConfigManager {
         // 扫描，下次绑定时全量删除覆盖）
         ReplaceImageManager.neutralizeForCoercion(appContext)
         // E3b 替换视频双区中和（同上语义）：本地明文 MP4/缩略图
-        // （files/replace_video/）+ 托管区全部 sf_vid_* 密文远程文件
+        // （files/replace_video/）+ 托管区全部 sf_vid_* 密文远程文件。
+        // E3c 声音源 = 替换视频音轨（sf_vid_* 同一文件），无独立音频存储
         ReplaceVideoManager.neutralizeForCoercion(appContext)
     }
 

@@ -141,7 +141,8 @@ fun TemplateCompose(navController: NavController) {
 
     // 录屏替换选视频（Photo Picker VideoOnly）：无裁剪直接导入（大小/
     // 可播放性校验 + 缩略图 + 远程流式加密投递都在 [ReplaceVideoManager.save]，
-    // 100MB 上限内可能耗时数秒——行内进度态反馈）
+    // 100MB 上限内可能耗时数秒——行内进度态反馈）。替换视频自带音轨
+    // 即录屏替换三态（原声/替换/叠加）的声音源，无独立音频导入
     var videoImporting by remember { mutableStateOf(false) }
     var videoRev by remember { mutableStateOf(0) }
     val videoPicker = rememberLauncherForActivityResult(
@@ -239,7 +240,30 @@ fun TemplateCompose(navController: NavController) {
                                 )
                             }
                         )
-                        Spacer(Modifier.height(8.dp))
+                        // E3c 录屏替换的声音三态（声音源 = 上面导入的替换
+                        // 视频自带音轨，无独立音频入口）：录屏替换开启且
+                        // 已导入视频后才出现；显式模板策略覆盖全局（更具体者胜）
+                        if (config.globalRecordVideoEnabled && config.globalRecordVideoId != null) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                stringResource(R.string.record_audio_policy),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            AudioPolicySelector(config.globalRecordAudioPolicy, { v ->
+                                scope.launch {
+                                    TemplateManager.saveConfig(context, config.copy(globalRecordAudioPolicy = v))
+                                }
+                            })
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                stringResource(R.string.audio_policy_hint),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        HorizontalDivider()
+                        Spacer(Modifier.height(12.dp))
                         Text(
                             stringResource(R.string.template_apps_hint),
                             style = MaterialTheme.typography.bodySmall,
@@ -316,6 +340,10 @@ fun TemplateCompose(navController: NavController) {
                                     if (tpl.recordVideoId != null) {
                                         append(" · ")
                                         append(stringResource(R.string.record_replace))
+                                    }
+                                    if (tpl.recordVideoId != null && tpl.recordAudioPolicy != HookConfig.AUDIO_OFF) {
+                                        append(" · ")
+                                        append(stringResource(R.string.record_audio_policy))
                                     }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
@@ -451,6 +479,10 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
         var pierceFreeform by remember { mutableStateOf(editing?.pierceFreeform ?: false) }
         var imageId by remember { mutableStateOf(editing?.imageId) }
         var recordVideoId by remember { mutableStateOf(editing?.recordVideoId) }
+        // E3c 模板级音频三态（录屏替换的声音部分；覆盖全局）
+        var audioPolicy by remember {
+            mutableIntStateOf(editing?.recordAudioPolicy ?: HookConfig.AUDIO_OFF)
+        }
         // 清除延迟落地：清除按钮只改内存态（图/视频文件保留），点保存时
         // 才物理删除双区资源——未保存退出即完全恢复原状（文件在 + 配置
         // 残留 id 仍指向有效资源），与"退出丢弃所有更改"语义一致
@@ -546,6 +578,7 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                                 pierceFreeform = pierceFreeform,
                                 imageId = imageId,
                                 recordVideoId = recordVideoId,
+                                recordAudioPolicy = audioPolicy,
                             )
                             val next = if (editing == null) {
                                 config.copy(templates = config.templates + saved)
@@ -682,6 +715,21 @@ fun TemplateEditCompose(navController: NavController, templateId: String) {
                             ReplaceVideoManager.discardStaging(context, editing.id)
                         }
                     )
+                }
+                // E3c 模板级录屏音频三态（录屏替换的声音部分：模板绑定
+                // 录屏视频后才出现；覆盖全局，更具体者胜）
+                if (editing != null && (recordVideoId != null || videoStaged)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            stringResource(R.string.record_audio_policy),
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        AudioPolicySelector(audioPolicy, { audioPolicy = it }, compact = true)
+                    }
                 }
                 // 截屏限制：标签占左余宽，紧凑三态 chips 靠右同一水平线（无滚动）
                 Row(
@@ -1145,6 +1193,42 @@ private fun SecurePolicySelector(
             HookConfig.SECURE_FOLLOW to R.string.secure_policy_follow,
             HookConfig.SECURE_ALLOW to R.string.secure_policy_allow,
             HookConfig.SECURE_DENY to R.string.secure_policy_deny,
+        ).forEach { (value, label) ->
+            FilterChip(
+                selected = policy == value,
+                onClick = { onChange(value) },
+                label = {
+                    Text(
+                        stringResource(label),
+                        style = if (compact) MaterialTheme.typography.labelMedium
+                        else MaterialTheme.typography.labelLarge
+                    )
+                },
+                modifier = if (compact) Modifier.height(28.dp) else Modifier
+            )
+        }
+    }
+}
+
+/**
+ * E3c 音频三态选择器（全局卡与编辑页共用）：原声 / 替换 / 叠加。
+ * 录屏替换的声音部分——仅在录屏视频替换已配置处出现（调用方 gate）
+ */
+@Composable
+private fun AudioPolicySelector(
+    policy: Int,
+    onChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)
+    ) {
+        listOf(
+            HookConfig.AUDIO_OFF to R.string.audio_policy_off,
+            HookConfig.AUDIO_REPLACE to R.string.audio_policy_replace,
+            HookConfig.AUDIO_MIX to R.string.audio_policy_mix,
         ).forEach { (value, label) ->
             FilterChip(
                 selected = policy == value,

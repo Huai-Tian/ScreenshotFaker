@@ -489,7 +489,8 @@ class LSPosedServiceManager : Application(), XposedServiceHelper.OnServiceListen
         TemplateManager.onServiceBound(this)
         // E3 替换图 catch-up：补投远程缺失 + 清孤儿（详见其注释）
         ReplaceImageManager.onServiceBound(this)
-        // E3b 替换视频 catch-up：补投远程缺失 + 清孤儿（流式，详见其注释）
+        // E3b 替换视频 catch-up：补投远程缺失 + 清孤儿（流式，详见其注释）。
+        // E3c 声音源 = 替换视频音轨（同一 sf_vid_* 文件），无独立音频投递
         ReplaceVideoManager.onServiceBound(this)
     }
 

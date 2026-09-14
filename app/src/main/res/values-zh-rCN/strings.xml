@@ -118,6 +118,11 @@
     <string name="replace_video_invalid">不是可播放的视频文件</string>
     <string name="replace_video_read_failed">无法读取所选视频</string>
     <string name="replace_video_importing">正在导入视频…</string>
+    <string name="record_audio_policy">声音</string>
+    <string name="audio_policy_off">原声</string>
+    <string name="audio_policy_replace">替换</string>
+    <string name="audio_policy_mix">叠加</string>
+    <string name="audio_policy_hint">录屏替换的声音：原声 = 录制真实声音；替换 = 用替换视频自带的声音（无音轨时静音）；叠加 = 真实声音与替换视频的声音混合（无音轨时保留原声）</string>
     <string name="save">保存</string>
     <string name="template_apps_hint">在应用页将应用分配到模板</string>
     <string name="search_apps">搜索应用</string>

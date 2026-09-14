@@ -62,22 +62,15 @@ data class HookTemplate(
      */
     val recordVideoId: String? = null,
     /**
-     * E3c：录屏音频策略三态（**独立解析，不从画面替换配置派生**——
-     * "音频替换"与"仅视频图像替换"是用户的两个独立选择，任意组合合法：
-     * 画面替换 + 真实音频原样保留同为合法组合，环境声反而增强录屏
-     * 可信度）：
-     * - [HookConfig.AUDIO_OFF]：不干预（真实音频原样录制）
-     * - [HookConfig.AUDIO_MUTE]：静音（真实音频不落录屏）
-     * - [HookConfig.AUDIO_REPLACE]：用 [recordAudioId] 假音频替换
-     *   （id 落空回落静音——显式选择替换后放行真实音频 = 泄漏）
+     * E3c：录屏替换的声音三态（**声音源 = [recordVideoId] 替换视频自带
+     * 的音轨**，无独立音频配置——音频替换的初衷即"录屏替换的声音部分"）：
+     * - [HookConfig.AUDIO_OFF]：原声（真实音频原样录制）
+     * - [HookConfig.AUDIO_REPLACE]：用替换视频音轨替换真实音频（视频
+     *   无音轨/落空回落静音——显式选择替换后放行真实音频 = 泄漏）
+     * - [HookConfig.AUDIO_MIX]：真实音频与替换视频音轨叠加（落空回落
+     *   原声——叠加语义本就保留原声，无泄漏面）
      */
     val recordAudioPolicy: Int = HookConfig.AUDIO_OFF,
-    /**
-     * E3c：内容替换绑定录屏音频（中性文件 id，与 [imageId] 同一 id 空间，
-     * 本体经 openRemoteFile 以流式密文传输）。仅在 [recordAudioPolicy]
-     * 为 REPLACE 时消费
-     */
-    val recordAudioId: String? = null,
 )
 
 data class HookConfig(
@@ -109,14 +102,11 @@ data class HookConfig(
     /** E3b 全局替换视频：null = 未配置（录屏走静态图） */
     val globalRecordVideoId: String? = null,
     /**
-     * E3c 全局录屏音频策略三态（语义同 [HookTemplate.recordAudioPolicy]，
+     * E3c 全局录屏替换声音三态（语义同 [HookTemplate.recordAudioPolicy]，
      * 显式模板策略覆盖之；同 [globalSecurePolicy] 的"更具体者胜"）。
-     * OFF 时 [globalRecordAudioId] 配置静默保留（不清除），再切回
-     * REPLACE 直接恢复
+     * 声音源 = [globalRecordVideoId] 替换视频的音轨
      */
     val globalRecordAudioPolicy: Int = AUDIO_OFF,
-    /** E3c 全局替换音频：仅策略为 REPLACE 时消费；null = REPLACE 落空回落静音 */
-    val globalRecordAudioId: String? = null,
     val templates: List<HookTemplate> = emptyList(),
     /** 包名 → 模板 id（显式映射；悬空引用按未配置处理） */
     val scope: Map<String, String> = emptyMap(),
@@ -147,12 +137,18 @@ data class HookConfig(
         const val SECURE_ALLOW = 1  // 强制允许（穿透，对标 DisableFlagSecure）
         const val SECURE_DENY = 2   // 强制禁止（未设 FLAG_SECURE 也拒截）
 
-        /** E3c 音频三态：不干预（真实音频原样录制，与画面替换配置无关） */
+        /** E3c 音频三态：原声（真实音频原样录制） */
         const val AUDIO_OFF = 0
-        /** E3c 音频三态：静音 */
-        const val AUDIO_MUTE = 1
-        /** E3c 音频三态：假音频替换（id 落空回落静音） */
-        const val AUDIO_REPLACE = 2
+        /**
+         * E3c 音频三态：替换（替换视频音轨顶替真实音频；视频无音轨/
+         * 落空回落静音——显式选择替换后放行真实音频 = 泄漏）
+         */
+        const val AUDIO_REPLACE = 1
+        /**
+         * E3c 音频三态：叠加（真实音频与替换视频音轨混合；落空回落
+         * 原声——叠加语义本就保留原声）
+         */
+        const val AUDIO_MIX = 2
     }
 
     /**
@@ -210,7 +206,6 @@ object HookConfigCodec {
             put("ve", config.globalRecordVideoEnabled)
             config.globalRecordVideoId?.let { put("vi", it) }
             put("ap", config.globalRecordAudioPolicy)
-            config.globalRecordAudioId?.let { put("ai", it) }
             put("t", JSONArray().apply {
                 config.templates.forEach { tpl ->
                     put(JSONObject().apply {
@@ -226,7 +221,6 @@ object HookConfigCodec {
                         tpl.imageId?.let { img -> put("g", img) }
                         tpl.recordVideoId?.let { vid -> put("vg", vid) }
                         put("ap", tpl.recordAudioPolicy)
-                        tpl.recordAudioId?.let { aud -> put("ag", aud) }
                     })
                 }
             })
@@ -283,7 +277,6 @@ object HookConfigCodec {
                         imageId = o.optString("g").ifEmpty { null },
                         recordVideoId = o.optString("vg").ifEmpty { null },
                         recordAudioPolicy = o.optInt("ap", HookConfig.AUDIO_OFF).coerceIn(0, 2),
-                        recordAudioId = o.optString("ag").ifEmpty { null },
                     )
                 )
             }
@@ -316,7 +309,6 @@ object HookConfigCodec {
             globalRecordVideoEnabled = json.optBoolean("ve"),
             globalRecordVideoId = json.optString("vi").ifEmpty { null },
             globalRecordAudioPolicy = json.optInt("ap", HookConfig.AUDIO_OFF).coerceIn(0, 2),
-            globalRecordAudioId = json.optString("ai").ifEmpty { null },
             templates = templates,
             scope = scope,
             aggressiveFilter = aggressiveFilter,

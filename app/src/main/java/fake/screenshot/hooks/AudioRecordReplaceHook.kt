@@ -15,9 +15,8 @@ import java.util.WeakHashMap
  * E3c 录屏音频替换引擎（OEM 录屏器进程内，AudioRecord 数据出口拦截）。
  *
  * 威胁模型：录屏会话的画面替换（E3b）与音频采集是两条独立管线。音频
- * 采集本身可能是敏感通道（环境声/通话声落录屏），也可能是录屏可信度
- * 的佐证（真实环境声 + 假画面反而更难被识破）——取舍交给用户：音频
- * 策略与画面替换配置完全解耦，独立三态选择（见下）。
+ * 是录屏替换的声音部分（无独立"音频替换"功能）——仅录屏视频替换
+ * 命中时按三态处理（见下）。
  *
  * 架构定位（scope 约束下的两腿分工）：
  * - 本引擎（进程内腿）：OEM 录屏器是系统应用，可被 LSPosed scope——
@@ -26,60 +25,45 @@ import java.util.WeakHashMap
  *   （后续阶段：MediaProjection 音频捕获授权降级 → 原生语义静音）
  *
  * 机制（登记 + 数据出口替换）：
- * - **⚠ 真机终局实证（2026-09-13 xsvh5o，ColorOS 15）：Java 层全灭**。
- *   16:12 会话带 AAC 音轨（产物 A:1 V:1）、audioserver AudioBoost 全程
- *   SCHED boost 录屏器 pid 的 3 条采集线程（tid 14083/14084/14141，
- *   kWhatRemoveActiveAudioRecord 收尾）——但 12 个 Java 钩子（build/
- *   ctor×5/start×2/read×4）全会话零触发。native read 腿不可内联
- *   （触发即必然），零触发只有一个解释：**Java AudioRecord 类从未
- *   实例化——录屏器走 C++ AudioRecord（libaudioclient）。Java 层
- *   机制保留（系统内其他 Java 采集路径 + 第三方 MediaProjection app
- *   的未来覆盖）+ native 路径探针（startNativePathProbe，41zaym 轮已
- *   实锤 libaudioclient.so 加载与 AudioRecord 采集线程）→ 替换主路径
- *   下沉至 E3c-N native 腿（[AudioRecordNativeBridge] → audio_replace.cpp，
- *   ShadowHook inline hook 私有 obtainBuffer 三路汇聚点，post-call
- *   内容替换）
- * - read 腿懒登记设计仍然正确（对"Java 实例存在但构造/启动腿被 OEM
- *   AOT 内联绕过"的场景兜底；native 方法不可内联，JNI 调用必经
- *   entry point）：native_read 首次见到未登记实例 → lazyRegister 判定
- *   （激进度/策略快照）。真机实证（2026-09-13 ColorOS 15）：deoptimize
- *   后 startRecording hook 仍零触发（ART deoptimize 只保证被 hook 方法
- *   走解释器，调用方 odex 内联副本不受影响）
+ * - 真机实证（2026-09-13 ColorOS 15）：ColorOS 录屏器走 C++ AudioRecord
+ *   （libaudioclient），Java AudioRecord 类从未实例化——Java 层钩子全天
+ *   零触发，替换主路径在 native 腿（[AudioRecordNativeBridge] →
+ *   audio_replace.cpp：processAudioBuffer C 回调拦截 + 私有 obtainBuffer
+ *   汇聚点，post-call 内容替换）。Java 层机制保留，覆盖系统内其他
+ *   Java 采集路径（AOSP SystemUI 录屏等）
+ * - read 腿懒登记设计（对"Java 实例存在但构造/启动腿被 OEM AOT 内联
+ *   绕过"的场景兜底；native 方法不可内联，JNI 调用必经 entry point）：
+ *   native_read 首次见到未登记实例 → lazyRegister 判定（激进度/策略快照）
  * - startRecording 腿（提前登记 + 清缓存重判）：能触发则策略快照更贴
  *   会话边界；被内联绕过无妨（read 兜底）。stop 腿清状态（复用实例
  *   的时钟重置与策略刷新）。均配套 deoptimize
- * - 构造器/Builder hook 仅诊断（构造路径打点，限流）——实证录屏器构造
- *   路径不落 REMOTE_SUBMIX int 构造器（AudioAttributes 形态），枚举
- *   构造路径做登记不可靠
  * - 数据出口 hook 4 个 private native `native_read_in_*`（byte/short/float
  *   数组 + direct buffer）：Java read() 全部重载的最终汇聚点——一处
  *   拦截覆盖所有读取形态（含 MediaCodec 输入 ByteBuffer 直喂）。readMode
  *   形参为 boolean isBlocking（真机 dump 实证）。native 方法无字节码、
  *   不可被 JIT/AOT 内联——唯一无需去优化的腿
- * - **去优化铁律**：Java 层 hook（构造器/build/startRecording/stop）
- *   必须配套 deoptimize——OEM 应用 AOT 编译会把小方法内联进自身代码，
- *   内联调用点绕过 hook trampoline（真机实证 2026-09-13：12 句柄装配
- *   成功但全天零回调，方法体日志照常出现；代码库 E1/E2c/E2d/E4 同样
- *   全部去优化）。注意 deoptimize 不能消除调用方已内联副本——所以才
- *   有 read 懒登记兜底这条主路径
+ * - **去优化铁律**：Java 层 hook（startRecording/stop）必须配套
+ *   deoptimize——OEM 应用 AOT 编译会把小方法内联进自身代码，内联调用
+ *   点绕过 hook trampoline。注意 deoptimize 不能消除调用方已内联副本
+ *   ——所以才有 read 懒登记兜底这条主路径
  *
  * 替换语义（登记时快照——read 懒登记或 startRecording 提前登记，对齐
  * E3b 会话锁定；会话内配置变更不追踪，复用实例下一会话 stop→read 重判）：
- * - 策略独立解析（recordAudioPolicy 三态），**不从画面替换配置派生**
- *   ——"音频替换"与"仅视频图像替换"是用户的独立选择，任意组合合法
- *   （画面替换 + 真实音频原样保留同为合法组合：环境声反而增强录屏
- *   可信度）：
- *   - OFF：不登记 = 原生放行（fail-open）
- *   - MUTE：登记静音
- *   - REPLACE：登记假音频（本阶段静音占位，数据源管线 Phase 1 落地；
+ * - 策略解析（recordAudioPolicy 三态）从属于录屏替换：仅录屏视频替换
+ *   命中（前台者模板视频 / 全局视频开启且已配置）时生效，否则一律原声：
+ *   - OFF（原声）：不登记 = 原生放行（fail-open）
+ *   - REPLACE（替换）：登记假音频替换（[ReplaceAudioStore] PCM 供给；
  *     id 落空回落静音——显式选择替换后放行真实音频 = 泄漏）
+ *   - MIX（叠加）：登记混合——真实数据 + 假音频相加（id 落空回落
+ *     原声：叠加语义本就保留原声）
  *
- * 虚拟时钟 pacing：真实 AudioRecord 按采样率产数据（录屏器 read 循环
- * 的节奏被数据生产速率约束）；替换层若即时返回全量，循环空转（CPU
- * 飙升 / 虚拟时长超速 = 替换特征）。模型：登记时刻起虚拟产出线性增长
- * （bytesPerSecond = 采样率×帧字节），read 消费不得超前——BLOCKING
- * 模式 sleep 差值补齐，NON_BLOCKING 模式按可用量返回（可为 0，原生
- * 允许部分读取）
+ * 虚拟时钟 pacing（仅 REPLACE）：真实 AudioRecord 按采样率产数据（录屏
+ * 器 read 循环的节奏被数据生产速率约束）；替换层若即时返回全量，循环
+ * 空转（CPU 飙升 / 虚拟时长超速 = 替换特征）。模型：登记时刻起虚拟产出
+ * 线性增长（bytesPerSecond = 采样率×帧字节），read 消费不得超前——
+ * BLOCKING 模式 sleep 差值补齐，NON_BLOCKING 模式按可用量返回（可为 0，
+ * 原生允许部分读取）。MIX 无需 pacing——数据即真实的（chain.proceed
+ * 原生节奏），混合不改变量与时序
  *
  * fail-safe 全链：填充失败（read-only buffer 等极端态）返回 0 静默——
  * 绝不 fail-open 到原生 read（真实音频泄漏）；未登记实例原生放行。
@@ -105,37 +89,21 @@ object AudioRecordReplaceHook {
     private val records = Collections.synchronizedMap(WeakHashMap<Any, RecState>())
 
     /**
-     * 已打过"首次 native read"决定性诊断的实例（弱引用，随实例回收）。
-     * 未登记实例首次 native_read 无条件打点（区分"read hook 没触发"与
-     * "触发但被策略忽略"）——read 懒登记 miss 时每实例仅一条
-     */
-    private val readSeen: MutableSet<Any> =
-        Collections.newSetFromMap(Collections.synchronizedMap(WeakHashMap<Any, Boolean>()))
-
-    /**
-     * 采集实例的替换会话。虚拟时钟模型：clockStart 起产出线性增长，
-     * consumedBytes 记累计消费——可用量 = produced - consumed（负值
-     * 钳 0，消费永不超前）
+     * 采集实例的替换会话。REPLACE 的虚拟时钟模型：clockStart 起产出线性
+     * 增长，consumedBytes 记累计消费——可用量 = produced - consumed（负值
+     * 钳 0，消费永不超前）。MIX 无时钟（真实数据原生节奏，只改内容）
      */
     private class RecState(
+        val policy: Int,           // HookConfig.AUDIO_REPLACE / AUDIO_MIX
+        val videoId: String?,      // 声音源 = 替换视频音轨；null = 数据落空（REPLACE→静音 / MIX→原声）
+        val sampleRate: Int,
+        val channels: Int,
         val clockStart: Long,
         val bytesPerSecond: Long,
-        val audioId: String?,
         @Volatile var consumedBytes: Long = 0L,
+        @Volatile var positionFrames: Long = 0L,  // 假音频帧位（跟随已产帧数）
         var logged: Boolean = false,
     )
-
-    /** 构造诊断日志限流（每进程每腿最多 N 条——录屏器冷启动 + 每次录屏各一条足够） */
-    private val buildDiagCount = java.util.concurrent.atomic.AtomicInteger()
-    private val ctorDiagCount = java.util.concurrent.atomic.AtomicInteger()
-
-    private fun buildDiag(msg: String) {
-        if (buildDiagCount.incrementAndGet() <= 4) HookContext.log(Log.INFO, "E3c $msg")
-    }
-
-    private fun ctorDiag(msg: String) {
-        if (ctorDiagCount.incrementAndGet() <= 6) HookContext.log(Log.INFO, "E3c $msg")
-    }
 
     fun installRecorderApp(packageName: String, classLoader: ClassLoader) {
         // ---- 进程过滤（对齐 E3a 模式：scope 按包授权，子进程全量进入）----
@@ -156,60 +124,10 @@ object AudioRecordReplaceHook {
         // 仅 REMOTE_SUBMIX——语音助手热词等录音不可误伤）
         val aggressive = HookContext.kind == HookContext.ProcessKind.RECORDER_APP
 
-        var buildHooked = 0
-        var ctorHooked = 0
         var startHooked = 0
         var readHooked = 0
 
-        // ---- 腿 1：Builder#build（纯诊断：playback capture 构造路径打点）----
-        runCatching {
-            val builderClass = Class.forName("android.media.AudioRecord\$Builder")
-            val buildM = builderClass.getDeclaredMethod("build").apply { isAccessible = true }
-            val capField = runCatching {
-                builderClass.getDeclaredField("mAudioPlaybackCaptureConfig")
-                    .apply { isAccessible = true }
-            }.getOrNull()
-            HookContext.hookE("E3c", buildM).intercept { chain ->
-                val rec = chain.proceed()
-                runCatching {
-                    val cfgSet = capField != null && capField.get(chain.thisObject) != null
-                    buildDiag(
-                        "build() called (capField=${if (capField != null) "resolved" else "missing"}, captureConfig=${if (cfgSet) "set" else "null"})"
-                    )
-                }
-                rec
-            }
-            // 去优化：build() 是小方法，OEM AOT 易内联进调用方——内联调用
-            // 点绕过 hook trampoline（真机实证全天零回调根因）
-            HookContext.deoptimize(buildM)
-            buildHooked++
-        }.onFailure { HookContext.log(Log.WARN, "E3c builder leg error: ${it.message}") }
-
-        // ---- 腿 2：构造器族（纯诊断：构造路径打点，限流）----
-        // 实证录屏器构造路径不落 int 构造器（AudioAttributes 形态）——
-        // 登记已移至 startRecording（会话边界），此处仅观测构造路径。
-        // 构造器去优化（内联绕过根因，见腿 1 注释）
-        runCatching {
-            AudioRecord::class.java.declaredConstructors
-                .forEach { c ->
-                    c.isAccessible = true
-                    val firstIsInt = c.parameterTypes.firstOrNull() == Int::class.javaPrimitiveType
-                    HookContext.hookE("E3c", c).intercept { chain ->
-                        val r = chain.proceed()
-                        runCatching {
-                            val a0 = chain.args.getOrNull(0)
-                            ctorDiag(
-                                "ctor(${c.parameterTypes.joinToString { t -> t.simpleName }}) first=${if (firstIsInt && a0 is Int) "audioSource=$a0" else a0?.javaClass?.simpleName ?: "null"}"
-                            )
-                        }
-                        r
-                    }
-                    HookContext.deoptimize(c)
-                    ctorHooked++
-                }
-        }.onFailure { HookContext.log(Log.WARN, "E3c ctor leg error: ${it.message}") }
-
-        // ---- 腿 3：startRecording（登记点——会话边界）----
+        // ---- 腿 1：startRecording（登记点——会话边界）----
         // 复用实例每次会话必调；新构造实例同样必经。登记 = 策略快照 +
         // 虚拟时钟重置，天然逐会话刷新。strict 宿主用公开 getter
         // getAudioSource() 过滤 REMOTE_SUBMIX，无反射依赖
@@ -239,7 +157,7 @@ object AudioRecordReplaceHook {
                 }
         }.onFailure { HookContext.log(Log.WARN, "E3c start leg error: ${it.message}") }
 
-        // ---- 腿 3b：stop（会话边界收尾——复用实例状态清理）----
+        // ---- 腿 1b：stop（会话边界收尾——复用实例状态清理）----
         // 实证录屏器 AudioRecord 实例跨会话复用：旧 RecState 残留会使
         // 虚拟时钟跨会话累计（静音轨长于实际录制）且策略不刷新。stop
         // 时清 records/ignored → 下一会话 read 懒登记重判（时钟重置）
@@ -260,9 +178,8 @@ object AudioRecordReplaceHook {
                 }
         }.onFailure { HookContext.log(Log.WARN, "E3c stop leg error: ${it.message}") }
 
-        // ---- 腿 4：native_read_in_*（数据出口，Java read 全重载汇聚点）----
-        // 失败路径必须可诊断：未识别布局 WARN（不再静默跳过）+ read=0 时
-        // 全量签名 dump（OEM 改名/改签名一次定位）
+        // ---- 腿 2：native_read_in_*（数据出口，Java read 全重载汇聚点）----
+        // 失败路径必须可诊断：未识别布局 WARN（OEM 改名/改签名一次定位）
         AudioRecord::class.java.declaredMethods
             .filter { it.name.startsWith("native_read_in_") }
             .forEach { m ->
@@ -280,26 +197,10 @@ object AudioRecordReplaceHook {
                         val rec = chain.thisObject
                         var st = records[rec]
                         if (st == null) {
-                            // 决定性诊断：每实例首次 native_read 无条件打点（不做
-                            // 任何过滤）——区分"read hook 根本没触发"（OEM 走
-                            // C++ 采集路径，Java AudioRecord 只是状态壳或不
-                            // 存在）与"触发但 bps=0 被静默忽略"。下一轮日志
-                            // 靠这一行定生死
-                            if (readSeen.add(rec)) {
-                                runCatching {
-                                    val r = rec as? AudioRecord
-                                    HookContext.log(
-                                        Log.INFO,
-                                        "E3c first native read on ${m.name} " +
-                                                "(src=${r?.audioSource}, rate=${r?.sampleRate}, ch=${r?.channelCount}, " +
-                                                "fmt=${r?.audioFormat}, state=${r?.recordingState})"
-                                    )
-                                }
-                            }
                             // 懒登记兜底：native 方法不可内联（JNI 调用必经
                             // entry point），read 必然触发——Java 登记腿
-                            // （构造器/startRecording）被 OEM AOT 内联绕过时
-                            // 由此补位。miss 才走判定，热路径 O(1)
+                            // （startRecording）被 OEM AOT 内联绕过时由此
+                            // 补位。miss 才走判定，热路径 O(1)
                             lazyRegister(rec)
                             st = records[rec] ?: return@intercept chain.proceed()
                         }
@@ -318,15 +219,27 @@ object AudioRecordReplaceHook {
                             }
                         } else READ_BLOCKING
                         val requestBytes = requestUnits.toLong() * layout.elemBytes
+
+                        if (st.policy == HookConfig.AUDIO_MIX) {
+                            // MIX：真实数据原生节奏（proceed），post-call 相加
+                            // 假音频（落空回落原声）
+                            val real = chain.proceed()
+                            if (real is Int && real > 0) {
+                                mixInto(chain.args.getOrNull(layout.dataIdx), st, real.toLong() * layout.elemBytes)
+                            }
+                            return@intercept real
+                        }
+
+                        // REPLACE：虚拟时钟 pacing + 假 PCM 覆写（落空静音）
                         val fill = availableBytes(st, mode, requestBytes)
                         if (fill <= 0L) return@intercept 0
                         val off = if (layout.offsetIdx >= 0) {
                             (chain.args.getOrNull(layout.offsetIdx) as? Int) ?: 0
                         } else -1
-                        if (!fillSilence(chain.args.getOrNull(layout.dataIdx), off, fill)) {
+                        if (!fillReplace(chain.args.getOrNull(layout.dataIdx), off, fill, st)) {
                             // 填充失败（read-only buffer 等极端态）：静默 0——
                             // 绝不 fail-open 到原生 read（真实音频泄漏）
-                            HookContext.log(Log.WARN, "E3c silence fill failed, zero returned")
+                            HookContext.log(Log.WARN, "E3c replace fill failed, zero returned")
                             return@intercept 0
                         }
                         st.consumedBytes += fill
@@ -334,7 +247,7 @@ object AudioRecordReplaceHook {
                             st.logged = true
                             HookContext.log(
                                 Log.INFO,
-                                "E3c first read replaced (${fill}B, audio=${st.audioId ?: "mute"}, ${st.bytesPerSecond}B/s)"
+                                "E3c first read replaced (${fill}B, video=${st.videoId ?: "silence"}, ${st.bytesPerSecond}B/s)"
                             )
                         }
                         (fill / layout.elemBytes).toInt()
@@ -345,113 +258,64 @@ object AudioRecordReplaceHook {
                 }
             }
 
-        // 诊断（read=0 时必触发）：AudioRecord 全部声明方法签名 dump——
-        // OEM 改名/改签名一次定位。方法多但一次性、进程冷启动时打一次
-        if (readHooked == 0) {
-            runCatching {
-                val dump = AudioRecord::class.java.declaredMethods
-                    .sortedBy { it.name }
-                    .joinToString("; ") {
-                        "${it.name}(${it.parameterTypes.joinToString { t -> t.simpleName }})"
-                    }
-                HookContext.log(Log.WARN, "E3c read leg empty; AudioRecord methods: $dump")
-            }
-        }
+        // libaudioclient 加载监听：native 腿装配重试（见 startLibAudioClientWatch）
+        startLibAudioClientWatch()
 
-        // native 采集路径探针：Java 层已实证零触发（C++ 采集路径，见
-        // startNativePathProbe 文档）——采样音频 so 加载与采集线程名，
-        // 为 native 层 hook 点设计（libaudioclient AudioRecord::read /
-        // libaaudio AAudioStream_read / 录屏器自研 so）提供一轮实证
-        startNativePathProbe()
-
-        // ---- E3c-N native 腿（C++ AudioRecord 路径，41zaym 实锤）----
-        // ShadowHook inline hook libaudioclient 私有 obtainBuffer（read/
-        // 回调/OBTAIN 三路数据出口汇聚点），post-call 内容替换。装配即
-        // 尝试一次；libaudioclient 尚未加载则探针见其映射后重试（native
-        // 侧按符号幂等）。仅录屏器专用进程——systemui 等宿主进程的普通
+        // ---- E3c-N native 腿（C++ AudioRecord 回调路径，真机实证主路径）----
+        // ShadowHook inline hook libaudioclient 私有 obtainBuffer（汇聚腿）
+        // + processAudioBuffer C 回调拦截（主腿）。装配即尝试一次；
+        // libaudioclient 尚未加载则加载监听见其映射后重试（native 侧按
+        // 符号幂等）。仅录屏器专用进程——systemui 等宿主进程的普通
         // 录音不进入 native 腿
         if (HookContext.kind == HookContext.ProcessKind.RECORDER_APP) {
+            // E3c 音频数据源仓库（REPLACE/MIX 的 PCM 供给）——配置 reload
+            // 失效订阅 + 单槽缓存
+            ReplaceAudioStore.ensureInstalled()
             AudioRecordNativeBridge.install()
         }
 
         HookContext.log(
             Log.INFO,
-            "E3c installed (build=$buildHooked, ctor=$ctorHooked, start=$startHooked, read=$readHooked, aggressive=$aggressive)"
+            "E3c installed (start=$startHooked, read=$readHooked, aggressive=$aggressive)"
         )
     }
 
-    // ==================== native 采集路径探针 ====================
+    // ==================== libaudioclient 加载监听 ====================
 
-    /** 探针单例守卫（模块热重载会重复进入 installRecorderApp） */
-    @Volatile private var probeStarted = false
+    /** 监听单例守卫（模块热重载会重复进入 installRecorderApp） */
+    @Volatile private var watchStarted = false
 
     /**
-     * native 采集路径采样。真机实证（2026-09-13 xsvh5o）：录屏会话带
-     * AAC 音轨、audioserver AudioBoost 全程 SCHED boost 录屏器进程的
-     * 采集线程、native read 腿（不可内联，触发即必然）零触发——Java
-     * AudioRecord 类从未实例化，录屏器走 C++ AudioRecord（libaudioclient）。
-     * 转 native 层拦截前，3s 轮询记录两类增量（会话期间才加载的 so /
-     * 才出现的采集线程，一次性冷启动 dump 拿不到）：
-     * - /proc/self/maps 新增 so：录屏器自有 lib（/data/app/ 路径，可能
-     *   自研采集引擎）+ 系统音频 lib（audioclient/aaudio/opensles/media）
-     * - /proc/self/task/<tid>/comm 新增线程：音频关键词命名（AudioRecord/
-     *   AAudio/采集循环）——揭示采集引擎与承载 so 的对应关系
+     * libaudioclient.so 加载监听 + native 腿装配重试。模块注入早于录屏器
+     * 首次音频使用，libaudioclient 可能尚未加载——ShadowHook 的 pending
+     * task 不会随库加载自动完成（dl 回调已随 linker init 失效），3s 轮询
+     * /proc/self/maps，见其映射即重试 [AudioRecordNativeBridge.install]
+     * （native 侧按符号幂等）并退出
      */
-    private fun startNativePathProbe() {
+    private fun startLibAudioClientWatch() {
         if (HookContext.kind != HookContext.ProcessKind.RECORDER_APP) return
-        if (probeStarted) return
+        if (watchStarted) return
         synchronized(this) {
-            if (probeStarted) return
-            probeStarted = true
+            if (watchStarted) return
+            watchStarted = true
         }
-        val seen = Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
         Thread(
             {
                 while (true) {
-                    runCatching {
-                        java.io.File("/proc/self/maps").readLines().forEach { l ->
-                            val so = SO_PATH.find(l)?.value ?: return@forEach
-                            val name = so.substringAfterLast('/')
-                            val interesting = so.contains("/data/app/") ||
-                                    AUDIO_SO_HINTS.any { name.contains(it, true) }
-                            if (interesting && seen.add(so)) {
-                                HookContext.log(Log.INFO, "E3c native lib loaded: $so")
-                                // E3c-N 装配重试：ShadowHook 解析符号需库在位——
-                                // 装配时 libaudioclient/libaaudio 未加载的场景由
-                                // 此补位（native 侧按符号幂等，重复调用无副作用）
-                                if (name == "libaudioclient.so" || name == "libaaudio.so") {
-                                    AudioRecordNativeBridge.install()
-                                }
-                            }
-                        }
-                        java.io.File("/proc/self/task").listFiles()?.forEach { t ->
-                            runCatching {
-                                val comm = java.io.File(t, "comm").readText().trim()
-                                if (AUDIO_THREAD_HINTS.any { comm.contains(it, true) } &&
-                                    seen.add("t:$comm")
-                                ) {
-                                    HookContext.log(Log.INFO, "E3c capture thread appeared: $comm")
-                                }
-                            }
-                        }
+                    val loaded = runCatching {
+                        java.io.File("/proc/self/maps").readLines()
+                            .any { it.contains("libaudioclient.so") }
+                    }.getOrDefault(false)
+                    if (loaded) {
+                        AudioRecordNativeBridge.install()
+                        return@Thread
                     }
                     runCatching { Thread.sleep(3000) }
                 }
             },
-            "E3cNativeProbe",
+            "E3cLibWatch",
         ).apply { isDaemon = true }.start()
     }
-
-    /** maps 行中的 so 绝对路径（版本后缀如 .so.1 不匹配——Android so 无此形态） */
-    private val SO_PATH = Regex("/\\S+\\.so")
-
-    /** 系统音频相关 so 名关键词（native hook 候选承载库） */
-    private val AUDIO_SO_HINTS = listOf("audioclient", "aaudio", "opensles", "libmedia", "mediandk")
-
-    /** 采集线程名关键词（C++ AudioRecord/AAudio/OpenSLES 及 OEM 命名习惯） */
-    private val AUDIO_THREAD_HINTS = listOf(
-        "audio", "aaudio", "sles", "pcm", "sound", "mic", "voice", "capture", "submix", "record"
-    )
 
     // ==================== 登记与策略快照 ====================
 
@@ -495,14 +359,13 @@ object AudioRecordReplaceHook {
 
     /**
      * 采集实例登记（startRecording 成功或 read 兜底触发，per-会话）。
-     * 策略快照一次（会话锁定语义），独立解析 [HookContext.recordAudioPolicy]
-     * 三态——不从画面替换配置派生。REPLACE 落空（id 未配/悬空）回落静音。
+     * 策略快照一次（会话锁定语义），[HookContext.recordAudioPolicy]
+     * 三态——录屏替换的声音部分（仅录屏视频替换命中时非 OFF）。
+     * REPLACE/MIX 数据源 = [ReplaceAudioStore]
+     * （id 落空：REPLACE 回落静音 / MIX 回落原声）。
      * 冷启动护栏对齐 E3a：录屏器进程可能被 OEM 后台清理杀死，首录时配置
      * 未同步即判定 = 策略漏判，先有界等待。
-     * 探测日志与策略判定分离（真机验收可观测性）：OFF 也记录"拦到采集
-     * 实例"——否则录到真音频时无法区分"腿没拦到实例"（换采集路径/
-     * 字段名不符）与"策略未生效"（配置未同步），排查树断层。
-     * @return true=已登记（MUTE/REPLACE）；false=OFF 放行（调用方可缓存）
+     * @return true=已登记（REPLACE/MIX）；false=OFF 放行（调用方可缓存）
      */
     private fun register(rec: Any, bytesPerSecond: Long): Boolean {
         if (bytesPerSecond <= 0L) return false
@@ -516,15 +379,19 @@ object AudioRecordReplaceHook {
             )
             return false
         }
-        val audioId = if (policy == HookConfig.AUDIO_REPLACE) HookContext.recordAudioId(fg) else null
+        val r = rec as? AudioRecord ?: return false
+        val videoId = HookContext.recordVideoId(fg)
         records[rec] = RecState(
+            policy = policy,
+            videoId = videoId,
+            sampleRate = r.sampleRate,
+            channels = r.channelCount,
             clockStart = SystemClock.elapsedRealtime(),
             bytesPerSecond = bytesPerSecond,
-            audioId = audioId,
         )
         HookContext.log(
             Log.INFO,
-            "E3c registered capture (fg=${fg ?: "?"}, policy=${if (audioId != null) "replace:$audioId" else "mute"}, $bytesPerSecond B/s)"
+            "E3c registered capture (fg=${fg ?: "?"}, policy=${if (policy == HookConfig.AUDIO_REPLACE) "replace" else "mix"}${videoId?.let { ", video:$it" } ?: "(no video)"}, $bytesPerSecond B/s)"
         )
         return true
     }
@@ -576,6 +443,131 @@ object AudioRecordReplaceHook {
             avail = (produced() - st.consumedBytes).coerceAtLeast(0L)
         }
         return avail.coerceAtMost(requestBytes)
+    }
+
+    // ==================== 假音频供给与填充（REPLACE 覆写 / MIX 相加） ====================
+
+    /** PCM 拉取复用缓冲（[ReplaceAudioStore.fill] 输出；按需扩容） */
+    private var pcmBuf: ByteArray = ByteArray(8192)
+
+    /**
+     * 拉取假音频 PCM（I16 交错小端，[bytesRequested] 字节对齐帧边界）。
+     * 数据落空返回 null；成功更新 [RecState.positionFrames]
+     */
+    private fun pullPcm(st: RecState, bytesRequested: Long): ByteArray? {
+        val videoId = st.videoId ?: return null
+        val frameBytes = st.channels * 2
+        if (frameBytes <= 0) return null
+        val frames = (bytesRequested / frameBytes).toInt()
+        if (frames <= 0) return null
+        if (pcmBuf.size < frames * frameBytes) {
+            pcmBuf = ByteArray(frames * frameBytes)
+        }
+        val n = runCatching {
+            ReplaceAudioStore.fill(videoId, st.positionFrames, frames, st.sampleRate, st.channels, pcmBuf)
+        }.getOrDefault(-1)
+        if (n <= 0) return null
+        st.positionFrames += frames
+        return pcmBuf
+    }
+
+    /**
+     * REPLACE 填充：假 PCM 覆写（数据落空 → 静音零值——显式选择替换后
+     * 放行真实音频 = 泄漏）。容器形态分支（byte/short/float 数组 +
+     * direct ByteBuffer；ByteBuffer 绝对索引写，不动 position——Java
+     * 包装层 read(ByteBuffer) 在 native 返回后自行前移，此处前移 =
+     * 双倍偏移）
+     */
+    private fun fillReplace(data: Any?, offset: Int, bytes: Long, st: RecState): Boolean {
+        val pcm = pullPcm(st, bytes)
+        if (pcm == null) return fillSilence(data, offset, bytes)
+        return when (data) {
+            is ByteArray -> {
+                val units = (bytes / 1).toInt().coerceAtMost(pcm.size)
+                if (offset >= 0 && offset + units <= data.size) {
+                    System.arraycopy(pcm, 0, data, offset, units); true
+                } else false
+            }
+            is ShortArray -> {
+                val units = (bytes / 2).toInt().coerceAtMost(pcm.size / 2)
+                if (offset >= 0 && offset + units <= data.size) {
+                    for (i in 0 until units) {
+                        data[offset + i] = ((pcm[i * 2].toInt() and 0xFF) or (pcm[i * 2 + 1].toInt() shl 8)).toShort()
+                    }
+                    true
+                } else false
+            }
+            is FloatArray -> {
+                // 假音频 I16 → float（÷32768 归一）
+                val units = (bytes / 4).toInt().coerceAtMost(pcm.size / 2)
+                if (offset >= 0 && offset + units <= data.size) {
+                    for (i in 0 until units) {
+                        val v = ((pcm[i * 2].toInt() and 0xFF) or (pcm[i * 2 + 1].toInt() shl 8)).toShort()
+                        data[offset + i] = v / 32768f
+                    }
+                    true
+                } else false
+            }
+            is ByteBuffer -> runCatching {
+                if (data.isReadOnly || bytes <= 0L || data.remaining() < bytes) {
+                    return@runCatching false
+                }
+                val units = bytes.toInt().coerceAtMost(pcm.size)
+                val pos = data.position()
+                for (i in 0 until units) data.put(pos + i, pcm[i])
+                true
+            }.getOrDefault(false)
+            else -> false
+        }
+    }
+
+    /**
+     * MIX 混合：真实数据 + 假音频相加（clamp 防削波；数据落空不动 =
+     * 原声）。I16 相加按 short；float 相加后 clamp ±1
+     */
+    private fun mixInto(data: Any?, st: RecState, bytes: Long) {
+        val pcm = pullPcm(st, bytes) ?: return
+        when (data) {
+            is ByteArray -> {
+                val units = (bytes / 1).toInt().coerceAtMost(pcm.size)
+                val samples = units / 2 * 2  // 偶数字节化（I16 样本边界）
+                for (i in 0 until samples step 2) {
+                    val a = ((data[i].toInt() and 0xFF) or (data[i + 1].toInt() shl 8)).toShort()
+                    val b = ((pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)).toShort()
+                    val v = (a + b).toInt().coerceIn(-32768, 32767)
+                    data[i] = (v and 0xFF).toByte()
+                    data[i + 1] = ((v shr 8) and 0xFF).toByte()
+                }
+            }
+            is ShortArray -> {
+                val units = (bytes / 2).toInt().coerceAtMost(pcm.size / 2)
+                for (i in 0 until units) {
+                    val b = ((pcm[i * 2].toInt() and 0xFF) or (pcm[i * 2 + 1].toInt() shl 8)).toShort()
+                    data[i] = (data[i] + b).toInt().coerceIn(-32768, 32767).toShort()
+                }
+            }
+            is FloatArray -> {
+                val units = (bytes / 4).toInt().coerceAtMost(pcm.size / 2)
+                for (i in 0 until units) {
+                    val b = (((pcm[i * 2].toInt() and 0xFF) or (pcm[i * 2 + 1].toInt() shl 8)).toShort()) / 32768f
+                    data[i] = (data[i] + b).coerceIn(-1f, 1f)
+                }
+            }
+            is ByteBuffer -> runCatching {
+                if (data.isReadOnly || bytes <= 0L) return@runCatching
+                val units = bytes.toInt().coerceAtMost(pcm.size)
+                val samples = units / 2 * 2  // 偶数字节化（I16 样本边界）
+                val pos = data.position()
+                for (i in 0 until samples step 2) {
+                    val a = ((data.get(pos + i).toInt() and 0xFF) or (data.get(pos + i + 1).toInt() shl 8)).toShort()
+                    val b = ((pcm[i].toInt() and 0xFF) or (pcm[i + 1].toInt() shl 8)).toShort()
+                    val v = (a + b).toInt().coerceIn(-32768, 32767)
+                    data.put(pos + i, (v and 0xFF).toByte())
+                    data.put(pos + i + 1, ((v shr 8) and 0xFF).toByte())
+                }
+            }.getOrDefault(Unit)
+            else -> Unit
+        }
     }
 
     /**

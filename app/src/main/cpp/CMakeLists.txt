@@ -77,6 +77,14 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
     target_compile_options(audio_replace PRIVATE -fvisibility=hidden -ffunction-sections -fdata-sections)
     target_link_options(audio_replace PRIVATE -Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL -Wl,--discard-all ${SH_PAGE_FLAGS} -Wl,--version-script=${CMAKE_SOURCE_DIR}/mediafx.map)
     target_link_libraries(audio_replace shadowhook log)
+else()
+    # x86/x86_64 不产 libmediafx.so（ABI 守卫见上：ShadowHook 仅支持 ARM，
+    # 模拟器内 Java 桥 loadLibrary 失败即 fail-open）。但 audio_replace
+    # OBJECT 目标仍在 x86 配置真实编译该文件——IDE 的 C/C++ 语言服务
+    # 按编译数据库判定文件归属，无编译命令 = "不属于任何项目目标"误报
+    # （含 HEADER_FILE_ONLY）。文件内部按架构分流 include（x86 走文件内
+    # 桩声明，见 audio_replace.cpp），EXCLUDE_FROM_ALL 保证产物不被使用
+    add_library(audio_replace OBJECT EXCLUDE_FROM_ALL audio_replace.cpp)
 endif()
 
 # vault 独立密钥保管进程（可执行 so，与 libnetsvc.so 同法打包）：

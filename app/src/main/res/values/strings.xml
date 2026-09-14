@@ -136,6 +136,11 @@
     <string name="replace_video_invalid">Not a playable video file</string>
     <string name="replace_video_read_failed">Cannot read the selected video</string>
     <string name="replace_video_importing">Importing video…</string>
+    <string name="record_audio_policy">Sound</string>
+    <string name="audio_policy_off">Keep</string>
+    <string name="audio_policy_replace">Replace</string>
+    <string name="audio_policy_mix">Overlay</string>
+    <string name="audio_policy_hint">Sound of screen-recording replacement: Keep records real audio; Replace swaps in the replacement video\'s own sound (falls back to silence if it has no audio track); Overlay mixes real audio with the replacement video\'s sound (keeps real audio if it has no audio track)</string>
     <string name="save">Save</string>
     <string name="template_apps_hint">Assign apps to templates on the Application page</string>
     <string name="search_apps">Search apps</string>

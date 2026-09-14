@@ -1,8 +1,12 @@
 package fake.screenshot.hooks
 
 import android.graphics.Bitmap
+import android.media.MediaCodec
 import android.media.MediaDataSource
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.media.MediaPlayer
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
@@ -17,6 +21,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.lang.reflect.Method
+import java.nio.ByteBuffer
 import java.security.GeneralSecurityException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -354,15 +359,31 @@ object ReplaceVideoStore {
             return null
         }
         HookContext.log(Log.INFO, "E3b video decrypted ${stats.bytes} bytes in ${ms}ms for $videoId")
-        val player = if (withPlayer) buildPlayer(fd, stats.bytes, videoId) else null
-        if (withPlayer && player == null) {
+        // ---- 音轨剥除（5k5pel 轮实证 2026-09-14）：deselectTrack 对音频轨
+        // 返回 -38（MediaPlayer 的 track select/deselect 仅支持字幕轨，AOSP
+        // 即如此）；usage 白名单 + setVolume(0) 亦被 ColorOS 系统声音采集
+        // 绕过（audioserver 层直采，取样先于应用音量衰减）。唯一可靠封法 =
+        // 解码器源头无音频流：重封装出纯视频副本，音频解码器与 AudioTrack
+        // 根本不存在，任何采集机制都无数据可采。声音由 ReplaceAudioStore
+        // 从视频文件直供 PCM（E3c 三态），播放器只供画面，功能无损。无
+        // 音轨文件零成本直通；失败回落原 fd（画面优先，泄漏风险同旧版）
+        // ----
+        var playFd = fd
+        var playLen = stats.bytes
+        remuxVideoOnly(fd, stats.bytes, videoId)?.let { r ->
             runCatching { Os.close(fd) }
+            playFd = r.fd
+            playLen = r.length
+        }
+        val player = if (withPlayer) buildPlayer(playFd, playLen, videoId) else null
+        if (withPlayer && player == null) {
+            runCatching { Os.close(playFd) }
             return null
         }
         // 第 0 帧（warm 独有，无缝接管前导帧）+ 旋转元数据（中继 reader
         // 定尺寸与 YUV 旋转换算）。提取失败 fail-soft（帧 null / rot 0）
-        val meta = extractMeta(fd, stats.bytes, videoId, wantFrame = withPlayer)
-        Entry(fd, stats.bytes, fingerprintOf(videoId), player, meta.firstFrame, meta.rotation)
+        val meta = extractMeta(playFd, playLen, videoId, wantFrame = withPlayer)
+        Entry(playFd, playLen, fingerprintOf(videoId), player, meta.firstFrame, meta.rotation)
     }.onFailure {
         HookContext.log(Log.WARN, "E3b video load failed for $videoId: ${it.message}")
     }.getOrNull()
@@ -382,6 +403,21 @@ object ReplaceVideoStore {
             p.setLooping(true)
             // 静音铁律：替换视频音频外放 = 替换行为即刻暴露
             p.setVolume(0f, 0f)
+            // 采集排除铁律（2aqwvd 轮实证 2026-09-14：setVolume(0) 挡不住录屏器
+            // 的"系统声音"采集——播放采集在音量衰减前取样，替换视频音轨以
+            // 默认 MEDIA usage 进入采集 = "原声模式出现叠加"的根因；此前的
+            // "叠加测试成功"实为泄漏冒充，E3c 全程零填充）。playback capture
+            // 白名单仅 MEDIA/GAME/UNKNOWN，SONIFICATION 一律不采集——
+            // usage 与音量 0 双保险，可闻面与采集面各自独立封死
+            runCatching {
+                p.setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .build()
+                )
+            }.onFailure {
+                HookContext.log(Log.WARN, "E3b setAudioAttributes failed: ${it.message} (audio capture risk)")
+            }
             // 裁剪铺满 layer buffer（显示空间），无黑边；prepare 前调用
             p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING)
             val latch = CountDownLatch(1)
@@ -402,6 +438,7 @@ object ReplaceVideoStore {
                 null
             } else {
                 HookContext.log(Log.INFO, "E3b warm player prepared ${p.videoWidth}x${p.videoHeight} for $videoId")
+                deselectAudioTracks(p, videoId)
                 p
             }
         } catch (e: Exception) {
@@ -409,6 +446,110 @@ object ReplaceVideoStore {
             null
         }
     }
+
+    /**
+     * 音频轨摘除（n1dncd 轮实证 2026-09-14）：usage 白名单 + setVolume(0)
+     * 双保险后，原声模式产物**仍**含替换视频声音——ColorOS 的"系统声音"
+     * 采集不走 AOSP playback capture 白名单（audioserver 层直采，取样点
+     * 在应用音量衰减与 usage 过滤之前），应用层排除手段全部失效；此前的
+     * "叠加测试成功"实为泄漏冒充。唯一可靠封法 = 源头消灭：prepared 后
+     * deselect 全部音频轨 → NuPlayer 不创建 AudioTrack → AudioFlinger
+     * 无 track → 采集面物理无数据。播放器本就只供画面（声音由
+     * ReplaceAudioStore 从视频文件直供 PCM，E3c 三态填充），对功能无损。
+     * fail-soft：单轨 deselect 失败仅记录（usage/音量 0 兜底仍在）
+     */
+    fun deselectAudioTracks(p: MediaPlayer, videoId: String) {
+        runCatching {
+            val tracks = p.trackInfo
+            var deselected = 0
+            for (i in tracks.indices) {
+                if (tracks[i].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                    runCatching { p.deselectTrack(i) }
+                        .onSuccess { deselected++ }
+                        .onFailure {
+                            HookContext.log(
+                                Log.WARN,
+                                "E3b deselectTrack #$i failed: ${it.message} (capture leak risk)"
+                            )
+                        }
+                }
+            }
+            HookContext.log(Log.INFO, "E3b audio tracks deselected ($deselected audio in ${tracks.size} tracks) for $videoId")
+        }.onFailure {
+            HookContext.log(Log.WARN, "E3b audio deselect failed: ${it.message} (capture leak risk)")
+        }
+    }
+
+    /** 纯视频重封装结果（fd 归调用方，offset 已归零） */
+    private class RemuxResult(val fd: FileDescriptor, val length: Long)
+
+    /**
+     * 音轨剥除重封装（[loadEntry] 音轨剥除的实现）：MediaExtractor 选中
+     * 视频轨 → MediaMuxer(MPEG_4) 逐 sample 复制（无转码，csd/时戳/同步
+     * 帧标记原样保留，纯 IO ~百 ms 级）到新 memfd。
+     * - 无视频轨（无从重封装）/ 无音轨（无需剥除）/ muxer 失败 → null
+     *   （调用方回落原 fd，fail-soft 画面优先）
+     * - fd 所有权：MediaExtractor 的 FileSource 与 MediaMuxer 均内部
+     *   dup，不接管传入 fd；输出 memfd（muxer 构造 dup 一份自用）归
+     *   调用方
+     */
+    private fun remuxVideoOnly(srcFd: FileDescriptor, srcLen: Long, videoId: String): RemuxResult? = runCatching {
+        val extractor = MediaExtractor()
+        try {
+            Os.lseek(srcFd, 0, OsConstants.SEEK_SET)
+            extractor.setDataSource(srcFd)
+            var videoTrack = -1
+            var hasAudio = false
+            for (i in 0 until extractor.trackCount) {
+                when (extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.substringBefore('/')) {
+                    "video" -> if (videoTrack < 0) videoTrack = i
+                    "audio" -> hasAudio = true
+                }
+            }
+            if (videoTrack < 0 || !hasAudio) return null
+
+            val outFd = memfdCreateFn?.invoke("sf_e3b_vid_silent") ?: return null
+            val muxer = MediaMuxer(outFd, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            try {
+                val fmt = extractor.getTrackFormat(videoTrack)
+                // 旋转元数据保留（MMR/播放器宽高换位语义不变）
+                if (fmt.containsKey(MediaFormat.KEY_ROTATION)) {
+                    runCatching { muxer.setOrientationHint(fmt.getInteger(MediaFormat.KEY_ROTATION)) }
+                }
+                val outTrack = muxer.addTrack(fmt)
+                muxer.start()
+                extractor.selectTrack(videoTrack)
+                val maxIn = if (fmt.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    fmt.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE).coerceAtLeast(1 shl 20)
+                } else 1 shl 20
+                val buf = ByteBuffer.allocateDirect(maxIn)
+                val info = MediaCodec.BufferInfo()
+                var samples = 0
+                while (extractor.advance()) {
+                    val size = extractor.readSampleData(buf, 0)
+                    if (size <= 0) break
+                    info.set(
+                        0, size, extractor.sampleTime,
+                        // SAMPLE_FLAG_SYNC 与 muxer 的 FLAG_SYNC_FRAME 同值(1)，位直传
+                        extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC
+                    )
+                    muxer.writeSampleData(outTrack, buf, info)
+                    samples++
+                }
+                muxer.stop()
+                Os.lseek(outFd, 0, OsConstants.SEEK_SET)
+                val len = Os.fstat(outFd).st_size
+                HookContext.log(Log.INFO, "E3b video remuxed silent-only ($samples samples, ${len}B from ${srcLen}B) for $videoId")
+                RemuxResult(outFd, len)
+            } finally {
+                runCatching { muxer.release() }
+            }
+        } finally {
+            runCatching { extractor.release() }
+        }
+    }.onFailure {
+        HookContext.log(Log.WARN, "E3b silent remux failed for $videoId: ${it.message} (capture leak risk)")
+    }.getOrNull()
 
     /** 元数据提取结果：第 0 帧（可空）+ 容器旋转 */
     private class Meta(val firstFrame: Bitmap?, val rotation: Int)

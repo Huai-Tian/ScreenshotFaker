@@ -108,10 +108,13 @@ object HookContext {
             else -> "off"
         }
         val audio = when {
-            c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null -> "global"
-            c.templates.any { it.recordAudioPolicy == HookConfig.AUDIO_REPLACE && it.recordAudioId != null } -> "template"
-            c.globalRecordAudioPolicy == HookConfig.AUDIO_MUTE ||
-                    c.templates.any { it.recordAudioPolicy == HookConfig.AUDIO_MUTE } -> "mute"
+            c.globalRecordVideoEnabled && c.globalRecordVideoId != null &&
+                    c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE -> "global-replace"
+            c.globalRecordVideoEnabled && c.globalRecordVideoId != null &&
+                    c.globalRecordAudioPolicy == HookConfig.AUDIO_MIX -> "global-mix"
+            c.templates.any { it.recordVideoId != null && it.recordAudioPolicy != HookConfig.AUDIO_OFF } -> "template"
+            c.globalRecordAudioPolicy != HookConfig.AUDIO_OFF ||
+                    c.templates.any { it.recordAudioPolicy != HookConfig.AUDIO_OFF } -> "policy-novideo"
             else -> "off"
         }
         return "templates=${c.templates.size}, replace=$replace, video=$video, audio=$audio, " +
@@ -392,47 +395,37 @@ object HookContext {
     }
 
     /**
-     * E3c：前台者的音频策略三态（**独立解析，不从画面替换配置派生**——
-     * "音频替换"与"仅视频图像替换"是用户的独立选择）。显式模板策略 >
+     * E3c：前台者的音频策略三态（**录屏替换的声音部分**——仅当该前台者
+     * 的录屏视频替换命中（[recordVideoId] 非空）时生效；录屏替换未命中
+     * 时音频不干预，不存在独立的"音频替换"功能）。显式模板策略 >
      * 全局策略（同 [screenshotPolicy] 的"更具体者胜"）
      */
-    fun recordAudioPolicy(fgPkg: String?): Int =
-        config.templateFor(fgPkg)?.recordAudioPolicy ?: config.globalRecordAudioPolicy
-
-    /**
-     * E3c：前台者的替换音频 id（仅策略为 REPLACE 时消费；REPLACE 落空
-     * 时调用方回落静音——显式选择替换后放行真实音频 = 泄漏）。优先级：
-     * 前台者显式模板音频 > 全局音频（全局策略为 REPLACE 时）。模板策略
-     * REPLACE 但模板 id 落空的回落链经此自然衔接（模板 null → 全局 id）
-     */
-    fun recordAudioId(fgPkg: String?): String? {
-        val c = config
-        c.templateFor(fgPkg)?.recordAudioId?.let { return it }
-        if (c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null) {
-            return c.globalRecordAudioId
-        }
-        return null
+    fun recordAudioPolicy(fgPkg: String?): Int {
+        if (recordVideoId(fgPkg) == null) return HookConfig.AUDIO_OFF
+        return config.templateFor(fgPkg)?.recordAudioPolicy ?: config.globalRecordAudioPolicy
     }
 
-    /** E3c：配置内全部待替换音频 id（预热/失效口径，音频 store 消费）。
-     *  仅含策略 REPLACE 且已配 id 的条目（MUTE/OFF 不引用音频内容） */
+    /**
+     * E3c：配置内**声音策略激活的替换视频 id**（[ReplaceAudioStore]
+     * 预热/失效口径——声音源 = 替换视频自带音轨，id 即视频 id）。
+     * 含录屏视频替换已命中（模板绑视频 / 全局视频开启且已配置）且音频
+     * 策略 REPLACE/MIX 的条目（OFF 不引用音频内容）
+     */
     fun activeAudioIds(): Set<String> {
         val c = config
         return buildSet {
             c.templates.forEach {
-                if (it.recordAudioPolicy == HookConfig.AUDIO_REPLACE) {
-                    it.recordAudioId?.let { id -> add(id) }
+                if (it.recordVideoId != null && it.recordAudioPolicy != HookConfig.AUDIO_OFF) {
+                    add(it.recordVideoId)
                 }
             }
-            if (c.globalRecordAudioPolicy == HookConfig.AUDIO_REPLACE && c.globalRecordAudioId != null) {
-                add(c.globalRecordAudioId)
+            if (c.globalRecordVideoEnabled && c.globalRecordVideoId != null &&
+                c.globalRecordAudioPolicy != HookConfig.AUDIO_OFF
+            ) {
+                add(c.globalRecordVideoId)
             }
         }
     }
-
-    /** E3c 音频远程文件读取（音频 store 消费，包内可见） */
-    fun openRemoteAudio(name: String): android.os.ParcelFileDescriptor? =
-        runCatching { module?.openRemoteFile(name) }.getOrNull()
 
     /**
      * E3 图片远程文件读取（[ReplaceImageStore] 消费，包内可见）。
