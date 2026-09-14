@@ -47,7 +47,8 @@ It allows you to customize how your personal information is protected during scr
   Page protection against screenshot‑based configuration leakage;  
   Supports automatic high‑strength encryption for screenshot and screen recording files;  
   Filenames support full randomization (Random characters and length);  
-  All port communications are secured with high‑strength encryption;
+  All port communications are secured with high‑strength encryption;  
+  Data transmission for problem feedback employs dynamic end-to-end encryption.
 
 - **Ultimate duress protection**  
   Supports an in-app password and a duress password. Entering the duress password triggers hardware key destruction, rendering the data immediately and permanently unusable.  
