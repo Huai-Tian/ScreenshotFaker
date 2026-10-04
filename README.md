@@ -96,53 +96,81 @@ This project's core functionality relies on **LSPosed** and **Shizuku**:
 - Hide the desktop icon and reopen the app through a reliable method.
 - Reinstall with a custom package name and app attributes.
 
----
+## 🚫 Non-Commercial Statement
 
-## 🚫 Non‑Commercial Statement
+This project was started by the developer out of personal interest and is
+**non-commercial** in nature:
 
-This project is initiated by the developer out of personal interest and for technical research purposes, and is **non-commercial** in nature:
+- **Permanently free**: no paid features, memberships, subscriptions, or in-app purchases
+- **No sponsorship channels**: the author has never opened sponsorship channels and accepts no donations of any kind
+- **Research & privacy-oriented**: positioned as a personal-privacy research tool, not a commercial product
 
-- **Permanently Free**:  
-  This project is completely free, with **no paid features, memberships, subscriptions, or in-app purchases**. All features are fully accessible to all users.
+**License is GPL-3.0 only — no commercial exceptions.** This project is
+offered under the terms of the GPL-3.0 (see [LICENSE](LICENSE)), and **every
+use must comply with that license in full**. What GPL requires — source
+availability and the same license for derivatives — is exactly what it means
+to use this project. **Commercial use that cannot accept GPL terms does not
+have the author's authorization**: the author does not offer, and will not
+negotiate, dual licensing, commercial exceptions, or proprietary
+redistribution. Reselling builds for profit while ignoring GPL obligations
+is copyright infringement.
 
-- **No Sponsorship Channels**:  
-  The author has **never opened any sponsorship channels**, nor does the author **accept any financial donations** — to maintain the project's neutrality and purity.
+- **Attribution and statement integrity**:  
+  Redistribution of unmodified builds is permitted only together with this
+  statement and proper attribution. **Removing, altering, or obscuring this
+  non-commercial statement when redistributing is prohibited.**
+- **Official channels only**:  
+  Obtain the app **only** from this repository (GitHub) or its official
+  Releases. Builds from any other source are unofficial, unverified, and used
+  entirely at the downloader's own risk.
 
-- **Non-Profit Purpose**:  
-  This project involves no commercial operations, and the author derives no direct or indirect financial benefit from it.
+## ⚠️ Disclaimer
 
-- **Research-Oriented**:  
-  This project is consistently positioned for **security research, privacy protection, and software testing** — providing a research tool for the community, not a commercial product. Any commercial use of this project is the user's own initiative and is unrelated to this project.
+> **This tool is dual-use. It exists to protect YOUR privacy on YOUR device.
+> Using it against devices you do not own, or to deceive people about content
+> you promised to show, is misuse the author explicitly condemns.**
 
-- **Resale Prohibited**:  
-  Resale, redistribution for profit, or commercial use of this project is strictly prohibited. Please obtain it only from this repository (GitHub) or other officially designated channels. The developer assumes no responsibility for any issues arising from unofficial sources.
-
----
-
-## ⚖️ Disclaimer
-
-- **Purpose Limitation**:  
-  This project is intended for **privacy protection, security research, software testing, and educational purposes** only.  
-  Do not use this project for any illegal purposes (including but not limited to exam cheating, data falsification, and financial fraud).
-
-- **Consequences Warning**:  
-  Bypassing screenshot detection with this software **may violate the terms of service of third-party applications**, and may result in account suspension, device restrictions, or other losses.  
-  You should assess the risks before using it. The developer and contributors **are not responsible for any account bans, device restrictions, asset losses, or other consequences** arising from such use.
-
-- **No Warranty**:  
-  This software is provided under the terms of its license, **without any express or implied warranties**, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
-
-- **Compatibility Disclaimer**:  
-  This software **does not guarantee full compatibility with all OS versions, device models, or third-party applications**. The developer assumes no responsibility for functional issues or losses caused by system differences, application updates, or other uncontrollable factors.
-
-- **Limitation of Liability**:  
-  To the fullest extent permitted by applicable law, **in no event shall the author or contributors be liable** for any direct, indirect, incidental, special, or consequential damages arising out of or in connection with the use or inability to use this software, even if advised of the possibility of such damages.
-
-- **User Responsibility**:  
-  Users assume all legal responsibilities arising from the use of this project.
-
-- **Final Interpretation**:  
-  The final interpretation of this disclaimer belongs to the author of this project.
+- **Purpose limitation**:  
+  This project is intended for **protecting the user's own privacy, security
+  research, and educational purposes** — controlling what untrusted apps may
+  capture from YOUR OWN screen. Do not use it for any illegal purpose,
+  **including but not limited to exam cheating, evidence falsification,
+  financial fraud, or capturing content on devices you do not own or without
+  the owner's consent**.
+- **Anti-stalkerware stance**:  
+  This tool's stealth features (hidden icon, custom package name, persistence
+  after uninstall) exist to protect the USER from being coerced into
+  surrendering their privacy — NOT to enable covert monitoring of others.
+  **Deploying this tool on another person's device without their knowledge
+  is categorically misuse**, may be illegal (stalking, wiretapping, or
+  computer-misuse laws), and the author provides no support for such use.
+- **Third-party ToS and jurisdiction**:  
+  Bypassing screenshot/recording detection **may violate the terms of service
+  of third-party applications and the laws of your jurisdiction**. It is the
+  user's sole responsibility to determine legality before use. The developer
+  is not responsible for account bans, device restrictions, asset freezes,
+  or any other consequences.
+- **Duress features are best-effort**:  
+  The duress password and timeout self-destruct are defensive conveniences,
+  **not guaranteed anti-forensics**. A sufficiently capable adversary with
+  physical access may circumvent them. Do not rely on them as your only
+  protection for life-critical secrets.
+- **No warranty**:  
+  This software is provided under GPL-3.0, **without any express or implied
+  warranties**, including merchantability, fitness for a particular purpose,
+  and non-infringement. Nothing here is a promise of undetectability or of
+  data recoverability after self-destruct.
+- **Limitation of liability**:  
+  To the fullest extent permitted by applicable law, **the author and
+  contributors are not liable** for any damages arising from the use or
+  inability to use this software, including but not limited to data loss
+  (including self-destruct-triggered loss), legal consequences, or security
+  incidents.
+- **User responsibility**:  
+  Users assume all legal responsibilities arising from their use of this
+  project, and from obtaining it from any channel.
+- **Final interpretation**:  
+  The final interpretation of this disclaimer belongs to the author.
 
 ---
 

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # NDK 与本地钉死的 28.2.13676358 精确一致
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;28.2.13676358" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # 第一步：先独立构建 scrcpy 模块（产出 libextsvr.so）
+      # 这样 app 的 preBuild → injectScrcpyAsLib 直接拿现成产物，
+      # 避免嵌套 gradlew 在 CI 上的 daemon/锁风险
+      - run: chmod +x gradlew
+      - run: ./gradlew :scrcpy:assembleRelease --no-daemon
+
+      # 第二步：构建主 APK（CMake/NDK 原生部分 + 注入 scrcpy 产物）
+      - run: ./gradlew :app:assembleRelease --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: app/build/outputs/apk/release/*.apk
