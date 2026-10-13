@@ -16,7 +16,7 @@ It allows you to customize how your personal information is protected during scr
 
 - **Protect private content from being captured in screenshots**  
   Prevents screenshot services from capturing sensitive on-screen content and allows users to replace it with a custom image.  
-  Prevents screen recording services from capturing sensitive content; supports custom video stream replacement (local or network).  
+  Prevents screen recording services from capturing sensitive content; supports custom video stream replacement.  
   Supports configuring specific Freeform floating windows to be excluded from screenshot and screen recording capture.  
   Supports disabling screenshots for sensitive apps that allow them.
 
